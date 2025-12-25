@@ -2,8 +2,6 @@
 
 pub mod commands;
 
-use anyhow::Result;
-
 /// Parsed input from user
 #[derive(Debug)]
 pub enum Input {

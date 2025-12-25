@@ -36,6 +36,10 @@ pub enum ModelBackend {
         endpoint: String,
         model: String,
     },
+    /// Mock backend for testing - echoes input with prefix
+    Mock {
+        prefix: String,
+    },
 }
 
 /// Registry of available models

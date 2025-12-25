@@ -15,11 +15,20 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
 
-# MCP client (to holler, exa, etc) and server (expose to Claude Code)
-baton = { path = "../hootenanny/crates/baton", features = ["client"] }
+# MCP client/server via rmcp (official Rust SDK)
+# - client + transport-streamable-http-client-reqwest for connecting to holler
+# - server + transport-streamable-http-server for exposing tools to Claude Code
+rmcp = { version = "0.12", features = [
+    "client",
+    "server",
+    "macros",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+    "transport-streamable-http-server-session",
+] }
 
-# LLM via OpenAI-compatible API (llama.cpp on :2020)
-async-openai = "0.25"
+# LLM via multi-provider genai (supports Ollama/llama.cpp, Claude, Gemini, etc)
+genai = "0.3"
 
 # Persistence
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -42,6 +51,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Utilities
 uuid = { version = "1", features = ["v4"] }
 dashmap = "6"
+
+# HTTP server for MCP
+axum = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"
