@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
 use sshwarma::mcp::McpClients;
+use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::ModelRegistry;
 use sshwarma::player::PlayerSession;
 use sshwarma::world::World;
@@ -34,6 +35,8 @@ pub struct Config {
     pub mcp_endpoints: Vec<String>,
     /// Allow any key when no users registered (dev mode)
     pub allow_open_registration: bool,
+    /// MCP server port for Claude Code (0 = disabled)
+    pub mcp_server_port: u16,
 }
 
 impl Default for Config {
@@ -45,17 +48,18 @@ impl Default for Config {
             llm_endpoint: "http://localhost:2020".to_string(),
             mcp_endpoints: vec!["http://localhost:8080/mcp".to_string()],
             allow_open_registration: true,
+            mcp_server_port: 2223,
         }
     }
 }
 
 /// The shared world state
 pub struct SharedState {
-    pub world: RwLock<World>,
-    pub db: Database,
+    pub world: Arc<RwLock<World>>,
+    pub db: Arc<Database>,
     pub config: Config,
-    pub llm: LlmClient,
-    pub models: ModelRegistry,
+    pub llm: Arc<LlmClient>,
+    pub models: Arc<ModelRegistry>,
     pub mcp: McpClients,
 }
 
@@ -865,14 +869,33 @@ async fn main() -> Result<()> {
     info!("{} rooms loaded from database", saved_rooms.len());
 
     let mcp = McpClients::new();
+
+    // Wrap shared resources in Arc for sharing between SSH and MCP servers
+    let world = Arc::new(RwLock::new(world));
+    let db = Arc::new(db);
+    let llm = Arc::new(llm);
+    let models = Arc::new(models);
+
     let state = Arc::new(SharedState {
-        world: RwLock::new(world),
-        db,
+        world: world.clone(),
+        db: db.clone(),
         config: config.clone(),
-        llm,
-        models,
+        llm: llm.clone(),
+        models: models.clone(),
         mcp,
     });
+
+    // Start MCP server for Claude Code if port is configured
+    if config.mcp_server_port > 0 {
+        let mcp_state = Arc::new(McpServerState {
+            world: world.clone(),
+            db: db.clone(),
+            llm: llm.clone(),
+            models: models.clone(),
+        });
+        let _mcp_handle = mcp_server::start_mcp_server(config.mcp_server_port, mcp_state).await?;
+        info!(port = config.mcp_server_port, "MCP server started");
+    }
 
     let mut server = SshServer { state };
 
