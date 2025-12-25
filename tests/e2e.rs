@@ -18,9 +18,12 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
 use sshwarma::mcp::McpClients;
+use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::{ModelBackend, ModelHandle, ModelRegistry};
+use sshwarma::world::World;
 
 // ============================================================================
 // Test MCP Server
@@ -349,5 +352,247 @@ async fn test_multiple_mcp_connections() -> Result<()> {
     assert_eq!(tools.len(), 3);
 
     clients.disconnect("server2").await?;
+    Ok(())
+}
+
+// ============================================================================
+// Sshwarma MCP Server Tests
+// ============================================================================
+
+/// Start sshwarma MCP server with test state
+async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<()>)> {
+    // Create temporary database
+    let db = Database::open(":memory:").expect("failed to create test db");
+
+    // Create test model registry with mock backend
+    let mut models = ModelRegistry::new();
+    models.register(ModelHandle {
+        short_name: "test".to_string(),
+        display_name: "Test Model".to_string(),
+        backend: ModelBackend::Mock {
+            prefix: "[test]".to_string(),
+        },
+        available: true,
+    });
+
+    let state = Arc::new(McpServerState {
+        world: Arc::new(tokio::sync::RwLock::new(World::new())),
+        db: Arc::new(db),
+        llm: Arc::new(LlmClient::new()?),
+        models: Arc::new(models),
+    });
+
+    // Find a free port
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    drop(listener); // Release port for mcp_server to use
+
+    let url = format!("http://127.0.0.1:{}/mcp", port);
+    let handle = mcp_server::start_mcp_server(port, state).await?;
+
+    // Give server time to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    Ok((url, handle))
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_list_rooms_empty() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    let result = clients.call_tool("list_rooms", serde_json::json!({})).await?;
+    assert!(result.content.contains("No partylines exist yet"));
+    assert!(!result.is_error);
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_create_room() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create a room
+    let result = clients.call_tool("create_room", serde_json::json!({
+        "name": "test-room",
+        "description": "A test partyline"
+    })).await?;
+    assert!(result.content.contains("Created room 'test-room'"));
+    assert!(!result.is_error);
+
+    // List rooms should now show it
+    let result = clients.call_tool("list_rooms", serde_json::json!({})).await?;
+    assert!(result.content.contains("test-room"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_say_and_history() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create a room first
+    clients.call_tool("create_room", serde_json::json!({"name": "chat-room"})).await?;
+
+    // Send a message
+    let result = clients.call_tool("say", serde_json::json!({
+        "room": "chat-room",
+        "message": "Hello from Claude!",
+        "sender": "claude"
+    })).await?;
+    assert!(result.content.contains("claude: Hello from Claude!"));
+    assert!(!result.is_error);
+
+    // Get history
+    let result = clients.call_tool("get_history", serde_json::json!({
+        "room": "chat-room",
+        "limit": 10
+    })).await?;
+    assert!(result.content.contains("Hello from Claude!"));
+    assert!(result.content.contains("claude"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_list_models() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    let result = clients.call_tool("list_models", serde_json::json!({})).await?;
+    assert!(result.content.contains("test"));
+    assert!(result.content.contains("Test Model"));
+    assert!(!result.is_error);
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_ask_model() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Ask the mock model
+    let result = clients.call_tool("ask_model", serde_json::json!({
+        "model": "test",
+        "message": "What is 2+2?"
+    })).await?;
+    // Mock model echoes with prefix
+    assert!(result.content.contains("test:"));
+    assert!(result.content.contains("What is 2+2?"));
+    assert!(!result.is_error);
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_ask_model_with_room_context() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create room and add some context
+    clients.call_tool("create_room", serde_json::json!({"name": "context-room"})).await?;
+    clients.call_tool("say", serde_json::json!({
+        "room": "context-room",
+        "message": "We're discussing math",
+        "sender": "alice"
+    })).await?;
+
+    // Ask model with room context
+    let result = clients.call_tool("ask_model", serde_json::json!({
+        "model": "test",
+        "message": "What were we discussing?",
+        "room": "context-room"
+    })).await?;
+    // Model response should be recorded in room
+    assert!(result.content.contains("test:"));
+    assert!(!result.is_error);
+
+    // History should now have the model's response
+    let result = clients.call_tool("get_history", serde_json::json!({
+        "room": "context-room"
+    })).await?;
+    assert!(result.content.contains("alice"));
+    assert!(result.content.contains("test")); // model name in history
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_tool_listing() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    let tools = clients.list_tools().await;
+
+    // Should have all 6 sshwarma tools
+    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(tool_names.contains(&"list_rooms"));
+    assert!(tool_names.contains(&"get_history"));
+    assert!(tool_names.contains(&"say"));
+    assert!(tool_names.contains(&"ask_model"));
+    assert!(tool_names.contains(&"list_models"));
+    assert!(tool_names.contains(&"create_room"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_error_cases() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Say to non-existent room
+    let result = clients.call_tool("say", serde_json::json!({
+        "room": "no-such-room",
+        "message": "Hello"
+    })).await?;
+    assert!(result.content.contains("does not exist"));
+
+    // Get history from non-existent room
+    let result = clients.call_tool("get_history", serde_json::json!({
+        "room": "no-such-room"
+    })).await?;
+    assert!(result.content.contains("No messages"));
+
+    // Ask unknown model
+    let result = clients.call_tool("ask_model", serde_json::json!({
+        "model": "unknown-model",
+        "message": "Hello"
+    })).await?;
+    assert!(result.content.contains("Unknown model"));
+
+    // Create room with invalid name
+    let result = clients.call_tool("create_room", serde_json::json!({
+        "name": "invalid name with spaces!"
+    })).await?;
+    assert!(result.content.contains("can only contain"));
+
+    clients.disconnect("sshwarma").await?;
     Ok(())
 }
