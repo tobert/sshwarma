@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
     let key = load_or_generate_host_key(&config)?;
     let russh_config = russh::server::Config {
         keys: vec![key],
+        inactivity_timeout: Some(std::time::Duration::from_secs(20 * 60)),
         ..Default::default()
     };
 
