@@ -1,0 +1,47 @@
+[package]
+name = "sshwarma"
+version = "0.1.0"
+edition = "2021"
+description = "SSH-accessible partyline for humans and models"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# SSH server
+russh = "0.56"
+rand = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# MCP client (to holler, exa, etc) and server (expose to Claude Code)
+baton = { path = "../hootenanny/crates/baton", features = ["client"] }
+
+# LLM via OpenAI-compatible API (llama.cpp on :2020)
+async-openai = "0.25"
+
+# Persistence
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+dashmap = "6"
+
+[dev-dependencies]
+tokio-test = "0.4"
