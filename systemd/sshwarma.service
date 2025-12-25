@@ -1,0 +1,16 @@
+[Unit]
+Description=sshwarma SSH partyline for humans and models
+Documentation=https://github.com/tobert/sshwarma
+
+[Service]
+Type=simple
+WorkingDirectory=%h/src/sshwarma
+ExecStart=%h/src/sshwarma/target/release/sshwarma
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
