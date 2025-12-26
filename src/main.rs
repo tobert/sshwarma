@@ -1,8 +1,8 @@
-//! sshwarma - SSH-accessible partyline for humans and models
+//! sshwarma - SSH-accessible collaborative space for humans and models
 //!
 //! A MUD-style REPL where users connect via SSH and collaborate with
-//! AI models in shared "partylines" (rooms). Plain text is chat,
-//! /commands control navigation and tools, @mentions address models.
+//! AI models in shared rooms. Plain text is chat, /commands control
+//! navigation and tools, @mentions address models.
 
 use anyhow::{Context, Result};
 use russh::server::Server as _;

@@ -1,7 +1,7 @@
 //! MCP server for exposing sshwarma tools to Claude Code
 //!
 //! This module provides an MCP server that allows Claude Code to interact
-//! with sshwarma partylines - listing rooms, viewing history, sending messages.
+//! with sshwarma rooms - listing rooms, viewing history, sending messages.
 
 use anyhow::Result;
 use rmcp::{
@@ -96,13 +96,13 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "List all available partylines (rooms)")]
+    #[tool(description = "List all available rooms")]
     async fn list_rooms(&self, Parameters(_params): Parameters<ListRoomsParams>) -> String {
         let world = self.state.world.read().await;
         let rooms = world.list_rooms();
 
         if rooms.is_empty() {
-            return "No partylines exist yet.".to_string();
+            return "No rooms exist yet.".to_string();
         }
 
         let mut output = String::new();
@@ -260,7 +260,7 @@ impl SshwarmaMcpServer {
         output
     }
 
-    #[tool(description = "Create a new partyline (room)")]
+    #[tool(description = "Create a new room")]
     async fn create_room(&self, Parameters(params): Parameters<CreateRoomParams>) -> String {
         // Validate room name
         if !params.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
@@ -297,7 +297,7 @@ impl ServerHandler for SshwarmaMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "sshwarma MCP server - interact with collaborative partylines. \
+                "sshwarma MCP server - interact with collaborative rooms. \
                  Use list_rooms to see rooms, get_history to see conversations, \
                  say to send messages, and ask_model to chat with AI models."
                     .into(),

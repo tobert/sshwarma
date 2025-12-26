@@ -1,9 +1,9 @@
 //! Communication: say, tell, broadcast
 
-use crate::world::{Message, MessageContent, Partyline, Sender};
+use crate::world::{Message, MessageContent, Room, Sender};
 
 /// Send a chat message to a room
-pub fn say(room: &mut Partyline, username: &str, message: &str) -> String {
+pub fn say(room: &mut Room, username: &str, message: &str) -> String {
     room.add_message(
         Sender::User(username.to_string()),
         MessageContent::Chat(message.to_string()),
@@ -12,7 +12,7 @@ pub fn say(room: &mut Partyline, username: &str, message: &str) -> String {
 }
 
 /// Send a private message (tell) to a user or model
-pub fn tell(room: &mut Partyline, from: &str, to: &str, message: &str) -> String {
+pub fn tell(room: &mut Room, from: &str, to: &str, message: &str) -> String {
     room.add_message(
         Sender::User(from.to_string()),
         MessageContent::Tell {

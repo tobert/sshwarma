@@ -1,9 +1,14 @@
 //! Persistence: sqlite for sessions, history, room state
 
 use anyhow::Result;
+use chrono::Utc;
 use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
+use uuid::Uuid;
+
+use crate::world::{AssetBinding, Inspiration, JournalEntry, JournalKind};
 
 /// Database handle (thread-safe via Mutex)
 pub struct Database {
@@ -88,6 +93,63 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room);
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
             CREATE INDEX IF NOT EXISTS idx_artifacts_room ON artifacts(room);
+
+            -- Room context (extends rooms table)
+            CREATE TABLE IF NOT EXISTS room_context (
+                room TEXT PRIMARY KEY,
+                vibe TEXT,
+                parent TEXT,
+                FOREIGN KEY (room) REFERENCES rooms(name),
+                FOREIGN KEY (parent) REFERENCES rooms(name)
+            );
+
+            CREATE TABLE IF NOT EXISTS journal_entries (
+                id TEXT PRIMARY KEY,
+                room TEXT NOT NULL,
+                author TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                content TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_journal_room ON journal_entries(room);
+            CREATE INDEX IF NOT EXISTS idx_journal_kind ON journal_entries(kind);
+
+            CREATE TABLE IF NOT EXISTS asset_bindings (
+                room TEXT NOT NULL,
+                role TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                notes TEXT,
+                bound_by TEXT NOT NULL,
+                bound_at TEXT NOT NULL,
+                PRIMARY KEY (room, role),
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
+
+            CREATE TABLE IF NOT EXISTS room_exits (
+                from_room TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                to_room TEXT NOT NULL,
+                PRIMARY KEY (from_room, direction),
+                FOREIGN KEY (from_room) REFERENCES rooms(name),
+                FOREIGN KEY (to_room) REFERENCES rooms(name)
+            );
+
+            CREATE TABLE IF NOT EXISTS room_tags (
+                room TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (room, tag),
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
+
+            CREATE TABLE IF NOT EXISTS room_inspirations (
+                id TEXT PRIMARY KEY,
+                room TEXT NOT NULL,
+                content TEXT NOT NULL,
+                added_by TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
             "#,
         )?;
 
@@ -377,6 +439,397 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    // =========================================================================
+    // Room Context
+    // =========================================================================
+
+    /// Set the vibe for a room
+    pub fn set_vibe(&self, room: &str, vibe: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO room_context (room, vibe) VALUES (?1, ?2) \
+             ON CONFLICT(room) DO UPDATE SET vibe = ?2",
+            params![room, vibe],
+        )?;
+        Ok(())
+    }
+
+    /// Get the vibe for a room
+    pub fn get_vibe(&self, room: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT vibe FROM room_context WHERE room = ?1")?;
+        let mut rows = stmt.query(params![room])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the parent room (for fork DAG)
+    pub fn get_parent(&self, room: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT parent FROM room_context WHERE room = ?1")?;
+        let mut rows = stmt.query(params![room])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Set the parent room (for fork DAG)
+    pub fn set_parent(&self, room: &str, parent: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO room_context (room, parent) VALUES (?1, ?2) \
+             ON CONFLICT(room) DO UPDATE SET parent = ?2",
+            params![room, parent],
+        )?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Journal Entries
+    // =========================================================================
+
+    /// Add a journal entry
+    pub fn add_journal_entry(
+        &self,
+        room: &str,
+        author: &str,
+        content: &str,
+        kind: JournalKind,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let timestamp = Utc::now().to_rfc3339();
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO journal_entries (id, room, author, timestamp, content, kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, room, author, timestamp, content, kind.as_str()],
+        )?;
+        Ok(id)
+    }
+
+    /// Get journal entries for a room
+    pub fn get_journal_entries(
+        &self,
+        room: &str,
+        kind: Option<JournalKind>,
+        limit: usize,
+    ) -> Result<Vec<JournalEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut entries = Vec::new();
+
+        if let Some(k) = kind {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, author, content, kind FROM journal_entries \
+                 WHERE room = ?1 AND kind = ?2 ORDER BY timestamp DESC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![room, k.as_str(), limit], |row| {
+                let kind_str: String = row.get(4)?;
+                Ok(JournalEntry {
+                    id: row.get(0)?,
+                    timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    author: row.get(2)?,
+                    content: row.get(3)?,
+                    kind: JournalKind::from_str(&kind_str).unwrap_or(JournalKind::Note),
+                })
+            })?;
+            for row in rows {
+                entries.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, author, content, kind FROM journal_entries \
+                 WHERE room = ?1 ORDER BY timestamp DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![room, limit], |row| {
+                let kind_str: String = row.get(4)?;
+                Ok(JournalEntry {
+                    id: row.get(0)?,
+                    timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    author: row.get(2)?,
+                    content: row.get(3)?,
+                    kind: JournalKind::from_str(&kind_str).unwrap_or(JournalKind::Note),
+                })
+            })?;
+            for row in rows {
+                entries.push(row?);
+            }
+        }
+
+        entries.reverse(); // Oldest first
+        Ok(entries)
+    }
+
+    // =========================================================================
+    // Asset Bindings
+    // =========================================================================
+
+    /// Bind an artifact to a room with a semantic role
+    pub fn bind_asset(
+        &self,
+        room: &str,
+        role: &str,
+        artifact_id: &str,
+        notes: Option<&str>,
+        bound_by: &str,
+    ) -> Result<()> {
+        let timestamp = Utc::now().to_rfc3339();
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO asset_bindings (room, role, artifact_id, notes, bound_by, bound_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(room, role) DO UPDATE SET artifact_id = ?3, notes = ?4, bound_by = ?5, bound_at = ?6",
+            params![room, role, artifact_id, notes, bound_by, timestamp],
+        )?;
+        Ok(())
+    }
+
+    /// Unbind an asset from a room
+    pub fn unbind_asset(&self, room: &str, role: &str) -> Result<bool> {
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM asset_bindings WHERE room = ?1 AND role = ?2",
+            params![room, role],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get a specific asset binding
+    pub fn get_asset_binding(&self, room: &str, role: &str) -> Result<Option<AssetBinding>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT artifact_id, role, notes, bound_by, bound_at FROM asset_bindings \
+             WHERE room = ?1 AND role = ?2",
+        )?;
+        let mut rows = stmt.query(params![room, role])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(AssetBinding {
+                artifact_id: row.get(0)?,
+                role: row.get(1)?,
+                notes: row.get(2)?,
+                bound_by: row.get(3)?,
+                bound_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List all asset bindings for a room
+    pub fn list_asset_bindings(&self, room: &str) -> Result<Vec<AssetBinding>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT artifact_id, role, notes, bound_by, bound_at FROM asset_bindings \
+             WHERE room = ?1 ORDER BY role",
+        )?;
+        let rows = stmt.query_map(params![room], |row| {
+            Ok(AssetBinding {
+                artifact_id: row.get(0)?,
+                role: row.get(1)?,
+                notes: row.get(2)?,
+                bound_by: row.get(3)?,
+                bound_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+        let mut bindings = Vec::new();
+        for row in rows {
+            bindings.push(row?);
+        }
+        Ok(bindings)
+    }
+
+    // =========================================================================
+    // Room Exits
+    // =========================================================================
+
+    /// Add an exit from one room to another
+    pub fn add_exit(&self, from_room: &str, direction: &str, to_room: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO room_exits (from_room, direction, to_room) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(from_room, direction) DO UPDATE SET to_room = ?3",
+            params![from_room, direction, to_room],
+        )?;
+        Ok(())
+    }
+
+    /// Remove an exit
+    pub fn remove_exit(&self, from_room: &str, direction: &str) -> Result<bool> {
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM room_exits WHERE from_room = ?1 AND direction = ?2",
+            params![from_room, direction],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get all exits from a room
+    pub fn get_exits(&self, room: &str) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT direction, to_room FROM room_exits WHERE from_room = ?1",
+        )?;
+        let rows = stmt.query_map(params![room], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut exits = HashMap::new();
+        for row in rows {
+            let (dir, target) = row?;
+            exits.insert(dir, target);
+        }
+        Ok(exits)
+    }
+
+    // =========================================================================
+    // Room Tags
+    // =========================================================================
+
+    /// Add a tag to a room
+    pub fn add_tag(&self, room: &str, tag: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO room_tags (room, tag) VALUES (?1, ?2)",
+            params![room, tag],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a tag from a room
+    pub fn remove_tag(&self, room: &str, tag: &str) -> Result<bool> {
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM room_tags WHERE room = ?1 AND tag = ?2",
+            params![room, tag],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get all tags for a room
+    pub fn get_tags(&self, room: &str) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT tag FROM room_tags WHERE room = ?1")?;
+        let rows = stmt.query_map(params![room], |row| row.get(0))?;
+        let mut tags = HashSet::new();
+        for row in rows {
+            tags.insert(row?);
+        }
+        Ok(tags)
+    }
+
+    // =========================================================================
+    // Room Inspirations
+    // =========================================================================
+
+    /// Add an inspiration to a room
+    pub fn add_inspiration(&self, room: &str, content: &str, added_by: &str) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let timestamp = Utc::now().to_rfc3339();
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO room_inspirations (id, room, content, added_by, added_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, room, content, added_by, timestamp],
+        )?;
+        Ok(id)
+    }
+
+    /// Get all inspirations for a room
+    pub fn get_inspirations(&self, room: &str) -> Result<Vec<Inspiration>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, content, added_by, added_at FROM room_inspirations \
+             WHERE room = ?1 ORDER BY added_at",
+        )?;
+        let rows = stmt.query_map(params![room], |row| {
+            Ok(Inspiration {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                added_by: row.get(2)?,
+                added_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+        let mut inspirations = Vec::new();
+        for row in rows {
+            inspirations.push(row?);
+        }
+        Ok(inspirations)
+    }
+
+    // =========================================================================
+    // Fork DAG
+    // =========================================================================
+
+    /// Fork a room, creating a child with inherited context
+    pub fn fork_room(&self, source: &str, new_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        // Create the new room
+        conn.execute(
+            "INSERT INTO rooms (name, description, created_at) \
+             SELECT ?1, description, ?2 FROM rooms WHERE name = ?3",
+            params![new_name, now, source],
+        )?;
+
+        // Copy vibe and set parent
+        conn.execute(
+            "INSERT INTO room_context (room, vibe, parent) \
+             SELECT ?1, vibe, ?2 FROM room_context WHERE room = ?2",
+            params![new_name, source],
+        )?;
+
+        // If source had no context, create one with just parent
+        conn.execute(
+            "INSERT OR IGNORE INTO room_context (room, parent) VALUES (?1, ?2)",
+            params![new_name, source],
+        )?;
+
+        // Copy tags
+        conn.execute(
+            "INSERT INTO room_tags (room, tag) \
+             SELECT ?1, tag FROM room_tags WHERE room = ?2",
+            params![new_name, source],
+        )?;
+
+        // Copy asset bindings with fresh timestamps
+        conn.execute(
+            "INSERT INTO asset_bindings (room, role, artifact_id, notes, bound_by, bound_at) \
+             SELECT ?1, role, artifact_id, notes, bound_by, ?2 FROM asset_bindings WHERE room = ?3",
+            params![new_name, now, source],
+        )?;
+
+        // Copy inspirations
+        conn.execute(
+            "INSERT INTO room_inspirations (id, room, content, added_by, added_at) \
+             SELECT ?1 || '-' || id, ?2, content, added_by, added_at \
+             FROM room_inspirations WHERE room = ?3",
+            params![Uuid::new_v4().to_string(), new_name, source],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get the ancestry chain for a room (parent, grandparent, etc.)
+    pub fn get_ancestry(&self, room: &str) -> Result<Vec<String>> {
+        let mut ancestry = Vec::new();
+        let mut current = room.to_string();
+
+        loop {
+            if let Some(parent) = self.get_parent(&current)? {
+                ancestry.push(parent.clone());
+                current = parent;
+            } else {
+                break;
+            }
+        }
+
+        Ok(ancestry)
     }
 }
 

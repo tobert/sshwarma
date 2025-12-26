@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-/// A model that can be addressed in a partyline
+/// A model that can be addressed in a room
 #[derive(Debug, Clone)]
 pub struct ModelHandle {
     /// Short name for @mentions (e.g., "qwen-8b")

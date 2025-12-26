@@ -404,7 +404,7 @@ async fn test_sshwarma_mcp_list_rooms_empty() -> Result<()> {
     clients.connect("sshwarma", &url).await?;
 
     let result = clients.call_tool("list_rooms", serde_json::json!({})).await?;
-    assert!(result.content.contains("No partylines exist yet"));
+    assert!(result.content.contains("No rooms exist yet"));
     assert!(!result.is_error);
 
     clients.disconnect("sshwarma").await?;
@@ -421,7 +421,7 @@ async fn test_sshwarma_mcp_create_room() -> Result<()> {
     // Create a room
     let result = clients.call_tool("create_room", serde_json::json!({
         "name": "test-room",
-        "description": "A test partyline"
+        "description": "A test room"
     })).await?;
     assert!(result.content.contains("Created room 'test-room'"));
     assert!(!result.is_error);

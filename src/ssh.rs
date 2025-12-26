@@ -2,11 +2,13 @@
 
 use anyhow::Result;
 use russh::server::{self, Msg, Session};
-use russh::{Channel, ChannelId, CryptoVec};
+use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::ansi::EscapeParser;
+use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
 
@@ -24,7 +26,9 @@ impl server::Server for SshServer {
         SshHandler {
             state: self.state.clone(),
             player: None,
-            line_buffer: String::new(),
+            editor: LineEditor::new(),
+            esc_parser: EscapeParser::new(),
+            term_size: (80, 24),
         }
     }
 
@@ -37,7 +41,12 @@ impl server::Server for SshServer {
 pub struct SshHandler {
     pub state: Arc<SharedState>,
     pub player: Option<PlayerSession>,
-    pub line_buffer: String,
+    /// Rich line editor with history and cursor movement
+    pub editor: LineEditor,
+    /// Escape sequence parser for arrow keys, etc.
+    pub esc_parser: EscapeParser,
+    /// Terminal dimensions (cols, rows)
+    pub term_size: (u16, u16),
 }
 
 impl server::Handler for SshHandler {
@@ -98,6 +107,37 @@ impl server::Handler for SshHandler {
         Ok(true)
     }
 
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.term_size = (col_width as u16, row_height as u16);
+        self.editor.set_width(col_width as u16);
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.term_size = (col_width as u16, row_height as u16);
+        self.editor.set_width(col_width as u16);
+        Ok(())
+    }
+
     async fn shell_request(
         &mut self,
         channel: ChannelId,
@@ -109,7 +149,7 @@ impl server::Handler for SshHandler {
                  \x1b[1;36m│           sshwarma                  │\x1b[0m\r\n\
                  \x1b[1;36m╰─────────────────────────────────────╯\x1b[0m\r\n\r\n\
                  Welcome, {}.\r\n\r\n\
-                 /rooms to list partylines, /join <room> to enter\r\n\r\n\
+                 /rooms to list rooms, /join <room> to enter\r\n\r\n\
                  \x1b[33mlobby>\x1b[0m ",
                 player.username
             );
@@ -125,37 +165,70 @@ impl server::Handler for SshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         for &byte in data {
-            match byte {
-                // Enter/Return
-                b'\r' | b'\n' => {
-                    if !self.line_buffer.is_empty() {
-                        let input = std::mem::take(&mut self.line_buffer);
-                        let response = self.handle_input(&input).await;
-                        let prompt = self
-                            .player
-                            .as_ref()
-                            .map(|p| p.prompt())
-                            .unwrap_or_else(|| "lobby>".to_string());
-                        let output = format!("\r\n{}\r\n\x1b[33m{}\x1b[0m ", response, prompt);
-                        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
-                    }
-                }
-                // Backspace
-                127 | 8 => {
-                    if !self.line_buffer.is_empty() {
-                        self.line_buffer.pop();
-                        let _ = session.data(channel, CryptoVec::from(b"\x08 \x08".as_slice()));
-                    }
-                }
-                // Printable characters
-                32..=126 => {
-                    self.line_buffer.push(byte as char);
-                    let _ = session.data(channel, CryptoVec::from([byte].as_slice()));
-                }
-                // Ignore other control characters
-                _ => {}
+            // Parse through escape sequence handler
+            if let Some(event) = self.esc_parser.feed(byte) {
+                let action = self.editor.handle_event(event);
+                self.handle_editor_action(channel, session, action).await?;
             }
         }
         Ok(())
+    }
+}
+
+impl SshHandler {
+    /// Handle editor action result
+    async fn handle_editor_action(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+        action: EditorAction,
+    ) -> Result<(), anyhow::Error> {
+        match action {
+            EditorAction::None => {}
+            EditorAction::Redraw => {
+                let prompt = self.get_prompt();
+                let output = self.editor.render(&prompt);
+                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            }
+            EditorAction::Execute(line) => {
+                // Echo newline, execute command, show response with new prompt
+                let _ = session.data(channel, CryptoVec::from(b"\r\n".as_slice()));
+
+                let response = self.handle_input(&line).await;
+                let prompt = self.get_prompt();
+
+                // Response with proper line endings, then prompt
+                let output = format!("{}\r\n\x1b[33m{}\x1b[0m ", response, prompt);
+                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            }
+            EditorAction::Tab => {
+                // TODO: Tab completion
+                // For now, just beep
+                let _ = session.data(channel, CryptoVec::from(b"\x07".as_slice()));
+            }
+            EditorAction::ClearScreen => {
+                // Clear screen and redraw prompt
+                let prompt = self.get_prompt();
+                let output = format!("\x1b[2J\x1b[H\x1b[33m{}\x1b[0m ", prompt);
+                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            }
+            EditorAction::Quit => {
+                // Send goodbye and close
+                let _ = session.data(
+                    channel,
+                    CryptoVec::from(b"\r\nGoodbye!\r\n".as_slice()),
+                );
+                session.close(channel)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Get current prompt string
+    fn get_prompt(&self) -> String {
+        self.player
+            .as_ref()
+            .map(|p| p.prompt())
+            .unwrap_or_else(|| "lobby>".to_string())
     }
 }

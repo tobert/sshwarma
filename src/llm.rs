@@ -105,7 +105,7 @@ impl LlmClient {
     }
 
     /// Generate flavor text for room descriptions
-    pub async fn generate_flavor(&self, model: &ModelHandle, context: &RoomContext) -> Result<String> {
+    pub async fn generate_flavor(&self, model: &ModelHandle, context: &FlavorContext) -> Result<String> {
         let prompt = format!(
             "Generate a brief, evocative 2-3 sentence description of this collaborative space. \
              Be creative but grounded. No fantasy elements.\n\n\
@@ -151,7 +151,7 @@ impl Default for LlmClient {
 }
 
 /// Context for flavor text generation
-pub struct RoomContext {
+pub struct FlavorContext {
     pub room_name: String,
     pub users: Vec<String>,
     pub models: Vec<String>,

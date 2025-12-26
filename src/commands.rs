@@ -37,10 +37,10 @@ impl SshHandler {
     fn cmd_help(&self) -> String {
         r#"
 Navigation:
-  /rooms              List partylines
-  /join <room>        Enter a partyline
+  /rooms              List rooms
+  /join <room>        Enter a room
   /leave              Return to lobby
-  /create <name>      New partyline
+  /create <name>      New room
 
 Looking:
   /look               Room summary
@@ -71,9 +71,9 @@ MCP:
         let world = self.state.world.read().await;
         let rooms = world.list_rooms();
         if rooms.is_empty() {
-            "No partylines yet. /create <name> to start one.".to_string()
+            "No rooms yet. /create <name> to start one.".to_string()
         } else {
-            let mut out = "Partylines:\r\n".to_string();
+            let mut out = "Rooms:\r\n".to_string();
             for room in rooms {
                 out.push_str(&format!("  {} ... {} users\r\n", room.name, room.user_count));
             }
@@ -118,7 +118,7 @@ MCP:
             let world = self.state.world.read().await;
             if world.get_room(room_name).is_none() {
                 return format!(
-                    "No partyline named '{}'. Use /create {} to make one.",
+                    "No room named '{}'. Use /create {} to make one.",
                     room_name, room_name
                 );
             }
@@ -187,7 +187,7 @@ MCP:
             let world = self.state.world.read().await;
             if world.get_room(room_name).is_some() {
                 return format!(
-                    "Partyline '{}' already exists. Use /join {} to enter.",
+                    "Room '{}' already exists. Use /join {} to enter.",
                     room_name, room_name
                 );
             }
@@ -217,7 +217,7 @@ MCP:
         }
 
         format!(
-            "Created partyline '{}'.\r\n\r\n{}",
+            "Created room '{}'.\r\n\r\n{}",
             room_name,
             self.cmd_look("").await
         )
@@ -293,7 +293,7 @@ MCP:
                         "Room not found.".to_string()
                     }
                 }
-                None => "═══ Lobby ═══\r\n\r\nYou're in the lobby. Use /rooms to see partylines, /join <room> to enter one.".to_string(),
+                None => "═══ Lobby ═══\r\n\r\nYou're in the lobby. Use /rooms to see rooms, /join <room> to enter one.".to_string(),
             },
             None => "Not authenticated".to_string(),
         }
