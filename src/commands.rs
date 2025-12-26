@@ -513,15 +513,21 @@ MCP:
             serde_json::json!({})
         };
 
-        match self.state.mcp.call_tool(tool_name, args_json).await {
-            Ok(result) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.state.mcp.call_tool(tool_name, args_json),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
                 if result.is_error {
                     format!("Tool error: {}", result.content)
                 } else {
                     result.content.replace('\n', "\r\n")
                 }
             }
-            Err(e) => format!("Error: {}", e),
+            Ok(Err(e)) => format!("Error: {}", e),
+            Err(_) => format!("Tool '{}' timed out after 30s", tool_name),
         }
     }
 
