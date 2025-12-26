@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::ansi::EscapeParser;
+use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
@@ -29,6 +30,9 @@ impl server::Server for SshServer {
             editor: LineEditor::new(),
             esc_parser: EscapeParser::new(),
             term_size: (80, 24),
+            completer: CompletionEngine::new(self.state.clone()),
+            completions: Vec::new(),
+            completion_index: 0,
         }
     }
 
@@ -47,6 +51,12 @@ pub struct SshHandler {
     pub esc_parser: EscapeParser,
     /// Terminal dimensions (cols, rows)
     pub term_size: (u16, u16),
+    /// Completion engine
+    pub completer: CompletionEngine,
+    /// Current completion candidates
+    pub completions: Vec<Completion>,
+    /// Selected completion index
+    pub completion_index: usize,
 }
 
 impl server::Handler for SshHandler {
@@ -186,6 +196,8 @@ impl SshHandler {
         match action {
             EditorAction::None => {}
             EditorAction::Redraw => {
+                // Clear completions when user types
+                self.clear_completions();
                 let prompt = self.get_prompt();
                 let output = self.editor.render(&prompt);
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
@@ -202,9 +214,7 @@ impl SshHandler {
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
             }
             EditorAction::Tab => {
-                // TODO: Tab completion
-                // For now, just beep
-                let _ = session.data(channel, CryptoVec::from(b"\x07".as_slice()));
+                self.handle_tab_completion(channel, session).await?;
             }
             EditorAction::ClearScreen => {
                 // Clear screen and redraw prompt
@@ -230,5 +240,144 @@ impl SshHandler {
             .as_ref()
             .map(|p| p.prompt())
             .unwrap_or_else(|| "lobby>".to_string())
+    }
+
+    /// Handle tab completion
+    async fn handle_tab_completion(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), anyhow::Error> {
+        let line = self.editor.value().to_string();
+        let cursor = self.editor.cursor();
+        let room: Option<String> = self
+            .player
+            .as_ref()
+            .and_then(|p| p.current_room.clone());
+
+        // If we already have completions and user pressed tab again, cycle
+        if !self.completions.is_empty() {
+            self.completion_index = (self.completion_index + 1) % self.completions.len();
+            let ctx = CompletionContext {
+                line: &line,
+                cursor,
+                room: room.as_deref(),
+            };
+            self.apply_completion(channel, session, &ctx)?;
+            return Ok(());
+        }
+
+        // Get fresh completions
+        {
+            let ctx = CompletionContext {
+                line: &line,
+                cursor,
+                room: room.as_deref(),
+            };
+            self.completions = self.completer.complete(&ctx).await;
+        }
+        self.completion_index = 0;
+
+        if self.completions.is_empty() {
+            // No completions, beep
+            let _ = session.data(channel, CryptoVec::from(b"\x07".as_slice()));
+        } else if self.completions.len() == 1 {
+            // Single completion, apply it directly
+            let ctx = CompletionContext {
+                line: &line,
+                cursor,
+                room: room.as_deref(),
+            };
+            self.apply_completion(channel, session, &ctx)?;
+            self.completions.clear();
+        } else {
+            // Multiple completions, show menu and apply first
+            self.show_completion_menu(channel, session)?;
+            let ctx = CompletionContext {
+                line: &line,
+                cursor,
+                room: room.as_deref(),
+            };
+            self.apply_completion(channel, session, &ctx)?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply current completion to the editor
+    fn apply_completion(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+        ctx: &CompletionContext<'_>,
+    ) -> Result<(), anyhow::Error> {
+        if let Some(completion) = self.completions.get(self.completion_index) {
+            let (start, _end) = self.completer.replacement_range(ctx);
+            self.editor.replace_with_completion(start, &completion.text);
+
+            // Add space after completion if it's a command or complete word
+            if completion.text.starts_with('/') || completion.text.starts_with('@') {
+                self.editor.insert_completion(" ");
+            }
+
+            // Redraw the input line
+            let prompt = self.get_prompt();
+            let output = self.editor.render(&prompt);
+            let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+        }
+        Ok(())
+    }
+
+    /// Show completion menu below input
+    fn show_completion_menu(
+        &self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), anyhow::Error> {
+        let mut output = String::new();
+
+        // Save cursor, move to new line
+        output.push_str("\x1b[s\r\n");
+
+        // Show up to 10 completions
+        let max_show = 10.min(self.completions.len());
+        output.push_str("  ╭");
+        output.push_str(&"─".repeat(40));
+        output.push_str("╮\r\n");
+
+        for (i, completion) in self.completions.iter().take(max_show).enumerate() {
+            let marker = if i == self.completion_index {
+                "→"
+            } else {
+                " "
+            };
+            // Truncate label to fit
+            let label: String = completion.label.chars().take(38).collect();
+            output.push_str(&format!("  │{} {:<38}│\r\n", marker, label));
+        }
+
+        if self.completions.len() > max_show {
+            output.push_str(&format!(
+                "  │  ... and {} more{:>21}│\r\n",
+                self.completions.len() - max_show,
+                ""
+            ));
+        }
+
+        output.push_str("  ╰");
+        output.push_str(&"─".repeat(40));
+        output.push_str("╯");
+
+        // Restore cursor
+        output.push_str("\x1b[u");
+
+        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+        Ok(())
+    }
+
+    /// Clear completions state (call when user types something else)
+    pub fn clear_completions(&mut self) {
+        self.completions.clear();
+        self.completion_index = 0;
     }
 }

@@ -6,6 +6,7 @@
 pub mod ansi;
 pub mod commands;
 pub mod comm;
+pub mod completion;
 pub mod config;
 pub mod db;
 pub mod interp;
