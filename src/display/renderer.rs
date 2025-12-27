@@ -56,10 +56,11 @@ pub fn render_entry(entry: &LedgerEntry, config: &RenderConfig) -> String {
             if *kind != StatusKind::Pending {
                 let text = match kind {
                     StatusKind::Pending => unreachable!(),
-                    StatusKind::Thinking => "thinking...",
-                    StatusKind::RunningTool => "running tool...",
-                    StatusKind::Connecting => "connecting...",
-                    StatusKind::Complete => "done",
+                    StatusKind::Thinking => "thinking...".to_string(),
+                    StatusKind::RunningTool(None) => "running tool...".to_string(),
+                    StatusKind::RunningTool(Some(name)) => format!("running {}...", name),
+                    StatusKind::Connecting => "connecting...".to_string(),
+                    StatusKind::Complete => "done".to_string(),
                 };
                 output.push_str(&styles::dim(&format!("({})", text)));
             }

@@ -23,12 +23,13 @@ pub enum EntrySource {
 }
 
 /// Status indicator types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusKind {
     /// Invisible placeholder - will be replaced with content
     Pending,
     Thinking,
-    RunningTool,
+    /// Running a tool, with optional tool name
+    RunningTool(Option<String>),
     Connecting,
     Complete,
 }
@@ -154,6 +155,39 @@ impl Ledger {
     pub fn finalize(&mut self, id: EntryId) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
             entry.mutable = false;
+        }
+    }
+
+    /// Append text to a mutable Chat entry (for streaming)
+    ///
+    /// If the entry is Status, converts it to Chat first.
+    /// Returns false if entry not found or not mutable.
+    pub fn append(&mut self, id: EntryId, text: &str) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id && e.mutable) {
+            match &mut entry.content {
+                EntryContent::Chat(existing) => {
+                    existing.push_str(text);
+                    true
+                }
+                EntryContent::Status(_) => {
+                    // Convert status to chat with the new text
+                    entry.content = EntryContent::Chat(text.to_string());
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Set status on a mutable entry (for tool calls during streaming)
+    pub fn set_status(&mut self, id: EntryId, status: StatusKind) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id && e.mutable) {
+            entry.content = EntryContent::Status(status);
+            true
+        } else {
+            false
         }
     }
 

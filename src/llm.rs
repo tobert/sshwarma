@@ -1,9 +1,12 @@
 //! LLM integration via rig (multi-provider with native tool support)
 
 use anyhow::Result;
+use futures::StreamExt;
+use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::{CompletionClient, Nothing, ProviderClient};
 use rig::completion::Prompt;
 use rig::providers::{anthropic, ollama, openai};
+use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::server::ToolServerHandle;
 use rmcp::service::ServerSink;
 use tokio::sync::mpsc;
@@ -339,6 +342,137 @@ impl LlmClient {
             }
         }
     }
+
+    /// Stream a chat with tools, sending chunks as they arrive
+    ///
+    /// This is the streaming version of `chat_with_tool_server`.
+    /// Sends StreamChunk items through the channel as they arrive.
+    pub async fn stream_with_tool_server(
+        &self,
+        model: &ModelHandle,
+        system_prompt: &str,
+        message: &str,
+        tool_server_handle: ToolServerHandle,
+        tx: mpsc::Sender<StreamChunk>,
+        max_turns: usize,
+    ) -> Result<()> {
+        // Macro to process streaming items - avoids code duplication across providers
+        macro_rules! process_stream {
+            ($stream:expr, $tx:expr) => {{
+                while let Some(item) = $stream.next().await {
+                    match item {
+                        Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                            match content {
+                                StreamedAssistantContent::Text(Text { text }) => {
+                                    let _ = $tx.send(StreamChunk::Text(text)).await;
+                                }
+                                StreamedAssistantContent::ToolCall(tool_call) => {
+                                    let _ = $tx.send(StreamChunk::ToolCall(
+                                        tool_call.function.name.clone()
+                                    )).await;
+                                }
+                                StreamedAssistantContent::ToolCallDelta { .. } => {}
+                                StreamedAssistantContent::Reasoning(_) => {}
+                                StreamedAssistantContent::ReasoningDelta { .. } => {}
+                                StreamedAssistantContent::Final(_) => {}
+                            }
+                        }
+                        Ok(MultiTurnStreamItem::StreamUserItem(
+                            StreamedUserContent::ToolResult(result)
+                        )) => {
+                            let summary = format!("{}: done", result.id);
+                            let _ = $tx.send(StreamChunk::ToolResult(summary)).await;
+                        }
+                        Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
+                        Ok(_) => {} // Handle future non-exhaustive variants
+                        Err(e) => {
+                            let _ = $tx.send(StreamChunk::Error(e.to_string())).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                let _ = $tx.send(StreamChunk::Done).await;
+                Ok(())
+            }};
+        }
+
+        // Handle mock backend for testing
+        if let ModelBackend::Mock { prefix } = &model.backend {
+            let response = format!("{}: {}", prefix, message);
+            let _ = tx.send(StreamChunk::Text(response)).await;
+            let _ = tx.send(StreamChunk::Done).await;
+            return Ok(());
+        }
+
+        match &model.backend {
+            ModelBackend::Ollama { model: model_id, .. } => {
+                let client = self.ollama.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .multi_turn(max_turns)
+                    .await;
+
+                process_stream!(stream, tx)
+            }
+
+            ModelBackend::OpenAI { model: model_id } => {
+                let client = self.openai.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .multi_turn(max_turns)
+                    .await;
+
+                process_stream!(stream, tx)
+            }
+
+            ModelBackend::Anthropic { model: model_id } => {
+                let client = self.anthropic.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .multi_turn(max_turns)
+                    .await;
+
+                process_stream!(stream, tx)
+            }
+
+            ModelBackend::Gemini { .. } => {
+                let _ = tx.send(StreamChunk::Error("Gemini not yet supported".to_string())).await;
+                Ok(())
+            }
+
+            ModelBackend::Mock { prefix } => {
+                let response = format!("{}: {}", prefix, message);
+                let _ = tx.send(StreamChunk::Text(response)).await;
+                let _ = tx.send(StreamChunk::Done).await;
+                Ok(())
+            }
+        }
+    }
+
 
     /// Stream a chat response (no tools)
     ///

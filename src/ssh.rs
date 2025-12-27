@@ -22,15 +22,35 @@ use crate::state::SharedState;
 use crate::prompt::SystemPromptBuilder;
 use crate::world::{MessageContent, Sender};
 
-/// Update from background task to resolve a placeholder
+/// Update from background task for streaming responses
 #[derive(Debug)]
-pub struct LedgerUpdate {
-    /// The placeholder entry ID to update
-    pub placeholder_id: EntryId,
-    /// Model name for display
-    pub model_name: String,
-    /// The response content
-    pub content: String,
+pub enum LedgerUpdate {
+    /// Incremental text chunk (for streaming)
+    Chunk {
+        placeholder_id: EntryId,
+        text: String,
+    },
+    /// Tool being invoked
+    ToolCall {
+        placeholder_id: EntryId,
+        tool_name: String,
+    },
+    /// Tool result received
+    ToolResult {
+        placeholder_id: EntryId,
+        summary: String,
+    },
+    /// Stream completed, finalize the entry
+    Complete {
+        placeholder_id: EntryId,
+        model_name: String,
+    },
+    /// Legacy: complete response (non-streaming)
+    FullResponse {
+        placeholder_id: EntryId,
+        model_name: String,
+        content: String,
+    },
 }
 
 /// SSH server implementation
@@ -285,14 +305,37 @@ async fn push_updates_task(
     term_height: u16,
 ) {
     while let Some(update) = update_rx.recv().await {
-        // Update the ledger entry from Status to Chat
-        {
-            let mut ledger = ledger.lock().await;
-            ledger.update(
-                update.placeholder_id,
-                EntryContent::Chat(update.content.clone()),
-            );
-            ledger.finalize(update.placeholder_id);
+        // Process the update based on type
+        let needs_redraw = match update {
+            LedgerUpdate::Chunk { placeholder_id, text } => {
+                let mut ledger = ledger.lock().await;
+                ledger.append(placeholder_id, &text)
+            }
+            LedgerUpdate::ToolCall { placeholder_id, tool_name } => {
+                let mut ledger = ledger.lock().await;
+                ledger.set_status(placeholder_id, StatusKind::RunningTool(Some(tool_name)))
+            }
+            LedgerUpdate::ToolResult { placeholder_id, summary } => {
+                let mut ledger = ledger.lock().await;
+                // Append tool result summary, then go back to thinking
+                ledger.append(placeholder_id, &format!("\n[{}]\n", summary));
+                ledger.set_status(placeholder_id, StatusKind::Thinking)
+            }
+            LedgerUpdate::Complete { placeholder_id, model_name: _ } => {
+                let mut ledger = ledger.lock().await;
+                ledger.finalize(placeholder_id);
+                true
+            }
+            LedgerUpdate::FullResponse { placeholder_id, model_name: _, content } => {
+                let mut ledger = ledger.lock().await;
+                ledger.update(placeholder_id, EntryContent::Chat(content));
+                ledger.finalize(placeholder_id);
+                true
+            }
+        };
+
+        if !needs_redraw {
+            continue;
         }
 
         // Re-render the full ledger in scroll region
@@ -822,7 +865,7 @@ impl SshHandler {
 
             // Send ledger update to resolve the placeholder
             let _ = update_tx
-                .send(LedgerUpdate {
+                .send(LedgerUpdate::FullResponse {
                     placeholder_id,
                     model_name: model_short,
                     content: response,
