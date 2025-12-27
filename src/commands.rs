@@ -170,26 +170,8 @@ MCP:
                 .update_session_room(&player.session_id, Some(room_name));
         }
 
-        // Build output with room summary and history
-        let mut output = self.cmd_look("").await;
-
-        if let Ok(messages) = self.state.db.recent_messages(room_name, 20) {
-            if !messages.is_empty() {
-                output.push_str("\r\n\r\n─── Recent History ───\r\n");
-                for msg in messages {
-                    let line = format!(
-                        "[{}] {}: {}\r\n",
-                        &msg.timestamp[11..16],
-                        msg.sender_name,
-                        msg.content
-                    );
-                    output.push_str(&line);
-                }
-                output.push_str("──────────────────────\r\n");
-            }
-        }
-
-        output
+        // Return just the room look - history is loaded into ledger separately
+        self.cmd_look("").await
     }
 
     async fn cmd_create(&mut self, args: &str) -> String {
