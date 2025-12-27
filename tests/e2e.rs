@@ -133,6 +133,7 @@ fn create_test_model_registry() -> ModelRegistry {
             prefix: "[mock]".to_string(),
         },
         available: true,
+        system_prompt: None,
     });
 
     registry.register(ModelHandle {
@@ -142,6 +143,7 @@ fn create_test_model_registry() -> ModelRegistry {
             prefix: "I understand".to_string(),
         },
         available: true,
+        system_prompt: None,
     });
 
     registry
@@ -373,6 +375,7 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
             prefix: "[test]".to_string(),
         },
         available: true,
+        system_prompt: None,
     });
 
     let state = Arc::new(McpServerState {

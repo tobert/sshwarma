@@ -29,6 +29,12 @@ struct McpConnection {
     tools: Vec<Tool>,
 }
 
+/// Tools and peer for use with rig agents
+pub struct RigToolContext {
+    pub tools: Vec<Tool>,
+    pub peer: rmcp::service::ServerSink,
+}
+
 impl McpClients {
     pub fn new() -> Self {
         Self {
@@ -155,6 +161,41 @@ impl McpClients {
                 tool_count: conn.tools.len(),
             })
             .collect()
+    }
+
+    /// Get tools and peer for rig agent integration
+    ///
+    /// Returns all tools from all connected MCPs, plus a peer for making calls.
+    /// Note: Currently uses the first connection's peer. Tools from multiple
+    /// MCPs will all be routed through that peer, which may not work correctly
+    /// if tools are spread across multiple servers.
+    ///
+    /// Returns None if no MCPs are connected.
+    pub async fn rig_tools(&self) -> Option<RigToolContext> {
+        let clients = self.clients.read().await;
+
+        // Get first connection to use as the peer
+        let first_conn = clients.values().next()?;
+        let peer = first_conn.service.peer().to_owned();
+
+        // Aggregate all tools from all connections
+        let tools: Vec<Tool> = clients
+            .values()
+            .flat_map(|conn| conn.tools.clone())
+            .collect();
+
+        Some(RigToolContext { tools, peer })
+    }
+
+    /// Get tools and peer for a specific MCP connection
+    pub async fn rig_tools_for(&self, name: &str) -> Option<RigToolContext> {
+        let clients = self.clients.read().await;
+        let conn = clients.get(name)?;
+
+        Some(RigToolContext {
+            tools: conn.tools.clone(),
+            peer: conn.service.peer().to_owned(),
+        })
     }
 }
 

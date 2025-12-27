@@ -1,5 +1,6 @@
 //! REPL command implementations
 
+use crate::ops;
 use crate::ssh::SshHandler;
 use crate::world::{JournalKind, MessageContent, Sender};
 
@@ -97,30 +98,38 @@ MCP:
     }
 
     async fn cmd_rooms(&self) -> String {
-        let world = self.state.world.read().await;
-        let rooms = world.list_rooms();
-        if rooms.is_empty() {
-            "No rooms yet. /create <name> to start one.".to_string()
-        } else {
-            let mut out = "Rooms:\r\n".to_string();
-            for room in rooms {
-                out.push_str(&format!("  {} ... {} users\r\n", room.name, room.user_count));
+        match ops::rooms(&self.state).await {
+            Ok(rooms) => {
+                if rooms.is_empty() {
+                    "No rooms yet. /create <name> to start one.".to_string()
+                } else {
+                    let mut out = "Rooms:\r\n".to_string();
+                    for room in rooms {
+                        out.push_str(&format!("  {} ... {} users\r\n", room.name, room.user_count));
+                    }
+                    out
+                }
             }
-            out
+            Err(e) => format!("Error: {}", e),
         }
     }
 
     async fn cmd_who(&self) -> String {
-        if let Some(ref player) = self.player {
-            if let Some(ref room_name) = player.current_room {
-                let world = self.state.world.read().await;
-                if let Some(room) = world.get_room(room_name) {
-                    let users: Vec<&str> = room.users.iter().map(|s| s.as_str()).collect();
-                    return format!("In {}: {}", room_name, users.join(", "));
+        let room_name = match self.current_room() {
+            Some(r) => r,
+            None => return "Online: you (more coming soon)".to_string(),
+        };
+
+        match ops::who(&self.state, &room_name).await {
+            Ok(users) => {
+                if users.is_empty() {
+                    format!("In {}: (empty)", room_name)
+                } else {
+                    format!("In {}: {}", room_name, users.join(", "))
                 }
             }
+            Err(e) => format!("Error: {}", e),
         }
-        "Online: you (more coming soon)".to_string()
     }
 
     async fn cmd_join(&mut self, args: &str) -> String {
@@ -279,71 +288,75 @@ MCP:
             return format!("You look at '{}'. (detailed inspection coming soon)", args);
         }
 
-        match &self.player {
-            Some(player) => match &player.current_room {
-                Some(room_name) => {
-                    let world = self.state.world.read().await;
-                    if let Some(room) = world.get_room(room_name) {
-                        let mut out = format!("═══ {} ═══\r\n", room_name);
-                        if let Some(ref desc) = room.description {
-                            out.push_str(&format!("{}\r\n", desc));
-                        }
-                        out.push_str("\r\n");
+        let room_name = match self.current_room() {
+            Some(r) => r,
+            None => {
+                return "═══ Lobby ═══\r\n\r\nYou're in the lobby. Use /rooms to see rooms, /join <room> to enter one.".to_string();
+            }
+        };
 
-                        if room.users.is_empty() {
-                            out.push_str("Nobody else is here.\r\n");
-                        } else {
-                            out.push_str(&format!("Users: {}\r\n", room.users.join(", ")));
-                        }
-
-                        if !room.models.is_empty() {
-                            let model_names: Vec<_> =
-                                room.models.iter().map(|m| m.short_name.as_str()).collect();
-                            out.push_str(&format!("Models: {}\r\n", model_names.join(", ")));
-                        }
-
-                        if !room.artifacts.is_empty() {
-                            out.push_str(&format!("Artifacts: {} items\r\n", room.artifacts.len()));
-                        }
-
-                        out
-                    } else {
-                        "Room not found.".to_string()
-                    }
-                }
-                None => "═══ Lobby ═══\r\n\r\nYou're in the lobby. Use /rooms to see rooms, /join <room> to enter one.".to_string(),
-            },
-            None => "Not authenticated".to_string(),
+        match ops::look(&self.state, &room_name).await {
+            Ok(summary) => Self::format_room_summary(&summary),
+            Err(e) => format!("Error: {}", e),
         }
+    }
+
+    /// Format a RoomSummary for TTY display
+    fn format_room_summary(s: &ops::RoomSummary) -> String {
+        let mut out = format!("═══ {} ═══\r\n", s.name);
+
+        if let Some(ref desc) = s.description {
+            out.push_str(&format!("{}\r\n", desc));
+        }
+        out.push_str("\r\n");
+
+        if s.users.is_empty() {
+            out.push_str("Nobody else is here.\r\n");
+        } else {
+            out.push_str(&format!("Users: {}\r\n", s.users.join(", ")));
+        }
+
+        if !s.models.is_empty() {
+            out.push_str(&format!("Models: {}\r\n", s.models.join(", ")));
+        }
+
+        if s.artifact_count > 0 {
+            out.push_str(&format!("Artifacts: {} items\r\n", s.artifact_count));
+        }
+
+        if let Some(ref vibe) = s.vibe {
+            out.push_str(&format!("Vibe: {}\r\n", vibe));
+        }
+
+        if !s.exits.is_empty() {
+            let exit_list: Vec<_> = s.exits.keys().collect();
+            out.push_str(&format!("Exits: {}\r\n", exit_list.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+
+        out
     }
 
     async fn cmd_history(&self, args: &str) -> String {
         let limit: usize = args.trim().parse().unwrap_or(50);
         let limit = limit.min(200);
 
-        let room_name = match &self.player {
-            Some(p) => match &p.current_room {
-                Some(r) => r.clone(),
-                None => return "You need to be in a room to see history.".to_string(),
-            },
-            None => return "Not authenticated".to_string(),
+        let room_name = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to see history.".to_string(),
         };
 
-        match self.state.db.recent_messages(&room_name, limit) {
-            Ok(messages) => {
-                if messages.is_empty() {
+        match ops::history(&self.state, &room_name, limit).await {
+            Ok(entries) => {
+                if entries.is_empty() {
                     "No messages in this room yet.".to_string()
                 } else {
                     let mut output =
-                        format!("─── Last {} messages in {} ───\r\n", messages.len(), room_name);
-                    for msg in messages {
-                        let line = format!(
+                        format!("─── Last {} messages in {} ───\r\n", entries.len(), room_name);
+                    for entry in entries {
+                        output.push_str(&format!(
                             "[{}] {}: {}\r\n",
-                            &msg.timestamp[11..16],
-                            msg.sender_name,
-                            msg.content
-                        );
-                        output.push_str(&line);
+                            entry.timestamp, entry.sender, entry.content
+                        ));
                     }
                     output.push_str("──────────────────────────────\r\n");
                     output
@@ -497,20 +510,24 @@ MCP:
     }
 
     async fn cmd_tools(&self) -> String {
-        let tools = self.state.mcp.list_tools().await;
-        if tools.is_empty() {
-            return "No tools available. Use /mcp connect <name> <url> to add an MCP server."
-                .to_string();
+        match ops::tools(&self.state).await {
+            Ok(tools) => {
+                if tools.is_empty() {
+                    "No tools available. Use /mcp connect <name> <url> to add an MCP server."
+                        .to_string()
+                } else {
+                    let mut output = "Available tools:\r\n".to_string();
+                    for tool in tools {
+                        output.push_str(&format!(
+                            "  {} ({})\r\n    {}\r\n",
+                            tool.name, tool.source, tool.description
+                        ));
+                    }
+                    output
+                }
+            }
+            Err(e) => format!("Error: {}", e),
         }
-
-        let mut output = "Available tools:\r\n".to_string();
-        for tool in tools {
-            output.push_str(&format!(
-                "  {} ({})\r\n    {}\r\n",
-                tool.name, tool.source, tool.description
-            ));
-        }
-        output
     }
 
     async fn cmd_run(&self, args: &str) -> String {
@@ -628,13 +645,13 @@ MCP:
         };
 
         if args.trim().is_empty() {
-            match self.state.db.get_vibe(&room) {
+            match ops::get_vibe(&self.state, &room).await {
                 Ok(Some(vibe)) => format!("Vibe: {}", vibe),
                 Ok(None) => "No vibe set. Use /vibe <text> to set one.".to_string(),
                 Err(e) => format!("Error: {}", e),
             }
         } else {
-            match self.state.db.set_vibe(&room, Some(args.trim())) {
+            match ops::set_vibe(&self.state, &room, args.trim()).await {
                 Ok(_) => format!("Vibe set: {}", args.trim()),
                 Err(e) => format!("Error: {}", e),
             }
@@ -874,7 +891,7 @@ MCP:
             None => return "You need to be in a room to see exits.".to_string(),
         };
 
-        match self.state.db.get_exits(&room) {
+        match ops::exits(&self.state, &room).await {
             Ok(exits) => {
                 if exits.is_empty() {
                     "No exits. Use /dig <direction> to <room> to create one.".to_string()

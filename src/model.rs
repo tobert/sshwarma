@@ -15,6 +15,8 @@ pub struct ModelHandle {
     pub backend: ModelBackend,
     /// Whether this model is currently available
     pub available: bool,
+    /// Custom system prompt for this model
+    pub system_prompt: Option<String>,
 }
 
 /// How to reach this model
@@ -112,6 +114,7 @@ impl ModelRegistry {
             display_name: config.display.clone(),
             backend,
             available: true,
+            system_prompt: config.system_prompt.clone(),
         })
     }
 

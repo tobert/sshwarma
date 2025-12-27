@@ -1,6 +1,7 @@
 //! SSH server and connection handler
 
 use anyhow::Result;
+use rig::tool::server::ToolServer;
 use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::net::SocketAddr;
@@ -14,9 +15,11 @@ use crate::display::{
     DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
     styles::{self, ctrl},
 };
+use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
+use crate::prompt::SystemPromptBuilder;
 use crate::world::{MessageContent, Sender};
 
 /// Update from background task to resolve a placeholder
@@ -739,52 +742,63 @@ impl SshHandler {
         output.push_str(&rendered);
         let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
 
-        // Build context from room history
-        let history = if let Some(ref room_name) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
+        // Build 4-layer system prompt
+        let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
+        let system_prompt = {
             let world = self.state.world.read().await;
-            if let Some(room) = world.get_room(room_name) {
-                room.recent_history(10)
-                    .iter()
-                    .filter_map(|msg| match &msg.content {
-                        MessageContent::Chat(text) => {
-                            let role = match &msg.sender {
-                                Sender::User(_) => "user",
-                                Sender::Model(_) => "assistant",
-                                Sender::System => return None,
-                            };
-                            Some((role.to_string(), text.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
+            let room = room_name.as_ref().and_then(|name| world.get_room(name));
+            SystemPromptBuilder::build(&model, room, &username, None)
         };
 
-        let system_prompt = format!(
-            "You are {} in the sshwarma collaborative chat. \
-             You're conversing with {} and possibly other users. \
-             Be helpful, concise, and friendly. Keep responses under 500 words unless asked for more detail.",
-            model.display_name, username
-        );
+        // Get MCP tools for rig agent
+        let mcp_context = self.state.mcp.rig_tools().await;
+
+        // Build ToolServer with MCP + internal tools
+        let tool_server_handle = {
+            let mut server = ToolServer::new();
+
+            // Add MCP tools if available
+            if let Some(ctx) = &mcp_context {
+                for tool in ctx.tools.iter() {
+                    server = server.rmcp_tool(tool.clone(), ctx.peer.clone());
+                }
+            }
+
+            server.run()
+        };
+
+        // Add internal sshwarma tools if we're in a room
+        if let Some(ref room) = room_name {
+            let tool_ctx = ToolContext {
+                state: self.state.clone(),
+                room: room.clone(),
+                username: username.clone(),
+            };
+            let config = InternalToolConfig::default();
+            let internal_toolset = crate::internal_tools::create_toolset(tool_ctx, &config);
+            // Append internal tools to the running server
+            let _ = tool_server_handle.append_toolset(internal_toolset).await;
+        }
 
         // Clone what we need for the background task
         let llm = self.state.llm.clone();
         let world = self.state.world.clone();
         let db = self.state.db.clone();
         let update_tx = self.update_tx.clone();
-        let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
         let model_short = model.short_name.clone();
         let message_owned = message.to_string();
 
         // Spawn background task - returns immediately
         tokio::spawn(async move {
-            // Get response from model
+            // Get response from model with combined tools
             let response = match llm
-                .chat_with_context(&model, &system_prompt, &history, &message_owned)
+                .chat_with_tool_server(
+                    &model,
+                    &system_prompt,
+                    &message_owned,
+                    tool_server_handle,
+                    100, // max tool turns - our tools are fast
+                )
                 .await
             {
                 Ok(r) => r,

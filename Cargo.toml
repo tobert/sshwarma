@@ -27,8 +27,9 @@ rmcp = { version = "0.12", features = [
     "transport-streamable-http-server-session",
 ] }
 
-# LLM via multi-provider genai (supports Ollama/llama.cpp, Claude, Gemini, etc)
-genai = "0.5.0-alpha"
+# LLM via rig (supports OpenAI, Anthropic, Ollama with native tool support)
+# Using local clone for rmcp 0.12 compatibility (main branch)
+rig-core = { path = "../rig/rig/rig-core", features = ["rmcp"] }
 
 # Persistence
 rusqlite = { version = "0.32", features = ["bundled"] }

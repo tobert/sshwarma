@@ -79,6 +79,8 @@ pub struct ModelConfig {
     /// Whether model is enabled (default true)
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Custom system prompt for this model
+    pub system_prompt: Option<String>,
 }
 
 fn default_enabled() -> bool {

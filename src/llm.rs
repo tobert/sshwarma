@@ -1,11 +1,11 @@
-//! LLM integration via genai (multi-provider)
+//! LLM integration via rig (multi-provider with native tool support)
 
 use anyhow::Result;
-use futures::StreamExt;
-use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatRequest, ChatStreamEvent};
-use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
-use genai::{Client, ServiceTarget};
+use rig::client::{CompletionClient, Nothing, ProviderClient};
+use rig::completion::Prompt;
+use rig::providers::{anthropic, ollama, openai};
+use rig::tool::server::ToolServerHandle;
+use rmcp::service::ServerSink;
 use tokio::sync::mpsc;
 
 use crate::model::{ModelBackend, ModelHandle};
@@ -21,90 +21,83 @@ pub enum StreamChunk {
     Error(String),
 }
 
-/// Client for talking to LLMs via genai
+/// Client for talking to LLMs via rig
+///
+/// Supports OpenAI, Anthropic, and Ollama with native tool calling.
 pub struct LlmClient {
-    client: Client,
+    openai: Option<openai::Client>,
+    anthropic: Option<anthropic::Client>,
+    ollama: Option<ollama::Client>,
+    ollama_endpoint: String,
 }
 
 impl LlmClient {
     /// Create a client with default configuration
+    ///
     /// Uses environment variables for API keys:
     /// - OPENAI_API_KEY for OpenAI/GPT models
     /// - ANTHROPIC_API_KEY for Claude models
-    /// - GEMINI_API_KEY for Gemini models
-    /// - Ollama models don't need a key
+    /// - OLLAMA_API_BASE_URL for Ollama endpoint (default: http://localhost:11434)
     pub fn new() -> Result<Self> {
-        let client = Client::default();
-        Ok(Self { client })
-    }
+        // OpenAI client (optional - only if API key present)
+        let openai = std::env::var("OPENAI_API_KEY").ok().map(|_| {
+            openai::Client::from_env()
+        });
 
-    /// Create a client with a custom Ollama endpoint for local llama.cpp
-    pub fn with_ollama_endpoint(endpoint: &str) -> Result<Self> {
-        // Build endpoint URL with /v1/ suffix for OpenAI-compatible API
-        let ollama_url = if endpoint.ends_with('/') {
-            format!("{}v1/", endpoint)
-        } else {
-            format!("{}/v1/", endpoint)
-        };
+        // Anthropic client (optional)
+        let anthropic = std::env::var("ANTHROPIC_API_KEY").ok().map(|_| {
+            anthropic::Client::from_env()
+        });
 
-        let ollama_endpoint = Endpoint::from_owned(ollama_url);
+        // Ollama client - default to localhost
+        let ollama_endpoint = std::env::var("OLLAMA_API_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
 
-        // Create a resolver that routes Ollama models to our custom endpoint
-        let target_resolver = ServiceTargetResolver::from_resolver_fn(
-            move |service_target: ServiceTarget| -> std::result::Result<ServiceTarget, genai::resolver::Error> {
-                let ServiceTarget { model, endpoint, auth } = service_target;
-
-                // Only override Ollama adapter endpoints
-                if model.adapter_kind == AdapterKind::Ollama {
-                    Ok(ServiceTarget {
-                        endpoint: ollama_endpoint.clone(),
-                        auth: AuthData::from_single("ollama"),
-                        model,
-                    })
-                } else {
-                    // Other adapters use their defaults
-                    Ok(ServiceTarget { endpoint, auth, model })
-                }
-            },
+        let ollama = Some(
+            ollama::Client::builder()
+                .api_key(Nothing)
+                .base_url(&ollama_endpoint)
+                .build()
+                .expect("failed to build ollama client")
         );
 
-        let client = Client::builder()
-            .with_service_target_resolver(target_resolver)
-            .build();
-
-        Ok(Self { client })
+        Ok(Self {
+            openai,
+            anthropic,
+            ollama,
+            ollama_endpoint,
+        })
     }
 
-    /// Get the model identifier string for genai based on backend
-    fn model_id(model: &ModelHandle) -> Option<String> {
-        match &model.backend {
-            ModelBackend::Ollama { model, .. } => Some(model.clone()),
-            ModelBackend::OpenAI { model } => Some(model.clone()),
-            ModelBackend::Anthropic { model } => Some(model.clone()),
-            ModelBackend::Gemini { model } => Some(model.clone()),
-            ModelBackend::Mock { .. } => None, // Mock doesn't use genai
-        }
+    /// Create a client with a custom Ollama endpoint
+    pub fn with_ollama_endpoint(endpoint: &str) -> Result<Self> {
+        let openai = std::env::var("OPENAI_API_KEY").ok().map(|_| {
+            openai::Client::from_env()
+        });
+
+        let anthropic = std::env::var("ANTHROPIC_API_KEY").ok().map(|_| {
+            anthropic::Client::from_env()
+        });
+
+        let ollama = Some(
+            ollama::Client::builder()
+                .api_key(Nothing)
+                .base_url(endpoint)
+                .build()
+                .expect("failed to build ollama client")
+        );
+
+        Ok(Self {
+            openai,
+            anthropic,
+            ollama,
+            ollama_endpoint: endpoint.to_string(),
+        })
     }
 
-    /// Send a message to a model and get a response
+    /// Send a simple message to a model (no tools)
     pub async fn chat(&self, model: &ModelHandle, message: &str) -> Result<String> {
-        // Handle mock backend for testing
-        if let ModelBackend::Mock { prefix } = &model.backend {
-            return Ok(format!("{}: {}", prefix, message));
-        }
-
-        let model_id = Self::model_id(model).expect("non-mock model should have id");
-
-        let chat_req = ChatRequest::new(vec![
-            ChatMessage::user(message),
-        ]);
-
-        let response = self.client.exec_chat(&model_id, chat_req, None).await?;
-        let content = response
-            .into_first_text()
-            .unwrap_or_else(|| "[no response]".to_string());
-
-        Ok(content)
+        self.chat_with_context(model, "", &[], message).await
     }
 
     /// Send a message with system prompt and conversation history
@@ -112,7 +105,7 @@ impl LlmClient {
         &self,
         model: &ModelHandle,
         system_prompt: &str,
-        history: &[(String, String)], // (role, content) pairs
+        _history: &[(String, String)], // TODO: integrate history
         message: &str,
     ) -> Result<String> {
         // Handle mock backend for testing
@@ -120,37 +113,237 @@ impl LlmClient {
             return Ok(format!("{}: {}", prefix, message));
         }
 
-        let model_id = Self::model_id(model).expect("non-mock model should have id");
+        match &model.backend {
+            ModelBackend::Ollama { model: model_id, .. } => {
+                let client = self.ollama.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
 
-        let mut messages = vec![ChatMessage::system(system_prompt)];
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
 
-        // Add conversation history
-        for (role, content) in history {
-            match role.as_str() {
-                "user" => messages.push(ChatMessage::user(content)),
-                "assistant" => messages.push(ChatMessage::assistant(content)),
-                _ => {} // Skip unknown roles
+                let response = agent.prompt(message).await
+                    .map_err(|e| anyhow::anyhow!("ollama error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::OpenAI { model: model_id } => {
+                let client = self.openai.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured - set OPENAI_API_KEY"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let response = agent.prompt(message).await
+                    .map_err(|e| anyhow::anyhow!("openai error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::Anthropic { model: model_id } => {
+                let client = self.anthropic.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured - set ANTHROPIC_API_KEY"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let response = agent.prompt(message).await
+                    .map_err(|e| anyhow::anyhow!("anthropic error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::Gemini { .. } => {
+                // TODO: Add Gemini support when rig adds it
+                Err(anyhow::anyhow!("Gemini not yet supported with rig"))
+            }
+
+            ModelBackend::Mock { prefix } => {
+                Ok(format!("{}: {}", prefix, message))
             }
         }
-
-        // Add the current message
-        messages.push(ChatMessage::user(message));
-
-        let chat_req = ChatRequest::new(messages);
-        let response = self.client.exec_chat(&model_id, chat_req, None).await?;
-        let content = response
-            .into_first_text()
-            .unwrap_or_else(|| "[no response]".to_string());
-
-        Ok(content)
     }
 
-    /// Stream a chat response, sending chunks through the channel as they arrive
+    /// Chat with MCP tools and multi-turn execution
+    ///
+    /// This is the main entry point for tool-enabled LLM calls.
+    /// Uses rig's native rmcp integration for tool handling.
+    pub async fn chat_with_tools(
+        &self,
+        model: &ModelHandle,
+        system_prompt: &str,
+        message: &str,
+        tools: Vec<rmcp::model::Tool>,
+        mcp_peer: ServerSink,
+        max_turns: usize,
+    ) -> Result<String> {
+        // Handle mock backend for testing
+        if let ModelBackend::Mock { prefix } = &model.backend {
+            return Ok(format!("{}: {}", prefix, message));
+        }
+
+        match &model.backend {
+            ModelBackend::Ollama { model: model_id, .. } => {
+                let client = self.ollama.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .rmcp_tools(tools, mcp_peer)
+                    .build();
+
+                let response = agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("ollama error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::OpenAI { model: model_id } => {
+                let client = self.openai.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .rmcp_tools(tools, mcp_peer)
+                    .build();
+
+                let response = agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("openai error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::Anthropic { model: model_id } => {
+                let client = self.anthropic.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .rmcp_tools(tools, mcp_peer)
+                    .build();
+
+                let response = agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("anthropic error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::Gemini { .. } => {
+                Err(anyhow::anyhow!("Gemini not yet supported with rig"))
+            }
+
+            ModelBackend::Mock { prefix } => {
+                Ok(format!("{}: {}", prefix, message))
+            }
+        }
+    }
+
+    /// Chat with a ToolServer handle (supports both internal and MCP tools)
+    ///
+    /// This is the main entry point when you have combined tools.
+    /// Build a ToolServer with internal sshwarma tools + optional MCP tools,
+    /// then pass the handle here.
+    pub async fn chat_with_tool_server(
+        &self,
+        model: &ModelHandle,
+        system_prompt: &str,
+        message: &str,
+        tool_server_handle: ToolServerHandle,
+        max_turns: usize,
+    ) -> Result<String> {
+        // Handle mock backend for testing
+        if let ModelBackend::Mock { prefix } = &model.backend {
+            return Ok(format!("{}: {}", prefix, message));
+        }
+
+        match &model.backend {
+            ModelBackend::Ollama { model: model_id, .. } => {
+                let client = self.ollama.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("ollama error: {}", e))
+            }
+
+            ModelBackend::OpenAI { model: model_id } => {
+                let client = self.openai.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("openai error: {}", e))
+            }
+
+            ModelBackend::Anthropic { model: model_id } => {
+                let client = self.anthropic.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("anthropic error: {}", e))
+            }
+
+            ModelBackend::Gemini { .. } => {
+                Err(anyhow::anyhow!("Gemini not yet supported with rig"))
+            }
+
+            ModelBackend::Mock { prefix } => {
+                Ok(format!("{}: {}", prefix, message))
+            }
+        }
+    }
+
+    /// Stream a chat response (no tools)
+    ///
+    /// For tool-enabled streaming, use the agent directly with stream_prompt.
     pub async fn chat_stream(
         &self,
         model: &ModelHandle,
         system_prompt: &str,
-        history: &[(String, String)],
+        _history: &[(String, String)],
         message: &str,
         tx: mpsc::Sender<StreamChunk>,
     ) -> Result<()> {
@@ -162,42 +355,15 @@ impl LlmClient {
             return Ok(());
         }
 
-        let model_id = Self::model_id(model).expect("non-mock model should have id");
-
-        let mut messages = vec![ChatMessage::system(system_prompt)];
-
-        for (role, content) in history {
-            match role.as_str() {
-                "user" => messages.push(ChatMessage::user(content)),
-                "assistant" => messages.push(ChatMessage::assistant(content)),
-                _ => {}
+        // For now, fall back to non-streaming and send result all at once
+        // TODO: implement proper streaming with rig's stream_prompt
+        match self.chat_with_context(model, system_prompt, &[], message).await {
+            Ok(response) => {
+                let _ = tx.send(StreamChunk::Text(response)).await;
+                let _ = tx.send(StreamChunk::Done).await;
             }
-        }
-
-        messages.push(ChatMessage::user(message));
-
-        let chat_req = ChatRequest::new(messages);
-        let chat_stream = self.client.exec_chat_stream(&model_id, chat_req, None).await?;
-
-        let mut stream = chat_stream.stream;
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    ChatStreamEvent::Chunk(chunk) => {
-                        if tx.send(StreamChunk::Text(chunk.content)).await.is_err() {
-                            break; // Receiver dropped
-                        }
-                    }
-                    ChatStreamEvent::End(_) => {
-                        let _ = tx.send(StreamChunk::Done).await;
-                        break;
-                    }
-                    _ => {} // Ignore other events for now
-                },
-                Err(e) => {
-                    let _ = tx.send(StreamChunk::Error(e.to_string())).await;
-                    break;
-                }
+            Err(e) => {
+                let _ = tx.send(StreamChunk::Error(e.to_string())).await;
             }
         }
 
@@ -232,15 +398,16 @@ impl LlmClient {
             return Ok(true);
         }
 
-        let model_id = Self::model_id(model).expect("non-mock model should have id");
-        let chat_req = ChatRequest::new(vec![
-            ChatMessage::user("ping"),
-        ]);
-
-        match self.client.exec_chat(&model_id, chat_req, None).await {
+        // Try a simple prompt
+        match self.chat(model, "ping").await {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Get the configured Ollama endpoint
+    pub fn ollama_endpoint(&self) -> &str {
+        &self.ollama_endpoint
     }
 }
 
