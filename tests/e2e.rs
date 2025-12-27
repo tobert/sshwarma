@@ -596,3 +596,281 @@ async fn test_sshwarma_mcp_error_cases() -> Result<()> {
     clients.disconnect("sshwarma").await?;
     Ok(())
 }
+
+// ============================================================================
+// Room Context Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_sshwarma_mcp_set_vibe() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create a room
+    clients.call_tool("create_room", serde_json::json!({"name": "vibes-room"})).await?;
+
+    // Set vibe
+    let result = clients.call_tool("set_vibe", serde_json::json!({
+        "room": "vibes-room",
+        "vibe": "Chill lofi beats, late night coding session"
+    })).await?;
+    assert!(result.content.contains("Set vibe"));
+    assert!(!result.is_error);
+
+    // Get room context should show vibe
+    let result = clients.call_tool("room_context", serde_json::json!({
+        "room": "vibes-room"
+    })).await?;
+    assert!(result.content.contains("Chill lofi"));
+    assert!(result.content.contains("Vibe"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_journal() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create a room
+    clients.call_tool("create_room", serde_json::json!({"name": "journal-room"})).await?;
+
+    // Add journal entries
+    let result = clients.call_tool("journal_write", serde_json::json!({
+        "room": "journal-room",
+        "kind": "note",
+        "content": "Started working on the beat"
+    })).await?;
+    assert!(result.content.contains("Added note"));
+    assert!(!result.is_error);
+
+    clients.call_tool("journal_write", serde_json::json!({
+        "room": "journal-room",
+        "kind": "decision",
+        "content": "Using 120 BPM for the track"
+    })).await?;
+
+    clients.call_tool("journal_write", serde_json::json!({
+        "room": "journal-room",
+        "kind": "milestone",
+        "content": "First draft complete!"
+    })).await?;
+
+    // Read all journal entries
+    let result = clients.call_tool("journal_read", serde_json::json!({
+        "room": "journal-room"
+    })).await?;
+    assert!(result.content.contains("Started working"));
+    assert!(result.content.contains("120 BPM"));
+    assert!(result.content.contains("First draft"));
+
+    // Filter by kind
+    let result = clients.call_tool("journal_read", serde_json::json!({
+        "room": "journal-room",
+        "kind": "decision"
+    })).await?;
+    assert!(result.content.contains("120 BPM"));
+    assert!(!result.content.contains("Started working"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_asset_binding() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create a room
+    clients.call_tool("create_room", serde_json::json!({"name": "asset-room"})).await?;
+
+    // Bind an asset
+    let result = clients.call_tool("asset_bind", serde_json::json!({
+        "room": "asset-room",
+        "artifact_id": "abc123hash",
+        "role": "drums",
+        "notes": "808 kick pattern"
+    })).await?;
+    assert!(result.content.contains("Bound 'abc123hash'"));
+    assert!(result.content.contains("drums"));
+    assert!(!result.is_error);
+
+    // Look up the asset
+    let result = clients.call_tool("asset_lookup", serde_json::json!({
+        "room": "asset-room",
+        "role": "drums"
+    })).await?;
+    assert!(result.content.contains("abc123hash"));
+    assert!(result.content.contains("808 kick pattern"));
+
+    // Room context should show bound assets
+    let result = clients.call_tool("room_context", serde_json::json!({
+        "room": "asset-room"
+    })).await?;
+    assert!(result.content.contains("drums"));
+    assert!(result.content.contains("abc123hash"));
+
+    // Unbind the asset
+    let result = clients.call_tool("asset_unbind", serde_json::json!({
+        "room": "asset-room",
+        "role": "drums"
+    })).await?;
+    assert!(result.content.contains("Unbound 'drums'"));
+
+    // Asset should no longer be found
+    let result = clients.call_tool("asset_lookup", serde_json::json!({
+        "room": "asset-room",
+        "role": "drums"
+    })).await?;
+    assert!(result.content.contains("No asset bound"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_exits() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create two rooms
+    clients.call_tool("create_room", serde_json::json!({"name": "lobby"})).await?;
+    clients.call_tool("create_room", serde_json::json!({"name": "studio"})).await?;
+
+    // Create bidirectional exit
+    let result = clients.call_tool("add_exit", serde_json::json!({
+        "room": "lobby",
+        "direction": "north",
+        "target": "studio"
+    })).await?;
+    assert!(result.content.contains("north"));
+    assert!(result.content.contains("south"));
+    assert!(!result.is_error);
+
+    // Check lobby exits
+    let result = clients.call_tool("room_context", serde_json::json!({
+        "room": "lobby"
+    })).await?;
+    assert!(result.content.contains("north"));
+    assert!(result.content.contains("studio"));
+
+    // Check studio exits (should have south back to lobby)
+    let result = clients.call_tool("room_context", serde_json::json!({
+        "room": "studio"
+    })).await?;
+    assert!(result.content.contains("south"));
+    assert!(result.content.contains("lobby"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_fork_room() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create source room with context
+    clients.call_tool("create_room", serde_json::json!({"name": "original"})).await?;
+    clients.call_tool("set_vibe", serde_json::json!({
+        "room": "original",
+        "vibe": "Experimental ambient soundscape"
+    })).await?;
+    clients.call_tool("asset_bind", serde_json::json!({
+        "room": "original",
+        "artifact_id": "pad123",
+        "role": "pad",
+        "notes": "Main atmospheric pad"
+    })).await?;
+
+    // Fork the room
+    let result = clients.call_tool("fork_room", serde_json::json!({
+        "source": "original",
+        "new_name": "variation-1"
+    })).await?;
+    assert!(result.content.contains("Forked 'variation-1'"));
+    assert!(result.content.contains("Inherited"));
+    assert!(!result.is_error);
+
+    // Check forked room has inherited context
+    let result = clients.call_tool("room_context", serde_json::json!({
+        "room": "variation-1"
+    })).await?;
+    assert!(result.content.contains("Experimental ambient"));
+    assert!(result.content.contains("pad"));
+    assert!(result.content.contains("pad123"));
+    assert!(result.content.contains("Forked from: original"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sshwarma_mcp_room_context_full() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let clients = McpClients::new();
+    clients.connect("sshwarma", &url).await?;
+
+    // Create a room with rich context
+    clients.call_tool("create_room", serde_json::json!({"name": "rich-room"})).await?;
+
+    // Add vibe
+    clients.call_tool("set_vibe", serde_json::json!({
+        "room": "rich-room",
+        "vibe": "Deep house groove, 124 BPM"
+    })).await?;
+
+    // Add assets
+    clients.call_tool("asset_bind", serde_json::json!({
+        "room": "rich-room",
+        "artifact_id": "kick001",
+        "role": "kick"
+    })).await?;
+    clients.call_tool("asset_bind", serde_json::json!({
+        "room": "rich-room",
+        "artifact_id": "bass002",
+        "role": "bassline"
+    })).await?;
+
+    // Add journal entries
+    clients.call_tool("journal_write", serde_json::json!({
+        "room": "rich-room",
+        "kind": "note",
+        "content": "Working on the groove"
+    })).await?;
+    clients.call_tool("journal_write", serde_json::json!({
+        "room": "rich-room",
+        "kind": "decision",
+        "content": "Keep the bassline minimal"
+    })).await?;
+
+    // Get full context
+    let result = clients.call_tool("room_context", serde_json::json!({
+        "room": "rich-room"
+    })).await?;
+
+    // Should have all sections
+    assert!(result.content.contains("# Room: rich-room"));
+    assert!(result.content.contains("## Vibe"));
+    assert!(result.content.contains("Deep house groove"));
+    assert!(result.content.contains("## Bound Assets"));
+    assert!(result.content.contains("kick"));
+    assert!(result.content.contains("bassline"));
+    assert!(result.content.contains("## Recent Journal"));
+    assert!(result.content.contains("Working on the groove"));
+
+    clients.disconnect("sshwarma").await?;
+    Ok(())
+}

@@ -10,8 +10,10 @@ use tracing::{info, warn};
 use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::line_editor::{EditorAction, LineEditor};
+use crate::llm::StreamChunk;
 use crate::player::PlayerSession;
 use crate::state::SharedState;
+use crate::world::{MessageContent, Sender};
 
 /// SSH server implementation
 #[derive(Clone)]
@@ -203,15 +205,20 @@ impl SshHandler {
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
             }
             EditorAction::Execute(line) => {
-                // Echo newline, execute command, show response with new prompt
+                // Echo newline
                 let _ = session.data(channel, CryptoVec::from(b"\r\n".as_slice()));
 
-                let response = self.handle_input(&line).await;
-                let prompt = self.get_prompt();
+                // Use streaming for @mentions
+                if line.trim().starts_with('@') {
+                    self.handle_mention_stream(channel, session, &line).await?;
+                } else {
+                    let response = self.handle_input(&line).await;
+                    let prompt = self.get_prompt();
 
-                // Response with proper line endings, then prompt
-                let output = format!("{}\r\n\x1b[33m{}\x1b[0m ", response, prompt);
-                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                    // Response with proper line endings, then prompt
+                    let output = format!("{}\r\n\x1b[33m{}\x1b[0m ", response, prompt);
+                    let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                }
             }
             EditorAction::Tab => {
                 self.handle_tab_completion(channel, session).await?;
@@ -379,5 +386,156 @@ impl SshHandler {
     pub fn clear_completions(&mut self) {
         self.completions.clear();
         self.completion_index = 0;
+    }
+
+    /// Handle @mention with streaming response
+    async fn handle_mention_stream(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+        input: &str,
+    ) -> Result<(), anyhow::Error> {
+        let input = input.trim_start_matches('@');
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let model_name = parts.first().unwrap_or(&"");
+        let message = parts.get(1).copied().unwrap_or("").trim();
+
+        if message.is_empty() {
+            let msg = format!("Usage: @{} <message>\r\n", model_name);
+            let _ = session.data(channel, CryptoVec::from(msg.as_bytes()));
+            return Ok(());
+        }
+
+        let username = match &self.player {
+            Some(p) => p.username.clone(),
+            None => {
+                let _ = session.data(channel, CryptoVec::from(b"Not authenticated\r\n".as_slice()));
+                return Ok(());
+            }
+        };
+
+        let model = match self.state.models.get(model_name) {
+            Some(m) => m.clone(),
+            None => {
+                let available: Vec<_> = self
+                    .state
+                    .models
+                    .available()
+                    .iter()
+                    .map(|m| m.short_name.as_str())
+                    .collect();
+                let msg = format!(
+                    "Unknown model '{}'. Available: {}\r\n",
+                    model_name,
+                    available.join(", ")
+                );
+                let _ = session.data(channel, CryptoVec::from(msg.as_bytes()));
+                return Ok(());
+            }
+        };
+
+        // Show user message
+        let header = format!("{} → @{}: {}\r\n\r\n{}: ", username, model_name, message, model.short_name);
+        let _ = session.data(channel, CryptoVec::from(header.as_bytes()));
+
+        // Build context from room history
+        let history = if let Some(ref room_name) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
+            let world = self.state.world.read().await;
+            if let Some(room) = world.get_room(room_name) {
+                room.recent_history(10)
+                    .iter()
+                    .filter_map(|msg| match &msg.content {
+                        MessageContent::Chat(text) => {
+                            let role = match &msg.sender {
+                                Sender::User(_) => "user",
+                                Sender::Model(_) => "assistant",
+                                Sender::System => return None,
+                            };
+                            Some((role.to_string(), text.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        let system_prompt = format!(
+            "You are {} in the sshwarma collaborative chat. \
+             You're conversing with {} and possibly other users. \
+             Be helpful, concise, and friendly. Keep responses under 500 words unless asked for more detail.",
+            model.display_name, username
+        );
+
+        // Create streaming channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(32);
+
+        // Spawn the streaming task
+        let llm = self.state.llm.clone();
+        let model_clone = model.clone();
+        let history_clone = history.clone();
+        let message_clone = message.to_string();
+        let system_prompt_clone = system_prompt.clone();
+
+        tokio::spawn(async move {
+            let _ = llm.chat_stream(
+                &model_clone,
+                &system_prompt_clone,
+                &history_clone,
+                &message_clone,
+                tx,
+            ).await;
+        });
+
+        // Collect full response for history
+        let mut full_response = String::new();
+
+        // Stream chunks to terminal
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                StreamChunk::Text(text) => {
+                    full_response.push_str(&text);
+                    // Convert newlines for terminal
+                    let display = text.replace('\n', "\r\n");
+                    let _ = session.data(channel, CryptoVec::from(display.as_bytes()));
+                }
+                StreamChunk::Done => break,
+                StreamChunk::Error(e) => {
+                    let msg = format!("\r\n[error: {}]", e);
+                    let _ = session.data(channel, CryptoVec::from(msg.as_bytes()));
+                    break;
+                }
+            }
+        }
+
+        // Save to room history
+        if let Some(ref room_name) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
+            {
+                let mut world = self.state.world.write().await;
+                if let Some(room) = world.get_room_mut(room_name) {
+                    room.add_message(
+                        Sender::Model(model.short_name.clone()),
+                        MessageContent::Chat(full_response.clone()),
+                    );
+                }
+            }
+            let _ = self.state.db.add_message(
+                room_name,
+                "model",
+                &model.short_name,
+                "chat",
+                &full_response,
+            );
+        }
+
+        // Show prompt after response
+        let prompt = self.get_prompt();
+        let prompt_line = format!("\r\n\r\n\x1b[33m{}\x1b[0m ", prompt);
+        let _ = session.data(channel, CryptoVec::from(prompt_line.as_bytes()));
+
+        Ok(())
     }
 }

@@ -1,10 +1,23 @@
 //! LLM integration via genai (multi-provider)
 
 use anyhow::Result;
-use genai::chat::{ChatMessage, ChatRequest};
+use futures::StreamExt;
+use genai::chat::{ChatMessage, ChatRequest, ChatStreamEvent};
 use genai::Client;
+use tokio::sync::mpsc;
 
 use crate::model::{ModelBackend, ModelHandle};
+
+/// Streaming response chunk
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// Text content from the model
+    Text(String),
+    /// Stream completed successfully
+    Done,
+    /// Error occurred during streaming
+    Error(String),
+}
 
 /// Client for talking to LLMs via genai
 pub struct LlmClient {
@@ -60,7 +73,7 @@ impl LlmClient {
 
         let response = self.client.exec_chat(&model_id, chat_req, None).await?;
         let content = response
-            .content_text_into_string()
+            .into_first_text()
             .unwrap_or_else(|| "[no response]".to_string());
 
         Ok(content)
@@ -98,10 +111,69 @@ impl LlmClient {
         let chat_req = ChatRequest::new(messages);
         let response = self.client.exec_chat(&model_id, chat_req, None).await?;
         let content = response
-            .content_text_into_string()
+            .into_first_text()
             .unwrap_or_else(|| "[no response]".to_string());
 
         Ok(content)
+    }
+
+    /// Stream a chat response, sending chunks through the channel as they arrive
+    pub async fn chat_stream(
+        &self,
+        model: &ModelHandle,
+        system_prompt: &str,
+        history: &[(String, String)],
+        message: &str,
+        tx: mpsc::Sender<StreamChunk>,
+    ) -> Result<()> {
+        // Handle mock backend for testing
+        if let ModelBackend::Mock { prefix } = &model.backend {
+            let response = format!("{}: {}", prefix, message);
+            let _ = tx.send(StreamChunk::Text(response)).await;
+            let _ = tx.send(StreamChunk::Done).await;
+            return Ok(());
+        }
+
+        let model_id = Self::model_id(model).expect("non-mock model should have id");
+
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+
+        for (role, content) in history {
+            match role.as_str() {
+                "user" => messages.push(ChatMessage::user(content)),
+                "assistant" => messages.push(ChatMessage::assistant(content)),
+                _ => {}
+            }
+        }
+
+        messages.push(ChatMessage::user(message));
+
+        let chat_req = ChatRequest::new(messages);
+        let chat_stream = self.client.exec_chat_stream(&model_id, chat_req, None).await?;
+
+        let mut stream = chat_stream.stream;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(event) => match event {
+                    ChatStreamEvent::Chunk(chunk) => {
+                        if tx.send(StreamChunk::Text(chunk.content)).await.is_err() {
+                            break; // Receiver dropped
+                        }
+                    }
+                    ChatStreamEvent::End(_) => {
+                        let _ = tx.send(StreamChunk::Done).await;
+                        break;
+                    }
+                    _ => {} // Ignore other events for now
+                },
+                Err(e) => {
+                    let _ = tx.send(StreamChunk::Error(e.to_string())).await;
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Generate flavor text for room descriptions
