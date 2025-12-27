@@ -10,17 +10,23 @@ use tracing::{info, warn};
 
 use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
+use crate::display::{
+    DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
+    styles::ctrl,
+};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
 use crate::world::{MessageContent, Sender};
 
-/// Message pushed to the session from background tasks (model responses, etc.)
+/// Update from background task to resolve a placeholder
 #[derive(Debug)]
-pub struct IncomingMessage {
-    /// Who sent this (model name, system, etc.)
-    pub from: String,
-    /// The message content
+pub struct LedgerUpdate {
+    /// The placeholder entry ID to update
+    pub placeholder_id: EntryId,
+    /// Model name for display
+    pub model_name: String,
+    /// The response content
     pub content: String,
 }
 
@@ -35,8 +41,8 @@ impl server::Server for SshServer {
 
     fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> Self::Handler {
         info!(?peer_addr, "new connection");
-        // Channel for receiving messages from background tasks (model responses, etc.)
-        let (incoming_tx, incoming_rx) = mpsc::channel(32);
+        // Channel for receiving ledger updates from background tasks
+        let (update_tx, update_rx) = mpsc::channel(32);
         SshHandler {
             state: self.state.clone(),
             player: None,
@@ -46,8 +52,10 @@ impl server::Server for SshServer {
             completer: CompletionEngine::new(self.state.clone()),
             completions: Vec::new(),
             completion_index: 0,
-            incoming_tx,
-            incoming_rx,
+            ledger: Ledger::new(500),
+            display: DisplayBuffer::new(80),
+            update_tx,
+            update_rx,
         }
     }
 
@@ -72,10 +80,14 @@ pub struct SshHandler {
     pub completions: Vec<Completion>,
     /// Selected completion index
     pub completion_index: usize,
-    /// Sender for pushing messages to this session (clone for background tasks)
-    pub incoming_tx: mpsc::Sender<IncomingMessage>,
-    /// Receiver for messages from background tasks
-    pub incoming_rx: mpsc::Receiver<IncomingMessage>,
+    /// In-memory conversation ledger
+    pub ledger: Ledger,
+    /// Display buffer for incremental rendering
+    pub display: DisplayBuffer,
+    /// Sender for ledger updates from background tasks
+    pub update_tx: mpsc::Sender<LedgerUpdate>,
+    /// Receiver for ledger updates
+    pub update_rx: mpsc::Receiver<LedgerUpdate>,
 }
 
 impl server::Handler for SshHandler {
@@ -173,16 +185,24 @@ impl server::Handler for SshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if let Some(ref player) = self.player {
-            let welcome = format!(
-                "\x1b[1;36m╭─────────────────────────────────────╮\x1b[0m\r\n\
-                 \x1b[1;36m│           sshwarma                  │\x1b[0m\r\n\
-                 \x1b[1;36m╰─────────────────────────────────────╯\x1b[0m\r\n\r\n\
-                 Welcome, {}.\r\n\r\n\
-                 /rooms to list rooms, /join <room> to enter\r\n\r\n\
-                 \x1b[33mlobby>\x1b[0m ",
-                player.username
+            // Add welcome to ledger
+            self.ledger.push(
+                EntrySource::System,
+                EntryContent::Welcome {
+                    username: player.username.clone(),
+                },
             );
-            let _ = session.data(channel, CryptoVec::from(welcome.as_bytes()));
+
+            // Render and send
+            let (output, lines) = self.display.render_incremental(&self.ledger);
+            let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            self.display.add_lines(lines);
+
+            // Show initial prompt
+            let prompt = self.get_prompt();
+            let prompt_output = format!("{}{}{}  ", ctrl::CRLF, ctrl::CRLF, crate::display::styles::prompt(&prompt));
+            let _ = session.data(channel, CryptoVec::from(prompt_output.as_bytes()));
+            self.display.add_lines(2);
         }
         Ok(())
     }
@@ -193,8 +213,8 @@ impl server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Check for any messages from background tasks (model responses)
-        self.flush_incoming_messages(channel, session)?;
+        // Check for any ledger updates from background tasks (model responses)
+        self.flush_ledger_updates(channel, session)?;
 
         for &byte in data {
             // Parse through escape sequence handler
@@ -425,15 +445,27 @@ impl SshHandler {
         let message = parts.get(1).copied().unwrap_or("").trim();
 
         if message.is_empty() {
-            let msg = format!("Usage: @{} <message>\r\n", model_name);
-            let _ = session.data(channel, CryptoVec::from(msg.as_bytes()));
+            // Add error to ledger
+            self.ledger.push(
+                EntrySource::System,
+                EntryContent::Error(format!("Usage: @{} <message>", model_name)),
+            );
+            let (output, lines) = self.display.render_incremental(&self.ledger);
+            let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            self.display.add_lines(lines);
             return Ok(());
         }
 
         let username = match &self.player {
             Some(p) => p.username.clone(),
             None => {
-                let _ = session.data(channel, CryptoVec::from(b"Not authenticated\r\n".as_slice()));
+                self.ledger.push(
+                    EntrySource::System,
+                    EntryContent::Error("Not authenticated".into()),
+                );
+                let (output, lines) = self.display.render_incremental(&self.ledger);
+                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                self.display.add_lines(lines);
                 return Ok(());
             }
         };
@@ -448,22 +480,43 @@ impl SshHandler {
                     .iter()
                     .map(|m| m.short_name.as_str())
                     .collect();
-                let msg = format!(
-                    "Unknown model '{}'. Available: {}\r\n",
-                    model_name,
-                    available.join(", ")
+                self.ledger.push(
+                    EntrySource::System,
+                    EntryContent::Error(format!(
+                        "Unknown model '{}'. Available: {}",
+                        model_name,
+                        available.join(", ")
+                    )),
                 );
-                let _ = session.data(channel, CryptoVec::from(msg.as_bytes()));
+                let (output, lines) = self.display.render_incremental(&self.ledger);
+                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                self.display.add_lines(lines);
                 return Ok(());
             }
         };
 
-        // Show user message and that model is thinking
-        let header = format!(
-            "{} → @{}: {}\r\n\x1b[2m({} is thinking...)\x1b[0m",
-            username, model_name, message, model.short_name
+        // Add user's message to ledger
+        self.ledger.push(
+            EntrySource::User(username.clone()),
+            EntryContent::Chat(format!("@{}: {}", model_name, message)),
         );
-        let _ = session.data(channel, CryptoVec::from(header.as_bytes()));
+
+        // Add placeholder for model response (mutable - will be updated)
+        let placeholder_id = self.ledger.push_mutable(
+            EntrySource::Model {
+                name: model.short_name.clone(),
+                is_streaming: false,
+            },
+            EntryContent::Status(StatusKind::Thinking),
+        );
+
+        // Render and send both entries
+        let (output, lines) = self.display.render_incremental(&self.ledger);
+        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+
+        // Register placeholder for in-place update tracking
+        self.display.register_placeholder(placeholder_id);
+        self.display.add_lines(lines);
 
         // Build context from room history
         let history = if let Some(ref room_name) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
@@ -501,14 +554,14 @@ impl SshHandler {
         let llm = self.state.llm.clone();
         let world = self.state.world.clone();
         let db = self.state.db.clone();
-        let incoming_tx = self.incoming_tx.clone();
+        let update_tx = self.update_tx.clone();
         let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
         let model_short = model.short_name.clone();
         let message_owned = message.to_string();
 
         // Spawn background task - returns immediately
         tokio::spawn(async move {
-            // Get response from model (non-streaming for simplicity in async mode)
+            // Get response from model
             let response = match llm
                 .chat_with_context(&model, &system_prompt, &history, &message_owned)
                 .await
@@ -531,10 +584,11 @@ impl SshHandler {
                 let _ = db.add_message(room, "model", &model_short, "chat", &response);
             }
 
-            // Send to session's incoming message channel
-            let _ = incoming_tx
-                .send(IncomingMessage {
-                    from: model_short,
+            // Send ledger update to resolve the placeholder
+            let _ = update_tx
+                .send(LedgerUpdate {
+                    placeholder_id,
+                    model_name: model_short,
                     content: response,
                 })
                 .await;
@@ -543,31 +597,40 @@ impl SshHandler {
         Ok(())
     }
 
-    /// Flush any pending incoming messages to the terminal
-    fn flush_incoming_messages(
+    /// Flush any pending ledger updates (model responses) to the terminal
+    fn flush_ledger_updates(
         &mut self,
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), anyhow::Error> {
         let mut got_any = false;
 
-        // Non-blocking check for pending messages
-        while let Ok(msg) = self.incoming_rx.try_recv() {
+        // Non-blocking check for pending updates
+        while let Ok(update) = self.update_rx.try_recv() {
             got_any = true;
-            // Format like IRC/MUD: model name then message
-            let formatted = format!(
-                "\r\n\x1b[1;36m{}:\x1b[0m {}\r\n",
-                msg.from,
-                msg.content.replace('\n', "\r\n")
+
+            // Update the ledger entry from Status to Chat
+            self.ledger.update(
+                update.placeholder_id,
+                EntryContent::Chat(update.content.clone()),
             );
-            let _ = session.data(channel, CryptoVec::from(formatted.as_bytes()));
+            self.ledger.finalize(update.placeholder_id);
+
+            // In-place update: go back, clear, write new content
+            if let Some((update_output, new_lines)) =
+                self.display.render_placeholder_update(update.placeholder_id, &self.ledger)
+            {
+                let _ = session.data(channel, CryptoVec::from(update_output.as_bytes()));
+                self.display.add_lines(new_lines.saturating_sub(1));
+            }
         }
 
-        // If we displayed any messages, redraw the prompt and current input
+        // If we displayed any updates, redraw the prompt and current input
         if got_any {
             let prompt = self.get_prompt();
-            let output = self.editor.render(&prompt);
+            let output = format!("{}{}", ctrl::CRLF, self.editor.render(&prompt));
             let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            self.display.add_lines(1);
         }
 
         Ok(())
