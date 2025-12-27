@@ -60,5 +60,8 @@ axum = "0.8"
 tui-input = { version = "0.11", default-features = false }
 nucleo-matcher = "0.3"
 
+# Terminal output formatting
+crossterm = "0.28"
+
 [dev-dependencies]
 tokio-test = "0.4"

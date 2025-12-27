@@ -9,6 +9,7 @@ pub mod comm;
 pub mod completion;
 pub mod config;
 pub mod db;
+pub mod display;
 pub mod interp;
 pub mod line_editor;
 pub mod llm;
