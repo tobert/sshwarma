@@ -2,7 +2,7 @@
 
 use crate::ops;
 use crate::ssh::SshHandler;
-use crate::world::{JournalKind, MessageContent, Sender};
+use crate::world::{MessageContent, Sender};
 
 impl SshHandler {
     pub async fn handle_input(&mut self, input: &str) -> String {
@@ -40,6 +40,7 @@ impl SshHandler {
                 "go" => self.cmd_go(args).await,
                 "exits" => self.cmd_exits().await,
                 "fork" => self.cmd_fork(args).await,
+                "nav" => self.cmd_nav(args).await,
                 "quit" => "Goodbye!".to_string(),
                 _ => format!("Unknown command: /{}", cmd),
             }
@@ -77,6 +78,7 @@ Room Context:
   /bring <id> as <role>  Bind artifact
   /drop <role>        Unbind asset
   /inspire <text>     Add to mood board
+  /nav [on|off]       Toggle model navigation
 
 Communication:
   <text>              Say to room
@@ -133,8 +135,8 @@ MCP:
     }
 
     async fn cmd_join(&mut self, args: &str) -> String {
-        let room_name = args.trim();
-        if room_name.is_empty() {
+        let target = args.trim();
+        if target.is_empty() {
             return "Usage: /join <room>".to_string();
         }
 
@@ -143,51 +145,19 @@ MCP:
             None => return "Not authenticated".to_string(),
         };
 
-        // Leave current room if in one
-        if let Some(ref current) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
-            let mut world = self.state.world.write().await;
-            if let Some(room) = world.get_room_mut(current) {
-                room.remove_user(&username);
-            }
-        }
+        let current = self.current_room();
 
-        // Check if room exists
-        {
-            let world = self.state.world.read().await;
-            if world.get_room(room_name).is_none() {
-                return format!(
-                    "No room named '{}'. Use /create {} to make one.",
-                    room_name, room_name
-                );
-            }
-        }
-
-        // Join the room and load history if needed
-        {
-            let mut world = self.state.world.write().await;
-            if let Some(room) = world.get_room_mut(room_name) {
-                room.add_user(username.clone());
-
-                // Load DB history into ledger if ledger is empty (first access)
-                if room.ledger.all().is_empty() {
-                    if let Ok(messages) = self.state.db.recent_messages(room_name, 100) {
-                        room.load_history_from_db(&messages);
-                    }
+        match ops::join(&self.state, &username, current.as_deref(), target).await {
+            Ok(summary) => {
+                // Update player state (handler-specific)
+                if let Some(ref mut player) = self.player {
+                    player.join_room(target.to_string());
+                    let _ = self.state.db.update_session_room(&player.session_id, Some(target));
                 }
+                Self::format_room_summary(&summary)
             }
+            Err(e) => e.to_string(),
         }
-
-        // Update player state and session
-        if let Some(ref mut player) = self.player {
-            player.join_room(room_name.to_string());
-            let _ = self
-                .state
-                .db
-                .update_session_room(&player.session_id, Some(room_name));
-        }
-
-        // Return just the room look - history is loaded into ledger separately
-        self.cmd_look("").await
     }
 
     async fn cmd_create(&mut self, args: &str) -> String {
@@ -196,58 +166,23 @@ MCP:
             return "Usage: /create <name>".to_string();
         }
 
-        if !room_name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            return "Room name can only contain letters, numbers, dashes, and underscores."
-                .to_string();
-        }
-
         let username = match &self.player {
             Some(p) => p.username.clone(),
             None => return "Not authenticated".to_string(),
         };
 
-        // Check if room already exists
-        {
-            let world = self.state.world.read().await;
-            if world.get_room(room_name).is_some() {
-                return format!(
-                    "Room '{}' already exists. Use /join {} to enter.",
-                    room_name, room_name
-                );
+        let current = self.current_room();
+
+        match ops::create_room(&self.state, &username, room_name, current.as_deref()).await {
+            Ok(summary) => {
+                if let Some(ref mut player) = self.player {
+                    player.join_room(room_name.to_string());
+                    let _ = self.state.db.update_session_room(&player.session_id, Some(room_name));
+                }
+                format!("Created room '{}'.\r\n\r\n{}", room_name, Self::format_room_summary(&summary))
             }
+            Err(e) => e.to_string(),
         }
-
-        // Leave current room if in one
-        if let Some(ref current) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
-            let mut world = self.state.world.write().await;
-            if let Some(room) = world.get_room_mut(current) {
-                room.remove_user(&username);
-            }
-        }
-
-        // Create and join the room
-        {
-            let mut world = self.state.world.write().await;
-            world.create_room(room_name.to_string());
-            if let Some(room) = world.get_room_mut(room_name) {
-                room.add_user(username.clone());
-            }
-        }
-
-        let _ = self.state.db.create_room(room_name, None);
-
-        if let Some(ref mut player) = self.player {
-            player.join_room(room_name.to_string());
-        }
-
-        format!(
-            "Created room '{}'.\r\n\r\n{}",
-            room_name,
-            self.cmd_look("").await
-        )
     }
 
     async fn cmd_leave(&mut self) -> String {
@@ -256,18 +191,12 @@ MCP:
             None => return "Not authenticated".to_string(),
         };
 
-        let current_room = match &self.player {
-            Some(p) => p.current_room.clone(),
-            None => None,
-        };
+        let current_room = self.current_room();
 
         match current_room {
             Some(room_name) => {
-                {
-                    let mut world = self.state.world.write().await;
-                    if let Some(room) = world.get_room_mut(&room_name) {
-                        room.remove_user(&username);
-                    }
+                if let Err(e) = ops::leave(&self.state, &username, &room_name).await {
+                    return format!("Error: {}", e);
                 }
 
                 if let Some(ref mut player) = self.player {
@@ -372,25 +301,11 @@ MCP:
             None => return "Not authenticated".to_string(),
         };
 
-        let current_room = self.player.as_ref().and_then(|p| p.current_room.clone());
-
-        match current_room {
+        match self.current_room() {
             Some(room_name) => {
-                {
-                    let mut world = self.state.world.write().await;
-                    if let Some(room) = world.get_room_mut(&room_name) {
-                        room.add_message(
-                            Sender::User(username.clone()),
-                            MessageContent::Chat(message.to_string()),
-                        );
-                    }
+                if let Err(e) = ops::say(&self.state, &room_name, &username, message).await {
+                    return format!("Error: {}", e);
                 }
-
-                let _ = self
-                    .state
-                    .db
-                    .add_message(&room_name, "user", &username, "chat", message);
-
                 format!("{}: {}", username, message)
             }
             None => {
@@ -670,12 +585,15 @@ MCP:
             return format!("Usage: /{} <text>", kind_str);
         }
 
-        let kind = match JournalKind::from_str(kind_str) {
-            Some(k) => k,
-            None => return format!("Unknown journal kind: {}", kind_str),
+        let kind = match kind_str {
+            "note" => ops::JournalKind::Note,
+            "decision" => ops::JournalKind::Decision,
+            "idea" => ops::JournalKind::Idea,
+            "milestone" => ops::JournalKind::Milestone,
+            _ => return format!("Unknown journal kind: {}", kind_str),
         };
 
-        match self.state.db.add_journal_entry(&room, &author, args.trim(), kind) {
+        match ops::add_journal(&self.state, &room, &author, args.trim(), kind).await {
             Ok(_) => format!("[{}] {}", kind_str, args.trim()),
             Err(e) => format!("Error: {}", e),
         }
@@ -687,23 +605,22 @@ MCP:
             None => return "You need to be in a room to view journal.".to_string(),
         };
 
-        let kind = if args.trim().is_empty() {
+        let kind_filter = if args.trim().is_empty() {
             None
         } else {
-            JournalKind::from_str(args.trim())
+            Some(args.trim())
         };
 
-        match self.state.db.get_journal_entries(&room, kind, 20) {
+        match ops::get_journal(&self.state, &room, kind_filter, 20).await {
             Ok(entries) => {
                 if entries.is_empty() {
                     return "No journal entries.".to_string();
                 }
                 let mut output = "─── Journal ───\r\n".to_string();
                 for entry in entries {
-                    let ts = entry.timestamp.format("%m-%d %H:%M");
                     output.push_str(&format!(
                         "[{}] {} ({}): {}\r\n",
-                        ts, entry.kind, entry.author, entry.content
+                        entry.timestamp, entry.kind, entry.author, entry.content
                     ));
                 }
                 output
@@ -732,7 +649,7 @@ MCP:
 
         let bound_by = self.username().unwrap_or_else(|| "unknown".to_string());
 
-        match self.state.db.bind_asset(&room, role, artifact_id, None, &bound_by) {
+        match ops::bind_asset(&self.state, &room, role, artifact_id, &bound_by).await {
             Ok(_) => format!("Bound '{}' as '{}'", artifact_id, role),
             Err(e) => format!("Error: {}", e),
         }
@@ -749,7 +666,7 @@ MCP:
             return "Usage: /drop <role>".to_string();
         }
 
-        match self.state.db.unbind_asset(&room, role) {
+        match ops::unbind_asset(&self.state, &room, role).await {
             Ok(_) => format!("Unbound '{}'", role),
             Err(e) => format!("Error: {}", e),
         }
@@ -766,14 +683,14 @@ MCP:
             return "Usage: /examine <role>".to_string();
         }
 
-        match self.state.db.get_asset_binding(&room, role) {
+        match ops::examine_asset(&self.state, &room, role).await {
             Ok(Some(binding)) => {
                 let mut output = format!("═══ {} ═══\r\n", binding.role);
                 output.push_str(&format!("Artifact: {}\r\n", binding.artifact_id));
                 if let Some(notes) = &binding.notes {
                     output.push_str(&format!("Notes: {}\r\n", notes));
                 }
-                output.push_str(&format!("Bound by {} at {}\r\n", binding.bound_by, binding.bound_at.format("%Y-%m-%d %H:%M")));
+                output.push_str(&format!("Bound by {} at {}\r\n", binding.bound_by, binding.bound_at));
                 output
             }
             Ok(None) => format!("No asset bound as '{}'", role),
@@ -788,7 +705,7 @@ MCP:
         };
 
         if args.trim().is_empty() {
-            match self.state.db.get_inspirations(&room) {
+            match ops::get_inspirations(&self.state, &room).await {
                 Ok(inspirations) => {
                     if inspirations.is_empty() {
                         return "No inspirations yet. Use /inspire <text> to add one.".to_string();
@@ -803,7 +720,7 @@ MCP:
             }
         } else {
             let added_by = self.username().unwrap_or_else(|| "unknown".to_string());
-            match self.state.db.add_inspiration(&room, args.trim(), &added_by) {
+            match ops::add_inspiration(&self.state, &room, args.trim(), &added_by).await {
                 Ok(_) => format!("Added inspiration: {}", args.trim()),
                 Err(e) => format!("Error: {}", e),
             }
@@ -828,29 +745,10 @@ MCP:
             return "Usage: /dig <direction> to <room>".to_string();
         }
 
-        // Create exit from current room
-        if let Err(e) = self.state.db.add_exit(&room, direction, target) {
-            return format!("Error: {}", e);
+        match ops::dig(&self.state, &room, direction, target).await {
+            Ok(reverse) => format!("Dug {} to {} (and {} back)", direction, target, reverse),
+            Err(e) => format!("Error: {}", e),
         }
-
-        // Create reverse exit
-        let reverse = match direction {
-            "north" => "south",
-            "south" => "north",
-            "east" => "west",
-            "west" => "east",
-            "up" => "down",
-            "down" => "up",
-            "in" => "out",
-            "out" => "in",
-            _ => "back",
-        };
-
-        if let Err(e) = self.state.db.add_exit(target, reverse, &room) {
-            return format!("Created {} → {} but failed reverse: {}", direction, target, e);
-        }
-
-        format!("Dug {} to {} (and {} back)", direction, target, reverse)
     }
 
     async fn cmd_go(&mut self, args: &str) -> String {
@@ -864,24 +762,20 @@ MCP:
             return "Usage: /go <direction>".to_string();
         }
 
-        let exits = match self.state.db.get_exits(&room) {
-            Ok(e) => e,
-            Err(e) => return format!("Error: {}", e),
+        let username = match &self.player {
+            Some(p) => p.username.clone(),
+            None => return "Not authenticated".to_string(),
         };
 
-        match exits.get(direction) {
-            Some(target) => {
-                // Use existing join logic
-                self.cmd_join(target).await
-            }
-            None => {
-                let available: Vec<_> = exits.keys().collect();
-                if available.is_empty() {
-                    "No exits from this room.".to_string()
-                } else {
-                    format!("No exit '{}'. Available: {}", direction, available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+        match ops::go(&self.state, &username, &room, direction).await {
+            Ok(summary) => {
+                if let Some(ref mut player) = self.player {
+                    player.join_room(summary.name.clone());
+                    let _ = self.state.db.update_session_room(&player.session_id, Some(&summary.name));
                 }
+                Self::format_room_summary(&summary)
             }
+            Err(e) => e.to_string(),
         }
     }
 
@@ -918,31 +812,63 @@ MCP:
             return "Usage: /fork <new_room_name>".to_string();
         }
 
-        if !new_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return "Room name can only contain letters, numbers, dashes, and underscores.".to_string();
-        }
+        let username = match &self.player {
+            Some(p) => p.username.clone(),
+            None => return "Not authenticated".to_string(),
+        };
 
-        // Check if target exists
-        {
-            let world = self.state.world.read().await;
-            if world.get_room(new_name).is_some() {
-                return format!("Room '{}' already exists.", new_name);
+        match ops::fork_room(&self.state, &username, &source, new_name).await {
+            Ok(summary) => {
+                if let Some(ref mut player) = self.player {
+                    player.join_room(new_name.to_string());
+                    let _ = self.state.db.update_session_room(&player.session_id, Some(new_name));
+                }
+                format!(
+                    "Forked '{}' from '{}'. Inherited: vibe, tags, assets, inspirations.\r\n\r\n{}",
+                    new_name, source, Self::format_room_summary(&summary)
+                )
             }
+            Err(e) => e.to_string(),
         }
+    }
 
-        // Fork in database (creates room + copies context)
-        if let Err(e) = self.state.db.fork_room(&source, new_name) {
-            return format!("Error forking: {}", e);
+    async fn cmd_nav(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to configure navigation.".to_string(),
+        };
+
+        let args = args.trim().to_lowercase();
+
+        if args.is_empty() {
+            // Show current status
+            match ops::get_room_navigation(&self.state, &room).await {
+                Ok(enabled) => {
+                    let status = if enabled { "enabled" } else { "disabled" };
+                    format!(
+                        "Model navigation in '{}' is {}.\r\n\
+                         Use /nav on or /nav off to change.",
+                        room, status
+                    )
+                }
+                Err(e) => format!("Error: {}", e),
+            }
+        } else if args == "on" {
+            match ops::set_room_navigation(&self.state, &room, true).await {
+                Ok(_) => format!("Model navigation enabled in '{}'.", room),
+                Err(e) => format!("Error: {}", e),
+            }
+        } else if args == "off" {
+            match ops::set_room_navigation(&self.state, &room, false).await {
+                Ok(_) => format!(
+                    "Model navigation disabled in '{}'.\r\n\
+                     Models can no longer join/leave/create rooms.",
+                    room
+                ),
+                Err(e) => format!("Error: {}", e),
+            }
+        } else {
+            "Usage: /nav [on|off]".to_string()
         }
-
-        // Create in memory
-        {
-            let mut world = self.state.world.write().await;
-            world.create_room(new_name.to_string());
-        }
-
-        // Join the new room
-        let join_result = self.cmd_join(new_name).await;
-        format!("Forked '{}' from '{}'. Inherited: vibe, tags, assets, inspirations.\r\n\r\n{}", new_name, source, join_result)
     }
 }

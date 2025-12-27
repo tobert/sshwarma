@@ -29,6 +29,14 @@ pub struct InternalToolConfig {
     pub enable_navigation: bool,
 }
 
+impl InternalToolConfig {
+    /// Create config for a specific room, reading per-room settings from database
+    pub async fn for_room(state: &SharedState, room: &str) -> Self {
+        let enable_navigation = state.db.get_room_navigation(room).unwrap_or(true);
+        Self { enable_navigation }
+    }
+}
+
 impl Default for InternalToolConfig {
     fn default() -> Self {
         Self {

@@ -134,6 +134,17 @@ pub async fn set_vibe(state: &SharedState, room_name: &str, vibe: &str) -> Resul
     Ok(())
 }
 
+/// Get navigation enabled for room (defaults to true)
+pub async fn get_room_navigation(state: &SharedState, room_name: &str) -> Result<bool> {
+    state.db.get_room_navigation(room_name)
+}
+
+/// Set navigation enabled for room
+pub async fn set_room_navigation(state: &SharedState, room_name: &str, enabled: bool) -> Result<()> {
+    state.db.set_room_navigation(room_name, enabled)?;
+    Ok(())
+}
+
 /// Say something to the room
 pub async fn say(
     state: &SharedState,

@@ -13,8 +13,12 @@ use crate::model::{ModelBackend, ModelHandle};
 /// Streaming response chunk
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
-    /// Text content from the model
+    /// Text content from the model (incremental)
     Text(String),
+    /// Tool being called (name)
+    ToolCall(String),
+    /// Tool result summary
+    ToolResult(String),
     /// Stream completed successfully
     Done,
     /// Error occurred during streaming

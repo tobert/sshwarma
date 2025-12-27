@@ -153,6 +153,22 @@ impl Database {
             "#,
         )?;
 
+        // Migrations for existing databases
+        self.run_migrations()?;
+
+        Ok(())
+    }
+
+    fn run_migrations(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Add enable_navigation column to room_context (default enabled)
+        // This is idempotent - fails silently if column already exists
+        let _ = conn.execute(
+            "ALTER TABLE room_context ADD COLUMN enable_navigation INTEGER DEFAULT 1",
+            [],
+        );
+
         Ok(())
     }
 
@@ -489,6 +505,29 @@ impl Database {
         Ok(())
     }
 
+    /// Get navigation enabled for a room (defaults to true)
+    pub fn get_room_navigation(&self, room: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT enable_navigation FROM room_context WHERE room = ?1")?;
+        let mut rows = stmt.query(params![room])?;
+        if let Some(row) = rows.next()? {
+            let enabled: Option<i32> = row.get(0)?;
+            Ok(enabled.unwrap_or(1) == 1)
+        } else {
+            Ok(true) // Default enabled
+        }
+    }
+
+    /// Set navigation enabled for a room
+    pub fn set_room_navigation(&self, room: &str, enabled: bool) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO room_context (room, enable_navigation) VALUES (?1, ?2) \
+             ON CONFLICT(room) DO UPDATE SET enable_navigation = ?2",
+            params![room, if enabled { 1 } else { 0 }],
+        )?;
+        Ok(())
+    }
+
     // =========================================================================
     // Journal Entries
     // =========================================================================
@@ -777,10 +816,10 @@ impl Database {
             params![new_name, now, source],
         )?;
 
-        // Copy vibe and set parent
+        // Copy vibe, enable_navigation and set parent
         conn.execute(
-            "INSERT INTO room_context (room, vibe, parent) \
-             SELECT ?1, vibe, ?2 FROM room_context WHERE room = ?2",
+            "INSERT INTO room_context (room, vibe, parent, enable_navigation) \
+             SELECT ?1, vibe, ?2, enable_navigation FROM room_context WHERE room = ?2",
             params![new_name, source],
         )?;
 

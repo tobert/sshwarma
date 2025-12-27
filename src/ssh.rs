@@ -774,7 +774,8 @@ impl SshHandler {
                 room: room.clone(),
                 username: username.clone(),
             };
-            let config = InternalToolConfig::default();
+            // Use per-room config (navigation may be disabled for this room)
+            let config = InternalToolConfig::for_room(&self.state, room).await;
             let internal_toolset = crate::internal_tools::create_toolset(tool_ctx, &config);
             // Append internal tools to the running server
             let _ = tool_server_handle.append_toolset(internal_toolset).await;
