@@ -52,13 +52,17 @@ pub fn render_entry(entry: &LedgerEntry, config: &RenderConfig) -> String {
         }
 
         EntryContent::Status(kind) => {
-            let text = match kind {
-                StatusKind::Thinking => "thinking...",
-                StatusKind::RunningTool => "running tool...",
-                StatusKind::Connecting => "connecting...",
-                StatusKind::Complete => "done",
-            };
-            output.push_str(&styles::dim(&format!("({})", text)));
+            // Pending is invisible - placeholder waiting for content
+            if *kind != StatusKind::Pending {
+                let text = match kind {
+                    StatusKind::Pending => unreachable!(),
+                    StatusKind::Thinking => "thinking...",
+                    StatusKind::RunningTool => "running tool...",
+                    StatusKind::Connecting => "connecting...",
+                    StatusKind::Complete => "done",
+                };
+                output.push_str(&styles::dim(&format!("({})", text)));
+            }
         }
 
         EntryContent::RoomHeader { name, description } => {
@@ -198,12 +202,19 @@ fn strip_ansi_len(s: &str) -> usize {
 /// Render multiple entries with blank line collapsing
 pub fn render_entries(entries: &[LedgerEntry], config: &RenderConfig) -> String {
     let mut output = String::new();
+    let mut first = true;
 
-    for (i, entry) in entries.iter().enumerate() {
-        if i > 0 {
+    for entry in entries.iter() {
+        let rendered = render_entry(entry, config);
+        // Skip empty renders (e.g., Pending status)
+        if rendered.is_empty() {
+            continue;
+        }
+        if !first {
             output.push_str(ctrl::CRLF);
         }
-        output.push_str(&render_entry(entry, config));
+        first = false;
+        output.push_str(&rendered);
     }
 
     output

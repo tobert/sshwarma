@@ -153,11 +153,18 @@ MCP:
             }
         }
 
-        // Join the room
+        // Join the room and load history if needed
         {
             let mut world = self.state.world.write().await;
             if let Some(room) = world.get_room_mut(room_name) {
                 room.add_user(username.clone());
+
+                // Load DB history into ledger if ledger is empty (first access)
+                if room.ledger.all().is_empty() {
+                    if let Ok(messages) = self.state.db.recent_messages(room_name, 100) {
+                        room.load_history_from_db(&messages);
+                    }
+                }
             }
         }
 

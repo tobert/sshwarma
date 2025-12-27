@@ -88,9 +88,10 @@ pub fn boxed_header(title: &str, width: u16) -> String {
     );
 
     let mut result = String::new();
-    let _ = writeln!(
+    // Use CRLF for SSH terminals
+    let _ = write!(
         result,
-        "{}",
+        "{}{CRLF}",
         format!(
             "{}{}{}",
             BoxChars::TOP_LEFT,
@@ -98,11 +99,12 @@ pub fn boxed_header(title: &str, width: u16) -> String {
             BoxChars::TOP_RIGHT
         )
         .cyan()
-        .bold()
+        .bold(),
+        CRLF = ctrl::CRLF
     );
-    let _ = writeln!(
+    let _ = write!(
         result,
-        "{}",
+        "{}{CRLF}",
         format!(
             "{}{}{}",
             BoxChars::VERTICAL,
@@ -110,7 +112,8 @@ pub fn boxed_header(title: &str, width: u16) -> String {
             BoxChars::VERTICAL
         )
         .cyan()
-        .bold()
+        .bold(),
+        CRLF = ctrl::CRLF
     );
     let _ = write!(
         result,
@@ -188,6 +191,26 @@ pub mod ctrl {
         let mut buf = String::new();
         let _ = cursor::RestorePosition.write_ansi(&mut buf);
         buf
+    }
+
+    /// Set scroll region (1-indexed, inclusive)
+    pub fn set_scroll_region(top: u16, bottom: u16) -> String {
+        format!("\x1b[{};{}r", top, bottom)
+    }
+
+    /// Reset scroll region to full screen
+    pub fn reset_scroll_region() -> String {
+        "\x1b[r".to_string()
+    }
+
+    /// Move cursor to absolute position (1-indexed)
+    pub fn move_to(row: u16, col: u16) -> String {
+        format!("\x1b[{};{}H", row, col)
+    }
+
+    /// Scroll up N lines within scroll region
+    pub fn scroll_up(n: u16) -> String {
+        format!("\x1b[{}S", n)
     }
 
     /// Carriage return + newline (for SSH terminals)

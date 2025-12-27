@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::display::{EntryContent, EntrySource, Ledger};
 use crate::model::ModelHandle;
 
 /// A room where users and models interact
@@ -16,6 +17,8 @@ pub struct Room {
     pub models: Vec<ModelHandle>,
     pub artifacts: Vec<ArtifactRef>,
     pub history: Vec<Message>,
+    /// Room's conversation ledger - ready to render
+    pub ledger: Ledger,
     pub context: RoomContext,
 }
 
@@ -177,6 +180,7 @@ impl Room {
             models: Vec::new(),
             artifacts: Vec::new(),
             history: Vec::new(),
+            ledger: Ledger::new(500),
             context: RoomContext::default(),
         }
     }
@@ -199,6 +203,21 @@ impl Room {
 
     pub fn add_message(&mut self, sender: Sender, content: MessageContent) {
         let id = self.history.len();
+
+        // Also push to ledger for rendering
+        let source = match &sender {
+            Sender::User(name) => EntrySource::User(name.clone()),
+            Sender::Model(name) => EntrySource::Model {
+                name: name.clone(),
+                is_streaming: false,
+            },
+            Sender::System => EntrySource::System,
+        };
+
+        if let MessageContent::Chat(text) = &content {
+            self.ledger.push(source, EntryContent::Chat(text.clone()));
+        }
+
         self.history.push(Message {
             id,
             timestamp: Utc::now(),
@@ -210,6 +229,21 @@ impl Room {
     pub fn recent_history(&self, count: usize) -> &[Message] {
         let start = self.history.len().saturating_sub(count);
         &self.history[start..]
+    }
+
+    /// Load history from DB into ledger (call once when room is first accessed)
+    pub fn load_history_from_db(&mut self, messages: &[crate::db::MessageRow]) {
+        for msg in messages {
+            let source = match msg.sender_type.as_str() {
+                "model" => EntrySource::Model {
+                    name: msg.sender_name.clone(),
+                    is_streaming: false,
+                },
+                "system" => EntrySource::System,
+                _ => EntrySource::User(msg.sender_name.clone()),
+            };
+            self.ledger.push(source, EntryContent::Chat(msg.content.clone()));
+        }
     }
 }
 

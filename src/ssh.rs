@@ -194,7 +194,18 @@ impl server::Handler for SshHandler {
         self.session_handle = Some(session.handle());
         self.main_channel = Some(channel);
 
+        let (width, height) = self.term_size;
+
         if let Some(ref player) = self.player {
+            // Set up screen: clear, set scroll region, position cursor
+            let mut setup = String::new();
+            setup.push_str(&ctrl::clear_screen());
+            // Scroll region: rows 1 to height-2 (leave 2 lines for prompt)
+            setup.push_str(&ctrl::set_scroll_region(1, height.saturating_sub(2)));
+            // Move to top of scroll region
+            setup.push_str(&ctrl::move_to(1, 1));
+            let _ = session.data(channel, CryptoVec::from(setup.as_bytes()));
+
             // Add welcome to ledger
             {
                 let mut ledger = self.ledger.lock().await;
@@ -206,26 +217,25 @@ impl server::Handler for SshHandler {
                 );
             }
 
-            // Render and send
-            let (output, lines) = {
+            // Render ledger in scroll region
+            let output = {
                 let ledger = self.ledger.lock().await;
                 let mut display = self.display.lock().await;
-                display.render_incremental(&ledger)
+                display.set_width(width);
+                let (rendered, _) = display.render_full(&ledger);
+                rendered
             };
             let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
-            {
-                let mut display = self.display.lock().await;
-                display.add_lines(lines);
-            }
 
-            // Show initial prompt
+            // Move to prompt line (bottom) and draw prompt
             let prompt = self.get_prompt();
-            let prompt_output = format!("{}{}{}  ", ctrl::CRLF, ctrl::CRLF, styles::prompt(&prompt));
+            let prompt_output = format!(
+                "{}{}{}",
+                ctrl::move_to(height.saturating_sub(1), 1),
+                ctrl::clear_line(),
+                styles::prompt(&format!("{} ", prompt))
+            );
             let _ = session.data(channel, CryptoVec::from(prompt_output.as_bytes()));
-            {
-                let mut display = self.display.lock().await;
-                display.add_lines(2);
-            }
         }
 
         // Spawn background task to push model responses
@@ -234,9 +244,10 @@ impl server::Handler for SshHandler {
             let ledger = self.ledger.clone();
             let display = self.display.clone();
             let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
+            let term_height = height;
 
             tokio::spawn(async move {
-                push_updates_task(handle, channel, update_rx, ledger, display, room_name).await;
+                push_updates_task(handle, channel, update_rx, ledger, display, room_name, term_height).await;
             });
         }
 
@@ -268,6 +279,7 @@ async fn push_updates_task(
     ledger: Arc<Mutex<Ledger>>,
     display: Arc<Mutex<DisplayBuffer>>,
     room_name: Option<String>,
+    term_height: u16,
 ) {
     while let Some(update) = update_rx.recv().await {
         // Update the ledger entry from Status to Chat
@@ -280,32 +292,80 @@ async fn push_updates_task(
             ledger.finalize(update.placeholder_id);
         }
 
-        // In-place update: go back, clear, write new content
-        let update_result = {
+        // Re-render the full ledger in scroll region
+        let rendered = {
             let ledger = ledger.lock().await;
             let mut display = display.lock().await;
-            display.render_placeholder_update(update.placeholder_id, &ledger)
+            let (output, _) = display.render_full(&ledger);
+            output
         };
 
-        if let Some((update_output, new_lines)) = update_result {
-            let _ = handle.data(channel, CryptoVec::from(update_output.as_bytes())).await;
-            {
-                let mut display = display.lock().await;
-                display.add_lines(new_lines.saturating_sub(1));
-            }
+        // Build output: save cursor, go to scroll region, clear & redraw, restore cursor
+        let mut output = String::new();
+        output.push_str(&ctrl::save_cursor());
+        output.push_str(&ctrl::move_to(1, 1));
+        // Clear scroll region and redraw
+        for _ in 0..term_height.saturating_sub(2) {
+            output.push_str(&ctrl::clear_line());
+            output.push_str(ctrl::CRLF);
         }
+        output.push_str(&ctrl::move_to(1, 1));
+        output.push_str(&rendered);
+        output.push_str(&ctrl::restore_cursor());
 
-        // Redraw a simple prompt (user can continue typing)
+        let _ = handle.data(channel, CryptoVec::from(output.as_bytes())).await;
+
+        // Redraw prompt at bottom
         let prompt = match &room_name {
             Some(r) => format!("{}> ", r),
             None => "lobby> ".to_string(),
         };
-        let prompt_output = format!("{}{}", ctrl::CRLF, styles::prompt(&prompt));
+        let prompt_output = format!(
+            "{}{}{}",
+            ctrl::move_to(term_height.saturating_sub(1), 1),
+            ctrl::clear_line(),
+            styles::prompt(&prompt)
+        );
         let _ = handle.data(channel, CryptoVec::from(prompt_output.as_bytes())).await;
     }
 }
 
 impl SshHandler {
+    /// Redraw the entire screen with scroll region
+    async fn redraw_screen(&self, channel: ChannelId, session: &mut Session) -> Result<(), anyhow::Error> {
+        let (width, height) = self.term_size;
+
+        // Render ledger content
+        let rendered = {
+            let ledger = self.ledger.lock().await;
+            let mut display = self.display.lock().await;
+            display.set_width(width);
+            let (output, _) = display.render_full(&ledger);
+            output
+        };
+
+        // Build screen output
+        let mut output = String::new();
+        // Move to top of scroll region and clear
+        output.push_str(&ctrl::move_to(1, 1));
+        for _ in 0..height.saturating_sub(2) {
+            output.push_str(&ctrl::clear_line());
+            output.push_str(ctrl::CRLF);
+        }
+        output.push_str(&ctrl::move_to(1, 1));
+        output.push_str(&rendered);
+
+        // Move to prompt line and draw prompt with current input
+        let prompt = self.get_prompt();
+        output.push_str(&ctrl::move_to(height.saturating_sub(1), 1));
+        output.push_str(&ctrl::clear_line());
+        output.push_str(&styles::prompt(&format!("{} ", prompt)));
+        output.push_str(self.editor.value());
+
+        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+        Ok(())
+    }
+
     /// Handle editor action result
     async fn handle_editor_action(
         &mut self,
@@ -313,25 +373,47 @@ impl SshHandler {
         session: &mut Session,
         action: EditorAction,
     ) -> Result<(), anyhow::Error> {
+        let (_width, height) = self.term_size;
+
         match action {
             EditorAction::None => {}
             EditorAction::Redraw => {
                 // Clear completions when user types
                 self.clear_completions();
+                // Just redraw the prompt line at bottom
                 let prompt = self.get_prompt();
-                let output = self.editor.render(&prompt);
+                let output = format!(
+                    "{}{}{}{}",
+                    ctrl::move_to(height.saturating_sub(1), 1),
+                    ctrl::clear_line(),
+                    styles::prompt(&format!("{} ", prompt)),
+                    self.editor.value()
+                );
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
             }
             EditorAction::Execute(line) => {
-                // Echo newline
-                let _ = session.data(channel, CryptoVec::from(b"\r\n".as_slice()));
+                // Handle /quit specially
+                if line.trim() == "/quit" {
+                    let output = format!(
+                        "{}\r\nGoodbye!\r\n",
+                        ctrl::reset_scroll_region()
+                    );
+                    let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                    session.close(channel)?;
+                    return Ok(());
+                }
 
                 // Async MUD-style: fire off to model and return immediately
                 if line.trim().starts_with('@') {
                     self.handle_mention_async(channel, session, &line).await?;
-                    // Show prompt immediately so user can keep chatting
+                    // handle_mention_async already rendered, just redraw prompt
                     let prompt = self.get_prompt();
-                    let output = format!("\r\n\x1b[33m{}\x1b[0m ", prompt);
+                    let output = format!(
+                        "{}{}{}",
+                        ctrl::move_to(height.saturating_sub(1), 1),
+                        ctrl::clear_line(),
+                        styles::prompt(&format!("{} ", prompt))
+                    );
                     let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 } else {
                     // Track room before command to detect /join
@@ -339,48 +421,41 @@ impl SshHandler {
 
                     let response = self.handle_input(&line).await;
 
-                    // Check if we joined a new room - if so, load history into ledger
+                    // Add command output to ledger if non-empty
+                    if !response.is_empty() {
+                        let mut ledger = self.ledger.lock().await;
+                        ledger.push(
+                            EntrySource::Command { command: line.split_whitespace().next().unwrap_or("").to_string() },
+                            EntryContent::CommandOutput(response),
+                        );
+                    }
+
+                    // Check if we joined a new room - if so, render room's ledger
                     let room_after = self.player.as_ref().and_then(|p| p.current_room.clone());
                     if room_after != room_before {
                         if let Some(ref room) = room_after {
-                            self.load_history_into_ledger(room).await;
-
-                            // Render the history entries
-                            let (history_output, lines) = {
-                                let ledger = self.ledger.lock().await;
-                                let mut display = self.display.lock().await;
-                                display.render_incremental(&ledger)
-                            };
-                            let _ = session.data(channel, CryptoVec::from(history_output.as_bytes()));
-                            {
-                                let mut display = self.display.lock().await;
-                                display.add_lines(lines);
-                            }
+                            self.render_room_history(room).await;
                         }
                     }
 
-                    let prompt = self.get_prompt();
-
-                    // Response with proper line endings, then prompt
-                    let output = format!("{}\r\n\x1b[33m{}\x1b[0m ", response, prompt);
-                    let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                    // Redraw full screen with updated ledger
+                    self.redraw_screen(channel, session).await?;
                 }
             }
             EditorAction::Tab => {
                 self.handle_tab_completion(channel, session).await?;
             }
             EditorAction::ClearScreen => {
-                // Clear screen and redraw prompt
-                let prompt = self.get_prompt();
-                let output = format!("\x1b[2J\x1b[H\x1b[33m{}\x1b[0m ", prompt);
-                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                // Full redraw
+                self.redraw_screen(channel, session).await?;
             }
             EditorAction::Quit => {
-                // Send goodbye and close
-                let _ = session.data(
-                    channel,
-                    CryptoVec::from(b"\r\nGoodbye!\r\n".as_slice()),
+                // Reset scroll region and say goodbye
+                let output = format!(
+                    "{}\r\nGoodbye!\r\n",
+                    ctrl::reset_scroll_region()
                 );
+                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 session.close(channel)?;
             }
         }
@@ -634,7 +709,7 @@ impl SshHandler {
                 EntrySource::User(username.clone()),
                 EntryContent::Chat(format!("@{}: {}", model_name, message)),
             );
-            // Add placeholder for model response (mutable - will be updated)
+            // Add placeholder for model response (will be updated when response arrives)
             ledger.push_mutable(
                 EntrySource::Model {
                     name: model.short_name.clone(),
@@ -644,20 +719,25 @@ impl SshHandler {
             )
         };
 
-        // Render and send both entries
-        let (output, lines) = {
+        // Render full ledger in scroll region (like push_updates_task does)
+        let (_, height) = self.term_size;
+        let rendered = {
             let ledger = self.ledger.lock().await;
             let mut display = self.display.lock().await;
-            display.render_incremental(&ledger)
+            let (output, _) = display.render_full(&ledger);
+            output
         };
-        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
 
-        // Register placeholder for in-place update tracking
-        {
-            let mut display = self.display.lock().await;
-            display.register_placeholder(placeholder_id);
-            display.add_lines(lines);
+        // Clear scroll region and redraw content
+        let mut output = String::new();
+        output.push_str(&ctrl::move_to(1, 1));
+        for _ in 0..height.saturating_sub(2) {
+            output.push_str(&ctrl::clear_line());
+            output.push_str(ctrl::CRLF);
         }
+        output.push_str(&ctrl::move_to(1, 1));
+        output.push_str(&rendered);
+        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
 
         // Build context from room history
         let history = if let Some(ref room_name) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
@@ -738,42 +818,16 @@ impl SshHandler {
         Ok(())
     }
 
-    /// Load room history into the ledger (called after /join)
-    pub async fn load_history_into_ledger(&mut self, room_name: &str) {
-        if let Ok(messages) = self.state.db.recent_messages(room_name, 20) {
-            if messages.is_empty() {
-                return;
+    /// Render room's ledger into session ledger (called after /join)
+    pub async fn render_room_history(&mut self, room_name: &str) {
+        let world = self.state.world.read().await;
+        if let Some(room) = world.get_room(room_name) {
+            let mut session_ledger = self.ledger.lock().await;
+
+            // Copy room's ledger entries into session ledger
+            for entry in room.ledger.all() {
+                session_ledger.push(entry.source.clone(), entry.content.clone());
             }
-
-            let mut ledger = self.ledger.lock().await;
-
-            // Add history separator
-            ledger.push(
-                EntrySource::System,
-                EntryContent::HistorySeparator {
-                    label: "Recent History".to_string(),
-                },
-            );
-
-            // Add each historical message
-            for msg in messages {
-                let source = match msg.sender_type.as_str() {
-                    "model" => EntrySource::Model {
-                        name: msg.sender_name.clone(),
-                        is_streaming: false,
-                    },
-                    _ => EntrySource::User(msg.sender_name.clone()),
-                };
-                ledger.push(source, EntryContent::Chat(msg.content.clone()));
-            }
-
-            // Add separator at end
-            ledger.push(
-                EntrySource::System,
-                EntryContent::HistorySeparator {
-                    label: "Now".to_string(),
-                },
-            );
         }
     }
 }

@@ -25,6 +25,8 @@ pub enum EntrySource {
 /// Status indicator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
+    /// Invisible placeholder - will be replaced with content
+    Pending,
     Thinking,
     RunningTool,
     Connecting,
