@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 use futures::StreamExt;
+use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatRequest, ChatStreamEvent};
-use genai::Client;
+use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
+use genai::{Client, ServiceTarget};
 use tokio::sync::mpsc;
 
 use crate::model::{ModelBackend, ModelHandle};
@@ -36,11 +38,40 @@ impl LlmClient {
         Ok(Self { client })
     }
 
-    /// Create a client with a custom auth resolver for local llama.cpp
+    /// Create a client with a custom Ollama endpoint for local llama.cpp
     pub fn with_ollama_endpoint(endpoint: &str) -> Result<Self> {
-        // For local llama.cpp via Ollama-compatible API, set OLLAMA_HOST
-        std::env::set_var("OLLAMA_HOST", endpoint);
-        let client = Client::default();
+        // Build endpoint URL with /v1/ suffix for OpenAI-compatible API
+        let ollama_url = if endpoint.ends_with('/') {
+            format!("{}v1/", endpoint)
+        } else {
+            format!("{}/v1/", endpoint)
+        };
+
+        let ollama_endpoint = Endpoint::from_owned(ollama_url);
+
+        // Create a resolver that routes Ollama models to our custom endpoint
+        let target_resolver = ServiceTargetResolver::from_resolver_fn(
+            move |service_target: ServiceTarget| -> std::result::Result<ServiceTarget, genai::resolver::Error> {
+                let ServiceTarget { model, endpoint, auth } = service_target;
+
+                // Only override Ollama adapter endpoints
+                if model.adapter_kind == AdapterKind::Ollama {
+                    Ok(ServiceTarget {
+                        endpoint: ollama_endpoint.clone(),
+                        auth: AuthData::from_single("ollama"),
+                        model,
+                    })
+                } else {
+                    // Other adapters use their defaults
+                    Ok(ServiceTarget { endpoint, auth, model })
+                }
+            },
+        );
+
+        let client = Client::builder()
+            .with_service_target_resolver(target_resolver)
+            .build();
+
         Ok(Self { client })
     }
 
