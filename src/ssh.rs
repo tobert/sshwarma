@@ -5,15 +5,24 @@ use russh::server::{self, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::line_editor::{EditorAction, LineEditor};
-use crate::llm::StreamChunk;
 use crate::player::PlayerSession;
 use crate::state::SharedState;
 use crate::world::{MessageContent, Sender};
+
+/// Message pushed to the session from background tasks (model responses, etc.)
+#[derive(Debug)]
+pub struct IncomingMessage {
+    /// Who sent this (model name, system, etc.)
+    pub from: String,
+    /// The message content
+    pub content: String,
+}
 
 /// SSH server implementation
 #[derive(Clone)]
@@ -26,6 +35,8 @@ impl server::Server for SshServer {
 
     fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> Self::Handler {
         info!(?peer_addr, "new connection");
+        // Channel for receiving messages from background tasks (model responses, etc.)
+        let (incoming_tx, incoming_rx) = mpsc::channel(32);
         SshHandler {
             state: self.state.clone(),
             player: None,
@@ -35,6 +46,8 @@ impl server::Server for SshServer {
             completer: CompletionEngine::new(self.state.clone()),
             completions: Vec::new(),
             completion_index: 0,
+            incoming_tx,
+            incoming_rx,
         }
     }
 
@@ -59,6 +72,10 @@ pub struct SshHandler {
     pub completions: Vec<Completion>,
     /// Selected completion index
     pub completion_index: usize,
+    /// Sender for pushing messages to this session (clone for background tasks)
+    pub incoming_tx: mpsc::Sender<IncomingMessage>,
+    /// Receiver for messages from background tasks
+    pub incoming_rx: mpsc::Receiver<IncomingMessage>,
 }
 
 impl server::Handler for SshHandler {
@@ -176,6 +193,9 @@ impl server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // Check for any messages from background tasks (model responses)
+        self.flush_incoming_messages(channel, session)?;
+
         for &byte in data {
             // Parse through escape sequence handler
             if let Some(event) = self.esc_parser.feed(byte) {
@@ -208,9 +228,13 @@ impl SshHandler {
                 // Echo newline
                 let _ = session.data(channel, CryptoVec::from(b"\r\n".as_slice()));
 
-                // Use streaming for @mentions
+                // Async MUD-style: fire off to model and return immediately
                 if line.trim().starts_with('@') {
-                    self.handle_mention_stream(channel, session, &line).await?;
+                    self.handle_mention_async(channel, session, &line).await?;
+                    // Show prompt immediately so user can keep chatting
+                    let prompt = self.get_prompt();
+                    let output = format!("\r\n\x1b[33m{}\x1b[0m ", prompt);
+                    let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 } else {
                     let response = self.handle_input(&line).await;
                     let prompt = self.get_prompt();
@@ -388,8 +412,8 @@ impl SshHandler {
         self.completion_index = 0;
     }
 
-    /// Handle @mention with streaming response
-    async fn handle_mention_stream(
+    /// Handle @mention - spawn background task and return immediately
+    async fn handle_mention_async(
         &mut self,
         channel: ChannelId,
         session: &mut Session,
@@ -434,8 +458,11 @@ impl SshHandler {
             }
         };
 
-        // Show user message
-        let header = format!("{} → @{}: {}\r\n\r\n{}: ", username, model_name, message, model.short_name);
+        // Show user message and that model is thinking
+        let header = format!(
+            "{} → @{}: {}\r\n\x1b[2m({} is thinking...)\x1b[0m",
+            username, model_name, message, model.short_name
+        );
         let _ = session.data(channel, CryptoVec::from(header.as_bytes()));
 
         // Build context from room history
@@ -470,71 +497,78 @@ impl SshHandler {
             model.display_name, username
         );
 
-        // Create streaming channel
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(32);
-
-        // Spawn the streaming task
+        // Clone what we need for the background task
         let llm = self.state.llm.clone();
-        let model_clone = model.clone();
-        let history_clone = history.clone();
-        let message_clone = message.to_string();
-        let system_prompt_clone = system_prompt.clone();
+        let world = self.state.world.clone();
+        let db = self.state.db.clone();
+        let incoming_tx = self.incoming_tx.clone();
+        let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
+        let model_short = model.short_name.clone();
+        let message_owned = message.to_string();
 
+        // Spawn background task - returns immediately
         tokio::spawn(async move {
-            let _ = llm.chat_stream(
-                &model_clone,
-                &system_prompt_clone,
-                &history_clone,
-                &message_clone,
-                tx,
-            ).await;
+            // Get response from model (non-streaming for simplicity in async mode)
+            let response = match llm
+                .chat_with_context(&model, &system_prompt, &history, &message_owned)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => format!("[error: {}]", e),
+            };
+
+            // Save to room history
+            if let Some(ref room) = room_name {
+                {
+                    let mut world = world.write().await;
+                    if let Some(r) = world.get_room_mut(room) {
+                        r.add_message(
+                            Sender::Model(model_short.clone()),
+                            MessageContent::Chat(response.clone()),
+                        );
+                    }
+                }
+                let _ = db.add_message(room, "model", &model_short, "chat", &response);
+            }
+
+            // Send to session's incoming message channel
+            let _ = incoming_tx
+                .send(IncomingMessage {
+                    from: model_short,
+                    content: response,
+                })
+                .await;
         });
 
-        // Collect full response for history
-        let mut full_response = String::new();
+        Ok(())
+    }
 
-        // Stream chunks to terminal
-        while let Some(chunk) = rx.recv().await {
-            match chunk {
-                StreamChunk::Text(text) => {
-                    full_response.push_str(&text);
-                    // Convert newlines for terminal
-                    let display = text.replace('\n', "\r\n");
-                    let _ = session.data(channel, CryptoVec::from(display.as_bytes()));
-                }
-                StreamChunk::Done => break,
-                StreamChunk::Error(e) => {
-                    let msg = format!("\r\n[error: {}]", e);
-                    let _ = session.data(channel, CryptoVec::from(msg.as_bytes()));
-                    break;
-                }
-            }
-        }
+    /// Flush any pending incoming messages to the terminal
+    fn flush_incoming_messages(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), anyhow::Error> {
+        let mut got_any = false;
 
-        // Save to room history
-        if let Some(ref room_name) = self.player.as_ref().and_then(|p| p.current_room.clone()) {
-            {
-                let mut world = self.state.world.write().await;
-                if let Some(room) = world.get_room_mut(room_name) {
-                    room.add_message(
-                        Sender::Model(model.short_name.clone()),
-                        MessageContent::Chat(full_response.clone()),
-                    );
-                }
-            }
-            let _ = self.state.db.add_message(
-                room_name,
-                "model",
-                &model.short_name,
-                "chat",
-                &full_response,
+        // Non-blocking check for pending messages
+        while let Ok(msg) = self.incoming_rx.try_recv() {
+            got_any = true;
+            // Format like IRC/MUD: model name then message
+            let formatted = format!(
+                "\r\n\x1b[1;36m{}:\x1b[0m {}\r\n",
+                msg.from,
+                msg.content.replace('\n', "\r\n")
             );
+            let _ = session.data(channel, CryptoVec::from(formatted.as_bytes()));
         }
 
-        // Show prompt after response
-        let prompt = self.get_prompt();
-        let prompt_line = format!("\r\n\r\n\x1b[33m{}\x1b[0m ", prompt);
-        let _ = session.data(channel, CryptoVec::from(prompt_line.as_bytes()));
+        // If we displayed any messages, redraw the prompt and current input
+        if got_any {
+            let prompt = self.get_prompt();
+            let output = self.editor.render(&prompt);
+            let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+        }
 
         Ok(())
     }
