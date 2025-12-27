@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use sshwarma::config::Config;
+use sshwarma::config::{Config, ModelsConfig};
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
 use sshwarma::mcp::McpClients;
@@ -57,11 +57,17 @@ async fn main() -> Result<()> {
         info!("{} users registered", users.len());
     }
 
-    // Initialize LLM and models
-    info!("initializing LLM client for {}", config.llm_endpoint);
-    let llm = LlmClient::with_ollama_endpoint(&config.llm_endpoint)
+    // Load models configuration
+    let models_config = ModelsConfig::load(&config.models_config_path)
+        .context("failed to load models config")?;
+
+    // Initialize LLM client (set OLLAMA_HOST for local models)
+    info!("initializing LLM client (ollama: {})", models_config.ollama_endpoint);
+    let llm = LlmClient::with_ollama_endpoint(&models_config.ollama_endpoint)
         .context("failed to create LLM client")?;
-    let models = ModelRegistry::with_defaults(&config.llm_endpoint);
+
+    // Build model registry from config
+    let models = ModelRegistry::from_config(&models_config);
     info!("{} models registered", models.list().len());
 
     // Load rooms from database

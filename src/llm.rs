@@ -47,12 +47,9 @@ impl LlmClient {
     /// Get the model identifier string for genai based on backend
     fn model_id(model: &ModelHandle) -> Option<String> {
         match &model.backend {
-            ModelBackend::LlamaCpp { model_name, .. } => {
-                // llama.cpp models go through Ollama adapter
-                Some(model_name.clone())
-            }
             ModelBackend::Ollama { model, .. } => Some(model.clone()),
-            ModelBackend::Claude { model } => Some(model.clone()),
+            ModelBackend::OpenAI { model } => Some(model.clone()),
+            ModelBackend::Anthropic { model } => Some(model.clone()),
             ModelBackend::Gemini { model } => Some(model.clone()),
             ModelBackend::Mock { .. } => None, // Mock doesn't use genai
         }

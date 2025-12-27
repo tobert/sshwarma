@@ -1,0 +1,46 @@
+# sshwarma model configuration
+#
+# Models can be @mentioned in chat: @qwen-8b hello
+# genai routes by model name prefix:
+#   gpt-*     -> OpenAI (needs OPENAI_API_KEY)
+#   claude-*  -> Anthropic (needs ANTHROPIC_API_KEY)
+#   gemini-*  -> Gemini (needs GEMINI_API_KEY)
+#   others    -> Ollama (uses ollama_endpoint below)
+#
+# For Vertex AI (future): will add vertex_project, vertex_location fields
+
+# Default endpoint for Ollama/llama.cpp models
+ollama_endpoint = "http://localhost:2020"
+
+# Local llama.cpp models via Ollama-compatible API
+[[models]]
+name = "qwen-8b"
+display = "Qwen3-VL-8B-Instruct"
+model = "qwen3-vl-8b"
+backend = "ollama"
+
+[[models]]
+name = "qwen-4b"
+display = "Qwen3-VL-4B-Instruct"
+model = "qwen3-vl-4b"
+backend = "ollama"
+
+# Uncomment to add cloud models (need API keys in env)
+#
+# [[models]]
+# name = "gemini"
+# display = "Gemini 2.0 Flash"
+# model = "gemini-2.0-flash"
+# backend = "gemini"
+#
+# [[models]]
+# name = "claude"
+# display = "Claude 3.5 Sonnet"
+# model = "claude-3-5-sonnet-20241022"
+# backend = "anthropic"
+#
+# [[models]]
+# name = "gpt"
+# display = "GPT-4o"
+# model = "gpt-4o"
+# backend = "openai"

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::config::{ModelConfig, ModelsConfig};
+
 /// A model that can be addressed in a room
 #[derive(Debug, Clone)]
 pub struct ModelHandle {
@@ -18,22 +20,21 @@ pub struct ModelHandle {
 /// How to reach this model
 #[derive(Debug, Clone)]
 pub enum ModelBackend {
-    /// Local llama.cpp via OpenAI-compatible API
-    LlamaCpp {
-        endpoint: String,
-        model_name: String,
-    },
-    /// Claude API (future)
-    Claude {
-        model: String,
-    },
-    /// Gemini API (future)
-    Gemini {
-        model: String,
-    },
-    /// Ollama
+    /// Ollama/llama.cpp via OpenAI-compatible API
     Ollama {
         endpoint: String,
+        model: String,
+    },
+    /// OpenAI API
+    OpenAI {
+        model: String,
+    },
+    /// Anthropic Claude API
+    Anthropic {
+        model: String,
+    },
+    /// Google Gemini API
+    Gemini {
         model: String,
     },
     /// Mock backend for testing - echoes input with prefix
@@ -54,32 +55,64 @@ impl ModelRegistry {
         }
     }
 
-    /// Create a registry with default local models
-    pub fn with_defaults(llm_endpoint: &str) -> Self {
+    /// Load models from configuration
+    pub fn from_config(config: &ModelsConfig) -> Self {
         let mut registry = Self::new();
 
-        // Qwen models on local llama.cpp
-        registry.register(ModelHandle {
-            short_name: "qwen-8b".to_string(),
-            display_name: "Qwen3-VL-8B-Instruct".to_string(),
-            backend: ModelBackend::LlamaCpp {
-                endpoint: llm_endpoint.to_string(),
-                model_name: "qwen3-vl-8b".to_string(),
-            },
-            available: true,
-        });
+        for model_config in &config.models {
+            if !model_config.enabled {
+                tracing::debug!("skipping disabled model: {}", model_config.name);
+                continue;
+            }
 
-        registry.register(ModelHandle {
-            short_name: "qwen-4b".to_string(),
-            display_name: "Qwen3-VL-4B-Instruct".to_string(),
-            backend: ModelBackend::LlamaCpp {
-                endpoint: llm_endpoint.to_string(),
-                model_name: "qwen3-vl-4b".to_string(),
-            },
-            available: true,
-        });
+            if let Some(handle) = Self::model_from_config(model_config, &config.ollama_endpoint) {
+                tracing::info!(
+                    "registered model @{} ({}) via {}",
+                    handle.short_name,
+                    handle.display_name,
+                    model_config.backend
+                );
+                registry.register(handle);
+            }
+        }
 
         registry
+    }
+
+    /// Convert a ModelConfig to a ModelHandle
+    fn model_from_config(config: &ModelConfig, default_ollama_endpoint: &str) -> Option<ModelHandle> {
+        let backend = match config.backend.as_str() {
+            "ollama" | "llamacpp" | "llama.cpp" => {
+                let endpoint = config
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| default_ollama_endpoint.to_string());
+                ModelBackend::Ollama {
+                    endpoint,
+                    model: config.model.clone(),
+                }
+            }
+            "openai" => ModelBackend::OpenAI {
+                model: config.model.clone(),
+            },
+            "anthropic" | "claude" => ModelBackend::Anthropic {
+                model: config.model.clone(),
+            },
+            "gemini" | "google" => ModelBackend::Gemini {
+                model: config.model.clone(),
+            },
+            unknown => {
+                tracing::warn!("unknown backend '{}' for model {}", unknown, config.name);
+                return None;
+            }
+        };
+
+        Some(ModelHandle {
+            short_name: config.name.clone(),
+            display_name: config.display.clone(),
+            backend,
+            available: true,
+        })
     }
 
     pub fn register(&mut self, model: ModelHandle) {
@@ -96,5 +129,11 @@ impl ModelRegistry {
 
     pub fn available(&self) -> Vec<&ModelHandle> {
         self.models.values().filter(|m| m.available).collect()
+    }
+}
+
+impl Default for ModelRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
