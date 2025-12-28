@@ -7,6 +7,7 @@ use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
@@ -14,7 +15,8 @@ use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::display::{
     DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
-    styles::{self, ctrl},
+    hud::{render_hud, HudState, ParticipantStatus, HUD_HEIGHT},
+    styles::ctrl,
 };
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
@@ -131,6 +133,7 @@ impl server::Server for SshServer {
             update_rx: Some(update_rx),
             session_handle: None,
             main_channel: None,
+            hud_state: Arc::new(Mutex::new(HudState::new())),
         }
     }
 
@@ -167,6 +170,8 @@ pub struct SshHandler {
     pub session_handle: Option<Handle>,
     /// Main channel ID for output (set in shell_request)
     pub main_channel: Option<ChannelId>,
+    /// HUD state (shared with refresh task)
+    pub hud_state: Arc<Mutex<HudState>>,
 }
 
 impl server::Handler for SshHandler {
@@ -273,11 +278,35 @@ impl server::Handler for SshHandler {
             // Set up screen: clear, set scroll region, position cursor
             let mut setup = String::new();
             setup.push_str(&ctrl::clear_screen());
-            // Scroll region: rows 1 to height-2 (leave 2 lines for prompt)
-            setup.push_str(&ctrl::set_scroll_region(1, height.saturating_sub(2)));
+            // Scroll region: rows 1 to height-9 (leave 8 for HUD + 1 for input)
+            let scroll_bottom = height.saturating_sub(HUD_HEIGHT + 1);
+            setup.push_str(&ctrl::set_scroll_region(1, scroll_bottom));
             // Move to top of scroll region
             setup.push_str(&ctrl::move_to(1, 1));
             let _ = session.data(channel, CryptoVec::from(setup.as_bytes()));
+
+            // Initialize HUD state
+            {
+                let mut hud = self.hud_state.lock().await;
+                hud.add_user(player.username.clone());
+                if let Some(room_name) = &player.current_room {
+                    let world = self.state.world.read().await;
+                    if let Some(room) = world.get_room(room_name) {
+                        hud.set_room(Some(room_name.clone()), room.context.exits.clone());
+                        // Add other users and models
+                        for user in &room.users {
+                            if user != &player.username {
+                                hud.add_user(user.clone());
+                            }
+                        }
+                        for model in &room.models {
+                            hud.add_model(model.short_name.clone());
+                        }
+                    }
+                } else {
+                    hud.set_room(None, std::collections::HashMap::new());
+                }
+            }
 
             // Add welcome to ledger
             {
@@ -300,15 +329,18 @@ impl server::Handler for SshHandler {
             };
             let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
 
-            // Move to prompt line (bottom) and draw prompt
-            let prompt = self.get_prompt();
-            let prompt_output = format!(
-                "{}{}{}",
-                ctrl::move_to(height.saturating_sub(1), 1),
-                ctrl::clear_line(),
-                styles::prompt(&format!("{} ", prompt))
-            );
-            let _ = session.data(channel, CryptoVec::from(prompt_output.as_bytes()));
+            // Move to HUD position and draw HUD
+            let hud_start_row = height.saturating_sub(HUD_HEIGHT);
+            let hud_output = {
+                let hud = self.hud_state.lock().await;
+                let rendered = render_hud(&hud, width);
+                format!(
+                    "{}{}",
+                    ctrl::move_to(hud_start_row, 1),
+                    rendered
+                )
+            };
+            let _ = session.data(channel, CryptoVec::from(hud_output.as_bytes()));
         }
 
         // Spawn background task to push model responses
@@ -316,11 +348,24 @@ impl server::Handler for SshHandler {
             let handle = session.handle();
             let ledger = self.ledger.clone();
             let display = self.display.clone();
-            let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
+            let hud_state_for_updates = self.hud_state.clone();
+            let term_width = width;
             let term_height = height;
 
             tokio::spawn(async move {
-                push_updates_task(handle, channel, update_rx, ledger, display, room_name, term_height).await;
+                push_updates_task(handle, channel, update_rx, ledger, display, hud_state_for_updates, term_width, term_height).await;
+            });
+        }
+
+        // Spawn HUD refresh task (100ms interval for spinner animation)
+        {
+            let handle = session.handle();
+            let hud_state = self.hud_state.clone();
+            let term_width = width;
+            let term_height = height;
+
+            tokio::spawn(async move {
+                hud_refresh_task(handle, channel, hud_state, term_width, term_height).await;
             });
         }
 
@@ -351,9 +396,13 @@ async fn push_updates_task(
     mut update_rx: mpsc::Receiver<LedgerUpdate>,
     ledger: Arc<Mutex<Ledger>>,
     display: Arc<Mutex<DisplayBuffer>>,
-    room_name: Option<String>,
+    hud_state: Arc<Mutex<HudState>>,
+    term_width: u16,
     term_height: u16,
 ) {
+    let scroll_bottom = term_height.saturating_sub(HUD_HEIGHT + 1);
+    let hud_start_row = term_height.saturating_sub(HUD_HEIGHT);
+
     while let Some(update) = update_rx.recv().await {
         // Process the update based on type
         let needs_redraw = match update {
@@ -401,7 +450,7 @@ async fn push_updates_task(
         output.push_str(&ctrl::save_cursor());
         output.push_str(&ctrl::move_to(1, 1));
         // Clear scroll region and redraw
-        for _ in 0..term_height.saturating_sub(2) {
+        for _ in 0..scroll_bottom {
             output.push_str(&ctrl::clear_line());
             output.push_str(ctrl::CRLF);
         }
@@ -411,18 +460,57 @@ async fn push_updates_task(
 
         let _ = handle.data(channel, CryptoVec::from(output.as_bytes())).await;
 
-        // Redraw prompt at bottom
-        let prompt = match &room_name {
-            Some(r) => format!("{}> ", r),
-            None => "lobby> ".to_string(),
+        // Redraw HUD at bottom
+        let hud_output = {
+            let hud = hud_state.lock().await;
+            let rendered = render_hud(&hud, term_width);
+            format!(
+                "{}{}",
+                ctrl::move_to(hud_start_row, 1),
+                rendered
+            )
         };
-        let prompt_output = format!(
-            "{}{}{}",
-            ctrl::move_to(term_height.saturating_sub(1), 1),
-            ctrl::clear_line(),
-            styles::prompt(&prompt)
-        );
-        let _ = handle.data(channel, CryptoVec::from(prompt_output.as_bytes())).await;
+        let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
+    }
+}
+
+/// Background task that refreshes the HUD at 100ms intervals
+/// Updates spinner animation and clears expired notifications
+async fn hud_refresh_task(
+    handle: Handle,
+    channel: ChannelId,
+    hud_state: Arc<Mutex<HudState>>,
+    term_width: u16,
+    term_height: u16,
+) {
+    let hud_start_row = term_height.saturating_sub(HUD_HEIGHT);
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+    loop {
+        interval.tick().await;
+
+        // Update HUD state (spinner frame, expired notifications)
+        {
+            let mut hud = hud_state.lock().await;
+            hud.advance_spinner();
+            hud.clear_expired_notification();
+        }
+
+        // Always redraw - tick indicator shows HUD is alive
+        {
+            let hud_output = {
+                let hud = hud_state.lock().await;
+                let rendered = render_hud(&hud, term_width);
+                format!(
+                    "{}{}{}{}",
+                    ctrl::save_cursor(),
+                    ctrl::move_to(hud_start_row, 1),
+                    rendered,
+                    ctrl::restore_cursor()
+                )
+            };
+            let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
+        }
     }
 }
 
@@ -430,6 +518,8 @@ impl SshHandler {
     /// Redraw the entire screen with scroll region
     async fn redraw_screen(&self, channel: ChannelId, session: &mut Session) -> Result<(), anyhow::Error> {
         let (width, height) = self.term_size;
+        let scroll_bottom = height.saturating_sub(HUD_HEIGHT + 1);
+        let hud_start_row = height.saturating_sub(HUD_HEIGHT);
 
         // Render ledger content
         let rendered = {
@@ -444,18 +534,24 @@ impl SshHandler {
         let mut output = String::new();
         // Move to top of scroll region and clear
         output.push_str(&ctrl::move_to(1, 1));
-        for _ in 0..height.saturating_sub(2) {
+        for _ in 0..scroll_bottom {
             output.push_str(&ctrl::clear_line());
             output.push_str(ctrl::CRLF);
         }
         output.push_str(&ctrl::move_to(1, 1));
         output.push_str(&rendered);
 
-        // Move to prompt line and draw prompt with current input
-        let prompt = self.get_prompt();
-        output.push_str(&ctrl::move_to(height.saturating_sub(1), 1));
+        // Render HUD
+        let hud_rendered = {
+            let hud = self.hud_state.lock().await;
+            render_hud(&hud, width)
+        };
+        output.push_str(&ctrl::move_to(hud_start_row, 1));
+        output.push_str(&hud_rendered);
+
+        // Move cursor to input line (bare cursor, no prompt)
+        output.push_str(&ctrl::move_to(height, 1));
         output.push_str(&ctrl::clear_line());
-        output.push_str(&styles::prompt(&format!("{} ", prompt)));
         output.push_str(self.editor.value());
 
         let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
@@ -470,19 +566,18 @@ impl SshHandler {
         action: EditorAction,
     ) -> Result<(), anyhow::Error> {
         let (_width, height) = self.term_size;
+        let input_row = height; // Bare cursor input at bottom
 
         match action {
             EditorAction::None => {}
             EditorAction::Redraw => {
                 // Clear completions when user types
                 self.clear_completions();
-                // Just redraw the prompt line at bottom
-                let prompt = self.get_prompt();
+                // Just redraw the input line at bottom (bare cursor, no prompt)
                 let output = format!(
-                    "{}{}{}{}",
-                    ctrl::move_to(height.saturating_sub(1), 1),
+                    "{}{}{}",
+                    ctrl::move_to(input_row, 1),
                     ctrl::clear_line(),
-                    styles::prompt(&format!("{} ", prompt)),
                     self.editor.value()
                 );
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
@@ -502,13 +597,11 @@ impl SshHandler {
                 // Async MUD-style: fire off to model and return immediately
                 if line.trim().starts_with('@') {
                     self.handle_mention_async(channel, session, &line).await?;
-                    // handle_mention_async already rendered, just redraw prompt
-                    let prompt = self.get_prompt();
+                    // handle_mention_async already rendered, just redraw input line
                     let output = format!(
-                        "{}{}{}",
-                        ctrl::move_to(height.saturating_sub(1), 1),
-                        ctrl::clear_line(),
-                        styles::prompt(&format!("{} ", prompt))
+                        "{}{}",
+                        ctrl::move_to(input_row, 1),
+                        ctrl::clear_line()
                     );
                     let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 } else {
@@ -558,7 +651,8 @@ impl SshHandler {
         Ok(())
     }
 
-    /// Get current prompt string
+    /// Get current prompt string (may be used for HUD room indicator)
+    #[allow(dead_code)]
     fn get_prompt(&self) -> String {
         self.player
             .as_ref()
@@ -644,9 +738,8 @@ impl SshHandler {
                 self.editor.insert_completion(" ");
             }
 
-            // Redraw the input line
-            let prompt = self.get_prompt();
-            let output = self.editor.render(&prompt);
+            // Redraw the input line (bare cursor, no prompt)
+            let output = self.editor.render("");
             let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
         }
         Ok(())
@@ -914,11 +1007,18 @@ impl SshHandler {
             }
         };
 
+        // Set model status to Thinking in HUD
+        {
+            let mut hud = self.hud_state.lock().await;
+            hud.update_status(&model.short_name, ParticipantStatus::Thinking);
+        }
+
         // Clone what we need for the background task
         let llm = self.state.llm.clone();
         let world = self.state.world.clone();
         let db = self.state.db.clone();
         let update_tx = self.update_tx.clone();
+        let hud_state = self.hud_state.clone();
         let model_short = model.short_name.clone();
         let message_owned = message.to_string();
 
@@ -960,12 +1060,22 @@ impl SshHandler {
                         }).await;
                     }
                     StreamChunk::ToolCall(name) => {
+                        // Update HUD: model is running a tool
+                        {
+                            let mut hud = hud_state.lock().await;
+                            hud.update_status(&model_short, ParticipantStatus::RunningTool(name.clone()));
+                        }
                         let _ = update_tx.send(LedgerUpdate::ToolCall {
                             placeholder_id,
                             tool_name: name,
                         }).await;
                     }
                     StreamChunk::ToolResult(summary) => {
+                        // Update HUD: back to thinking after tool result
+                        {
+                            let mut hud = hud_state.lock().await;
+                            hud.update_status(&model_short, ParticipantStatus::Thinking);
+                        }
                         let _ = update_tx.send(LedgerUpdate::ToolResult {
                             placeholder_id,
                             summary,
@@ -979,6 +1089,12 @@ impl SshHandler {
                         break;
                     }
                 }
+            }
+
+            // Update HUD: model is idle again
+            {
+                let mut hud = hud_state.lock().await;
+                hud.update_status(&model_short, ParticipantStatus::Idle);
             }
 
             // Wait for stream task to complete

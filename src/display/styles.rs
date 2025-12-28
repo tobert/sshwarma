@@ -59,7 +59,7 @@ pub fn separator(label: Option<&str>, width: u16) -> String {
     }
 }
 
-/// Box drawing characters
+/// Box drawing characters (rounded corners)
 pub struct BoxChars;
 
 impl BoxChars {
@@ -69,6 +69,84 @@ impl BoxChars {
     pub const BOTTOM_RIGHT: &'static str = "╯";
     pub const HORIZONTAL: &'static str = "─";
     pub const VERTICAL: &'static str = "│";
+}
+
+/// Heavy box drawing characters (for HUD)
+pub struct HudBox;
+
+impl HudBox {
+    pub const TOP_LEFT: &'static str = "┏";
+    pub const TOP_RIGHT: &'static str = "┓";
+    pub const BOTTOM_LEFT: &'static str = "┗";
+    pub const BOTTOM_RIGHT: &'static str = "┛";
+    pub const HORIZONTAL: &'static str = "━";
+    pub const VERTICAL: &'static str = "┃";
+}
+
+/// Tokyo Night color palette (truecolor)
+pub mod colors {
+    use crossterm::style::Color;
+
+    /// Foreground - #a9b1d6
+    pub const FG: Color = Color::Rgb {
+        r: 169,
+        g: 177,
+        b: 214,
+    };
+    /// Dim text - #565f89
+    pub const DIM: Color = Color::Rgb {
+        r: 86,
+        g: 95,
+        b: 137,
+    };
+    /// Border - #292e42
+    pub const BORDER: Color = Color::Rgb {
+        r: 41,
+        g: 46,
+        b: 66,
+    };
+    /// Cyan (active) - #7dcfff
+    pub const CYAN: Color = Color::Rgb {
+        r: 125,
+        g: 207,
+        b: 255,
+    };
+    /// Blue (accent) - #7aa2f7
+    pub const BLUE: Color = Color::Rgb {
+        r: 122,
+        g: 162,
+        b: 247,
+    };
+    /// Green (ok) - #9ece6a
+    pub const GREEN: Color = Color::Rgb {
+        r: 158,
+        g: 206,
+        b: 106,
+    };
+    /// Yellow (warn) - #e0af68
+    pub const YELLOW: Color = Color::Rgb {
+        r: 224,
+        g: 175,
+        b: 104,
+    };
+    /// Red (error) - #f7768e
+    pub const RED: Color = Color::Rgb {
+        r: 247,
+        g: 118,
+        b: 142,
+    };
+    /// Orange (warm) - #ff9e64
+    pub const ORANGE: Color = Color::Rgb {
+        r: 255,
+        g: 158,
+        b: 100,
+    };
+    /// Magenta - #bb9af7
+    pub const MAGENTA: Color = Color::Rgb {
+        r: 187,
+        g: 154,
+        b: 247,
+    };
 }
 
 /// Create a boxed header

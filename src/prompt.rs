@@ -122,7 +122,7 @@ mod tests {
     fn test_global_layer() {
         let global = SystemPromptBuilder::global_layer();
         assert!(global.contains("sshwarma"));
-        assert!(global.contains("MCP tools"));
+        assert!(global.contains("Your Functions")); // Functions listed in prompt
     }
 
     #[test]

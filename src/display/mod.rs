@@ -2,7 +2,9 @@
 //!
 //! Separates raw conversation data from formatting. The Ledger stores entries,
 //! the DisplayBuffer tracks render state, and the renderer formats output.
+//! The HUD module provides the composable heads-up display at the bottom.
 
+pub mod hud;
 mod ledger;
 mod renderer;
 pub mod styles;
