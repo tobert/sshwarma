@@ -861,20 +861,65 @@ impl SshHandler {
 
         // Spawn background task - returns immediately
         tokio::spawn(async move {
-            // Get response from model with combined tools
-            let response = match llm
-                .chat_with_tool_server(
-                    &model,
-                    &system_prompt,
-                    &message_owned,
-                    tool_server_handle,
-                    100, // max tool turns - our tools are fast
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => format!("[error: {}]", e),
-            };
+            use crate::llm::StreamChunk;
+
+            // Create channel for streaming chunks
+            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<StreamChunk>(32);
+
+            // Spawn the streaming LLM call
+            let stream_handle = tokio::spawn({
+                let llm = llm.clone();
+                let model = model.clone();
+                let system_prompt = system_prompt.clone();
+                let message = message_owned.clone();
+                async move {
+                    llm.stream_with_tool_server(
+                        &model,
+                        &system_prompt,
+                        &message,
+                        tool_server_handle,
+                        chunk_tx,
+                        100, // max tool turns
+                    ).await
+                }
+            });
+
+            // Collect full response while streaming chunks to display
+            let mut full_response = String::new();
+
+            while let Some(chunk) = chunk_rx.recv().await {
+                match chunk {
+                    StreamChunk::Text(text) => {
+                        full_response.push_str(&text);
+                        let _ = update_tx.send(LedgerUpdate::Chunk {
+                            placeholder_id,
+                            text,
+                        }).await;
+                    }
+                    StreamChunk::ToolCall(name) => {
+                        let _ = update_tx.send(LedgerUpdate::ToolCall {
+                            placeholder_id,
+                            tool_name: name,
+                        }).await;
+                    }
+                    StreamChunk::ToolResult(summary) => {
+                        let _ = update_tx.send(LedgerUpdate::ToolResult {
+                            placeholder_id,
+                            summary,
+                        }).await;
+                    }
+                    StreamChunk::Done => {
+                        break;
+                    }
+                    StreamChunk::Error(e) => {
+                        full_response = format!("[error: {}]", e);
+                        break;
+                    }
+                }
+            }
+
+            // Wait for stream task to complete
+            let _ = stream_handle.await;
 
             // Save to room history
             if let Some(ref room) = room_name {
@@ -883,19 +928,18 @@ impl SshHandler {
                     if let Some(r) = world.get_room_mut(room) {
                         r.add_message(
                             Sender::Model(model_short.clone()),
-                            MessageContent::Chat(response.clone()),
+                            MessageContent::Chat(full_response.clone()),
                         );
                     }
                 }
-                let _ = db.add_message(room, "model", &model_short, "chat", &response);
+                let _ = db.add_message(room, "model", &model_short, "chat", &full_response);
             }
 
-            // Send ledger update to resolve the placeholder
+            // Send completion to finalize the placeholder
             let _ = update_tx
-                .send(LedgerUpdate::FullResponse {
+                .send(LedgerUpdate::Complete {
                     placeholder_id,
                     model_name: model_short,
-                    content: response,
                 })
                 .await;
         });
