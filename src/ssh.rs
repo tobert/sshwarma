@@ -810,19 +810,46 @@ impl SshHandler {
             server.run()
         };
 
-        // Add internal sshwarma tools if we're in a room
-        if let Some(ref room) = room_name {
-            let tool_ctx = ToolContext {
-                state: self.state.clone(),
-                room: room.clone(),
-                username: username.clone(),
-            };
-            // Use per-room config (navigation may be disabled for this room)
-            let config = InternalToolConfig::for_room(&self.state, room).await;
-            let internal_toolset = crate::internal_tools::create_toolset(tool_ctx, &config);
-            // Append internal tools to the running server
-            let _ = tool_server_handle.append_toolset(internal_toolset).await;
+        // Always add internal sshwarma tools (read-only always, write tools in rooms)
+        let in_room = room_name.is_some();
+        let room_for_tools = room_name.clone().unwrap_or_else(|| "lobby".to_string());
+        tracing::info!("registering internal tools for room: {} (write_tools={})", room_for_tools, in_room);
+        let tool_ctx = ToolContext {
+            state: self.state.clone(),
+            room: room_for_tools.clone(),
+            username: username.clone(),
+        };
+        // Use per-room config (navigation may be disabled for this room)
+        let config = InternalToolConfig::for_room(&self.state, &room_for_tools).await;
+        // Register tools individually (not append_toolset) so they appear in static_tool_names
+        match crate::internal_tools::register_tools(&tool_server_handle, tool_ctx, &config, in_room).await {
+            Ok(count) => tracing::info!("registered {} internal tools", count),
+            Err(e) => tracing::error!("failed to register internal tools: {}", e),
         }
+
+        // Get tool definitions and append to system prompt
+        let system_prompt = match tool_server_handle.get_tool_defs(None).await {
+            Ok(tool_defs) if !tool_defs.is_empty() => {
+                let mut tool_guide = String::from("\n\n## Your Functions\n");
+                tool_guide.push_str("You have these built-in functions:\n\n");
+                for tool in &tool_defs {
+                    // Strip sshwarma_ prefix for cleaner display
+                    let display_name = tool.name.strip_prefix("sshwarma_").unwrap_or(&tool.name);
+                    tool_guide.push_str(&format!("- **{}**: {}\n", display_name, tool.description));
+                }
+                tracing::info!("injecting {} function definitions into prompt", tool_defs.len());
+                format!("{}{}", system_prompt, tool_guide)
+            }
+            Ok(_) => {
+                // This should never happen - we always have at least read-only tools
+                tracing::error!("BUG: 0 tools available - internal tools not registered!");
+                system_prompt
+            }
+            Err(e) => {
+                tracing::error!("failed to get tool definitions: {}", e);
+                system_prompt
+            }
+        };
 
         // Clone what we need for the background task
         let llm = self.state.llm.clone();

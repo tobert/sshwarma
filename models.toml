@@ -12,18 +12,18 @@
 # Default endpoint for Ollama/llama.cpp models
 ollama_endpoint = "http://localhost:2020"
 
-# Local llama.cpp models via Ollama-compatible API
+# Local llama.cpp models via OpenAI-compatible API
 [[models]]
 name = "qwen-8b"
 display = "Qwen3-VL-8B-Instruct"
 model = "qwen3-vl-8b"
-backend = "ollama"
+backend = "llamacpp"
 
 [[models]]
 name = "qwen-4b"
 display = "Qwen3-VL-4B-Instruct"
 model = "qwen3-vl-4b"
-backend = "ollama"
+backend = "llamacpp"
 
 # Uncomment to add cloud models (need API keys in env)
 #

@@ -136,6 +136,25 @@ impl LlmClient {
                 Ok(response)
             }
 
+            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+                // llama.cpp uses OpenAI-compatible API
+                let client: openai::Client = openai::Client::builder()
+                    .api_key("not-needed")
+                    .base_url(endpoint)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let response = agent.prompt(message).await
+                    .map_err(|e| anyhow::anyhow!("llamacpp error: {}", e))?;
+
+                Ok(response)
+            }
+
             ModelBackend::OpenAI { model: model_id } => {
                 let client = self.openai.as_ref()
                     .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured - set OPENAI_API_KEY"))?;
@@ -211,6 +230,30 @@ impl LlmClient {
                     .multi_turn(max_turns)
                     .await
                     .map_err(|e| anyhow::anyhow!("ollama error: {}", e))?;
+
+                Ok(response)
+            }
+
+            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+                // llama.cpp uses OpenAI Chat Completions API (not Responses API)
+                let base_url = format!("{}/v1", endpoint);
+                let client: openai::CompletionsClient = openai::CompletionsClient::builder()
+                    .api_key("not-needed")
+                    .base_url(&base_url)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .rmcp_tools(tools, mcp_peer)
+                    .build();
+
+                let response = agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("llamacpp error: {}", e))?;
 
                 Ok(response)
             }
@@ -297,6 +340,37 @@ impl LlmClient {
                     .multi_turn(max_turns)
                     .await
                     .map_err(|e| anyhow::anyhow!("ollama error: {}", e))
+            }
+
+            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+                // llama.cpp uses OpenAI Chat Completions API (not Responses API)
+                let base_url = format!("{}/v1", endpoint);
+                let client: openai::CompletionsClient = openai::CompletionsClient::builder()
+                    .api_key("not-needed")
+                    .base_url(&base_url)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
+
+                // Debug: log available tools
+                match tool_server_handle.get_tool_defs(None).await {
+                    Ok(defs) => {
+                        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+                        tracing::info!("llamacpp agent has {} tools: {:?}", defs.len(), names);
+                    }
+                    Err(e) => tracing::warn!("failed to get tool defs for logging: {}", e),
+                }
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                agent
+                    .prompt(message)
+                    .multi_turn(max_turns)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("llamacpp error: {}", e))
             }
 
             ModelBackend::OpenAI { model: model_id } => {
@@ -408,6 +482,29 @@ impl LlmClient {
             ModelBackend::Ollama { model: model_id, .. } => {
                 let client = self.ollama.as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .tool_server_handle(tool_server_handle)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .multi_turn(max_turns)
+                    .await;
+
+                process_stream!(stream, tx)
+            }
+
+            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+                // llama.cpp uses OpenAI Chat Completions API (not Responses API)
+                let base_url = format!("{}/v1", endpoint);
+                let client: openai::CompletionsClient = openai::CompletionsClient::builder()
+                    .api_key("not-needed")
+                    .base_url(&base_url)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
 
                 let agent = client
                     .agent(model_id)

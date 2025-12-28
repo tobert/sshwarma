@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use rig::completion::ToolDefinition;
-use rig::tool::{ToolDyn, ToolError, ToolSet};
+use rig::tool::{ToolDyn, ToolError};
 use rig::wasm_compat::WasmBoxedFuture;
 use serde::Deserialize;
 use serde_json::json;
@@ -53,38 +53,51 @@ pub struct ToolContext {
     pub username: String,
 }
 
-/// Create a ToolSet with all internal sshwarma tools
-pub fn create_toolset(ctx: ToolContext, config: &InternalToolConfig) -> ToolSet {
-    let mut toolset = ToolSet::default();
+/// Register all internal sshwarma tools with a ToolServerHandle
+///
+/// Note: Must use add_tool (not append_toolset) because rig's append_toolset
+/// doesn't add tools to static_tool_names, making them invisible to get_tool_defs.
+pub async fn register_tools(
+    handle: &rig::tool::server::ToolServerHandle,
+    ctx: ToolContext,
+    config: &InternalToolConfig,
+    include_write_tools: bool,
+) -> anyhow::Result<usize> {
+    let mut count = 0;
 
     // Read-only tools (always available)
-    toolset.add_tool(SshwarmaLook { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaWho { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaRooms { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaHistory { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaExits { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaJournal { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaTools { ctx: ctx.clone() });
+    handle.add_tool(SshwarmaLook { ctx: ctx.clone() }).await?;
+    handle.add_tool(SshwarmaWho { ctx: ctx.clone() }).await?;
+    handle.add_tool(SshwarmaRooms { ctx: ctx.clone() }).await?;
+    handle.add_tool(SshwarmaHistory { ctx: ctx.clone() }).await?;
+    handle.add_tool(SshwarmaExits { ctx: ctx.clone() }).await?;
+    handle.add_tool(SshwarmaJournal { ctx: ctx.clone() }).await?;
+    handle.add_tool(SshwarmaTools { ctx: ctx.clone() }).await?;
+    count += 7;
 
-    // Write tools (room context)
-    toolset.add_tool(SshwarmaSay { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaVibe { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaNote { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaDecide { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaIdea { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaMilestone { ctx: ctx.clone() });
-    toolset.add_tool(SshwarmaInspire { ctx: ctx.clone() });
+    // Write tools (only when in a room)
+    if include_write_tools {
+        handle.add_tool(SshwarmaSay { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaVibe { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaNote { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaDecide { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaIdea { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaMilestone { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaInspire { ctx: ctx.clone() }).await?;
+        count += 7;
 
-    // Navigation tools (toggleable)
-    if config.enable_navigation {
-        toolset.add_tool(SshwarmaJoin { ctx: ctx.clone() });
-        toolset.add_tool(SshwarmaLeave { ctx: ctx.clone() });
-        toolset.add_tool(SshwarmaGo { ctx: ctx.clone() });
-        toolset.add_tool(SshwarmaCreate { ctx: ctx.clone() });
-        toolset.add_tool(SshwarmaFork { ctx: ctx.clone() });
+        // Navigation tools (toggleable per-room)
+        if config.enable_navigation {
+            handle.add_tool(SshwarmaJoin { ctx: ctx.clone() }).await?;
+            handle.add_tool(SshwarmaLeave { ctx: ctx.clone() }).await?;
+            handle.add_tool(SshwarmaGo { ctx: ctx.clone() }).await?;
+            handle.add_tool(SshwarmaCreate { ctx: ctx.clone() }).await?;
+            handle.add_tool(SshwarmaFork { ctx: ctx.clone() }).await?;
+            count += 5;
+        }
     }
 
-    toolset
+    Ok(count)
 }
 
 // ============================================================================

@@ -49,18 +49,18 @@ impl SystemPromptBuilder {
 ## Environment
 - MUD-style text interface accessed via SSH
 - Multiple users and models share rooms in real-time
-- You have access to MCP tools for music generation, file management, and more
+- You have built-in functions for exploring rooms, navigating between them, and collaborating with users
 
 ## Communication Style
 - Be conversational and collaborative
 - Keep responses concise - this is a chat interface
 - Use markdown sparingly (bold for emphasis, code blocks for code)
 
-## Tool Usage
-- Use tools proactively when they help accomplish goals
-- Report what you're doing: "Let me generate some music..." or "I'll check the artifacts..."
-- If a tool fails, explain what went wrong and suggest alternatives
-- Don't describe tools in detail unless asked - just use them"#.to_string()
+## Using Your Functions
+- Your available functions are listed in "Your Functions" below
+- Use them proactively when they help accomplish goals
+- When asked what you can do, describe your capabilities based on those functions
+- If a function fails, explain what went wrong and suggest alternatives"#.to_string()
     }
 
     /// Model layer: per-model personality and capabilities

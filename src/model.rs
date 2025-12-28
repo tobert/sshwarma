@@ -22,8 +22,13 @@ pub struct ModelHandle {
 /// How to reach this model
 #[derive(Debug, Clone)]
 pub enum ModelBackend {
-    /// Ollama/llama.cpp via OpenAI-compatible API
+    /// Ollama API (requires actual Ollama server)
     Ollama {
+        endpoint: String,
+        model: String,
+    },
+    /// llama.cpp server via OpenAI-compatible API
+    LlamaCpp {
         endpoint: String,
         model: String,
     },
@@ -84,12 +89,22 @@ impl ModelRegistry {
     /// Convert a ModelConfig to a ModelHandle
     fn model_from_config(config: &ModelConfig, default_ollama_endpoint: &str) -> Option<ModelHandle> {
         let backend = match config.backend.as_str() {
-            "ollama" | "llamacpp" | "llama.cpp" => {
+            "ollama" => {
                 let endpoint = config
                     .endpoint
                     .clone()
                     .unwrap_or_else(|| default_ollama_endpoint.to_string());
                 ModelBackend::Ollama {
+                    endpoint,
+                    model: config.model.clone(),
+                }
+            }
+            "llamacpp" | "llama.cpp" => {
+                let endpoint = config
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| default_ollama_endpoint.to_string());
+                ModelBackend::LlamaCpp {
                     endpoint,
                     model: config.model.clone(),
                 }
