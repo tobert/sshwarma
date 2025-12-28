@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use rig::tool::server::ToolServer;
+use rmcp::model::Tool;
 use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::net::SocketAddr;
@@ -21,6 +22,55 @@ use crate::player::PlayerSession;
 use crate::state::SharedState;
 use crate::prompt::SystemPromptBuilder;
 use crate::world::{MessageContent, Sender};
+
+/// Normalize a tool's input_schema for llama.cpp compatibility:
+/// 1. Strip "default" keys (llama.cpp can't parse them)
+/// 2. Add "type": "object" to schemas with only "description" (invalid JSON Schema)
+fn normalize_schema_for_llamacpp(tool: &Tool) -> Tool {
+    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut cleaned: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "default")
+                    .map(|(k, v)| (k.clone(), normalize(v)))
+                    .collect();
+
+                // If this looks like a schema (has "description" but no "type"), add "type": "object"
+                // This fixes schemars output for serde_json::Value fields
+                if cleaned.contains_key("description") && !cleaned.contains_key("type") && !cleaned.contains_key("$ref") {
+                    cleaned.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+                }
+
+                serde_json::Value::Object(cleaned)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(normalize).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    let schema_value = serde_json::Value::Object(
+        tool.input_schema.as_ref().clone().into_iter().collect()
+    );
+    let cleaned = normalize(&schema_value);
+    let cleaned_map: serde_json::Map<String, serde_json::Value> = match cleaned {
+        serde_json::Value::Object(m) => m,
+        _ => tool.input_schema.as_ref().clone(),
+    };
+
+    Tool {
+        name: tool.name.clone(),
+        title: tool.title.clone(),
+        description: tool.description.clone(),
+        input_schema: Arc::new(cleaned_map),
+        output_schema: tool.output_schema.clone(),
+        annotations: tool.annotations.clone(),
+        icons: tool.icons.clone(),
+        meta: tool.meta.clone(),
+    }
+}
 
 /// Update from background task for streaming responses
 #[derive(Debug)]
@@ -795,6 +845,7 @@ impl SshHandler {
 
         // Get MCP tools for rig agent
         let mcp_context = self.state.mcp.rig_tools().await;
+        let needs_schema_strip = matches!(model.backend, crate::model::ModelBackend::LlamaCpp { .. });
 
         // Build ToolServer with MCP + internal tools
         let tool_server_handle = {
@@ -803,7 +854,19 @@ impl SshHandler {
             // Add MCP tools if available
             if let Some(ctx) = &mcp_context {
                 for tool in ctx.tools.iter() {
-                    server = server.rmcp_tool(tool.clone(), ctx.peer.clone());
+                    // Normalize schemas for llama.cpp (limited schema support)
+                    let tool = if needs_schema_strip {
+                        let original_schema = serde_json::to_string(&tool.input_schema).unwrap_or_default();
+                        let normalized = normalize_schema_for_llamacpp(tool);
+                        let normalized_schema = serde_json::to_string(&normalized.input_schema).unwrap_or_default();
+                        if original_schema != normalized_schema {
+                            tracing::info!("normalized schema for {}: {} -> {} bytes", tool.name, original_schema.len(), normalized_schema.len());
+                        }
+                        normalized
+                    } else {
+                        tool.clone()
+                    };
+                    server = server.rmcp_tool(tool, ctx.peer.clone());
                 }
             }
 
