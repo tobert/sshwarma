@@ -81,6 +81,8 @@ pub struct ModelConfig {
     pub enabled: bool,
     /// Custom system prompt for this model
     pub system_prompt: Option<String>,
+    /// Context window size in tokens (for wrap() budgeting)
+    pub context_window: Option<usize>,
 }
 
 fn default_enabled() -> bool {

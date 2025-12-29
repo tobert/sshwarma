@@ -17,6 +17,8 @@ pub struct ModelHandle {
     pub available: bool,
     /// Custom system prompt for this model
     pub system_prompt: Option<String>,
+    /// Context window size in tokens (for wrap() budgeting)
+    pub context_window: Option<usize>,
 }
 
 /// How to reach this model
@@ -130,6 +132,7 @@ impl ModelRegistry {
             backend,
             available: true,
             system_prompt: config.system_prompt.clone(),
+            context_window: config.context_window,
         })
     }
 
