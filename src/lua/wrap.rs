@@ -28,6 +28,7 @@ pub struct WrapState {
 }
 
 /// Result of context composition
+#[derive(Debug)]
 pub struct WrapResult {
     /// Stable system prompt (for .preamble())
     pub system_prompt: String,

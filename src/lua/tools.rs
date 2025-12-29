@@ -4,11 +4,29 @@
 //! All functions are registered in a `tools` global table.
 
 use crate::display::hud::HudState;
+use crate::display::{EntryContent, EntrySource};
 use crate::lua::cache::ToolCache;
 use crate::lua::context::{build_hud_context, build_notifications_table, PendingNotification};
 use crate::lua::mcp_bridge::McpBridge;
+use crate::model::ModelHandle;
+use crate::state::SharedState;
+use crate::world::JournalKind;
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::{Arc, RwLock};
+
+/// Session context for wrap operations
+///
+/// Provides information about the current user, model, and room
+/// for context composition during @mention processing.
+#[derive(Clone)]
+pub struct SessionContext {
+    /// Username of the person who triggered the interaction
+    pub username: String,
+    /// Model being addressed (if any)
+    pub model: Option<ModelHandle>,
+    /// Current room name (None if in lobby)
+    pub room_name: Option<String>,
+}
 
 /// Shared state holder for Lua callbacks
 ///
@@ -23,6 +41,10 @@ pub struct LuaToolState {
     pending_notifications: Arc<RwLock<Vec<PendingNotification>>>,
     /// Tool result cache for instant reads
     cache: ToolCache,
+    /// Shared application state for extended data access (world, ledger, etc.)
+    shared_state: Arc<RwLock<Option<Arc<SharedState>>>>,
+    /// Session context (user, model, room) for wrap operations
+    session_context: Arc<RwLock<Option<SessionContext>>>,
 }
 
 impl LuaToolState {
@@ -32,6 +54,8 @@ impl LuaToolState {
             hud_state: Arc::new(RwLock::new(HudState::new())),
             pending_notifications: Arc::new(RwLock::new(Vec::new())),
             cache: ToolCache::new(),
+            shared_state: Arc::new(RwLock::new(None)),
+            session_context: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -70,6 +94,43 @@ impl LuaToolState {
             .write()
             .map(|mut guard| std::mem::take(&mut *guard))
             .unwrap_or_default()
+    }
+
+    /// Set the shared state for extended data access
+    ///
+    /// Call this before wrap operations that need access to world, ledger, etc.
+    pub fn set_shared_state(&self, state: Option<Arc<SharedState>>) {
+        if let Ok(mut guard) = self.shared_state.write() {
+            *guard = state;
+        }
+    }
+
+    /// Get a clone of the shared state if set
+    pub fn shared_state(&self) -> Option<Arc<SharedState>> {
+        self.shared_state
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Set the session context for wrap operations
+    pub fn set_session_context(&self, ctx: Option<SessionContext>) {
+        if let Ok(mut guard) = self.session_context.write() {
+            *guard = ctx;
+        }
+    }
+
+    /// Get a clone of the session context if set
+    pub fn session_context(&self) -> Option<SessionContext> {
+        self.session_context
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Clear the session context (cleanup after wrap operations)
+    pub fn clear_session_context(&self) {
+        self.set_session_context(None);
     }
 }
 
@@ -308,6 +369,225 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("session", session_fn)?;
 
+    // Extended data tools (require SharedState)
+
+    // tools.history(n) -> [{author, content, timestamp, kind}]
+    let history_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, limit: Option<usize>| {
+            let limit = limit.unwrap_or(30);
+            let list = lua.create_table()?;
+
+            // Get room name from HudState
+            let hud = state.hud_state();
+            let room_name = match &hud.room_name {
+                Some(name) => name.clone(),
+                None => return Ok(list), // Empty list if not in a room
+            };
+
+            // Try to get history from SharedState
+            if let Some(shared) = state.shared_state() {
+                let world = shared.world.blocking_read();
+                if let Some(room) = world.rooms.get(&room_name) {
+                    let mut idx = 1;
+                    for entry in room.ledger.recent(limit).iter().filter(|e| !e.ephemeral) {
+                        // Extract sender name
+                        let sender_name = match &entry.source {
+                            EntrySource::User(name) => name.clone(),
+                            EntrySource::Model { name, .. } => name.clone(),
+                            EntrySource::System | EntrySource::Command { .. } => continue,
+                        };
+
+                        // Extract content (only Chat messages)
+                        let text = match &entry.content {
+                            EntryContent::Chat(text) => text.clone(),
+                            _ => continue,
+                        };
+
+                        let row = lua.create_table()?;
+                        row.set("author", sender_name)?;
+                        row.set("content", text)?;
+                        row.set("timestamp", entry.timestamp.timestamp_millis())?;
+                        row.set("is_model", matches!(entry.source, EntrySource::Model { .. }))?;
+                        list.set(idx, row)?;
+                        idx += 1;
+                    }
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("history", history_fn)?;
+
+    // tools.journal(kind, n) -> [{kind, author, content, timestamp}]
+    let journal_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (kind, limit): (Option<String>, Option<usize>)| {
+            let limit = limit.unwrap_or(10);
+            let list = lua.create_table()?;
+
+            // Parse kind filter if provided
+            let kind_filter = kind.as_ref().and_then(|k| JournalKind::from_str(k));
+
+            // Get room name from HudState
+            let hud = state.hud_state();
+            let room_name = match &hud.room_name {
+                Some(name) => name.clone(),
+                None => return Ok(list),
+            };
+
+            // Try to get journal from SharedState
+            if let Some(shared) = state.shared_state() {
+                let world = shared.world.blocking_read();
+                if let Some(room) = world.rooms.get(&room_name) {
+                    let mut idx = 1;
+                    let entries: Vec<_> = room
+                        .context
+                        .journal
+                        .iter()
+                        .filter(|e| kind_filter.is_none_or(|k| e.kind == k))
+                        .rev()
+                        .take(limit)
+                        .collect();
+
+                    for entry in entries.into_iter().rev() {
+                        let row = lua.create_table()?;
+                        row.set("kind", format!("{}", entry.kind))?;
+                        row.set("author", entry.author.clone())?;
+                        row.set("content", entry.content.clone())?;
+                        row.set("timestamp", entry.timestamp.timestamp_millis())?;
+                        list.set(idx, row)?;
+                        idx += 1;
+                    }
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("journal", journal_fn)?;
+
+    // tools.inspirations() -> [{content}]
+    let inspirations_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let list = lua.create_table()?;
+
+            // Get room name from HudState
+            let hud = state.hud_state();
+            let room_name = match &hud.room_name {
+                Some(name) => name.clone(),
+                None => return Ok(list),
+            };
+
+            // Try to get inspirations from SharedState
+            if let Some(shared) = state.shared_state() {
+                let world = shared.world.blocking_read();
+                if let Some(room) = world.rooms.get(&room_name) {
+                    for (i, insp) in room.context.inspirations.iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("content", insp.content.clone())?;
+                        list.set(i + 1, row)?;
+                    }
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("inspirations", inspirations_fn)?;
+
+    // tools.rooms() -> [{name, user_count, model_count, description}]
+    let rooms_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let list = lua.create_table()?;
+
+            if let Some(shared) = state.shared_state() {
+                let world = shared.world.blocking_read();
+                let mut idx = 1;
+                for (name, room) in &world.rooms {
+                    let row = lua.create_table()?;
+                    row.set("name", name.clone())?;
+                    row.set("user_count", room.users.len())?;
+                    row.set("model_count", room.models.len())?;
+                    if let Some(ref desc) = room.description {
+                        row.set("description", desc.clone())?;
+                    }
+                    list.set(idx, row)?;
+                    idx += 1;
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("rooms", rooms_fn)?;
+
+    // tools.current_user() -> {name} or nil
+    let current_user_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            if let Some(ctx) = state.session_context() {
+                let result = lua.create_table()?;
+                result.set("name", ctx.username)?;
+                Ok(Value::Table(result))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?
+    };
+    tools.set("current_user", current_user_fn)?;
+
+    // tools.current_model() -> {name, display, ...} or nil
+    let current_model_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            if let Some(ctx) = state.session_context() {
+                if let Some(model) = ctx.model {
+                    let result = lua.create_table()?;
+                    result.set("name", model.short_name.clone())?;
+                    result.set("display", model.display_name.clone())?;
+                    if let Some(ref system_prompt) = model.system_prompt {
+                        result.set("system_prompt", system_prompt.clone())?;
+                    }
+                    if let Some(context_window) = model.context_window {
+                        result.set("context_window", context_window)?;
+                    }
+                    return Ok(Value::Table(result));
+                }
+            }
+            Ok(Value::Nil)
+        })?
+    };
+    tools.set("current_model", current_model_fn)?;
+
+    // Utility tools
+
+    // tools.estimate_tokens(text) -> int
+    // Simple heuristic: ~4 characters per token
+    let estimate_tokens_fn = lua.create_function(|_, text: String| Ok(text.len() / 4))?;
+    tools.set("estimate_tokens", estimate_tokens_fn)?;
+
+    // tools.truncate(text, max_tokens) -> string
+    // Truncates text to approximately max_tokens
+    let truncate_fn = lua.create_function(|_, (text, max_tokens): (String, usize)| {
+        let max_chars = max_tokens * 4; // Reverse of estimate
+        if text.len() <= max_chars {
+            Ok(text)
+        } else {
+            // Find word boundary near truncation point
+            let truncated = &text[..max_chars.min(text.len())];
+            if let Some(last_space) = truncated.rfind(' ') {
+                Ok(format!("{}...", &truncated[..last_space]))
+            } else {
+                Ok(format!("{}...", truncated))
+            }
+        }
+    })?;
+    tools.set("truncate", truncate_fn)?;
+
     // Set as global
     lua.globals().set("tools", tools)?;
 
@@ -470,7 +750,136 @@ fn lua_to_json(value: &Value) -> LuaResult<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::db::Database;
+    use crate::display::hud::HudState;
+    use crate::display::{EntryContent, EntrySource};
+    use crate::llm::LlmClient;
+    use crate::mcp::McpClients;
+    use crate::model::{ModelBackend, ModelRegistry};
+    use crate::state::SharedState;
+    use crate::world::{Inspiration, JournalEntry, JournalKind, World};
+    use chrono::Utc;
     use mlua::Function;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Reusable test fixture with real components (no mocks)
+    struct TestInstance {
+        shared_state: Arc<SharedState>,
+        #[allow(dead_code)]
+        db: Arc<Database>,
+        world: Arc<RwLock<World>>,
+        models: Arc<ModelRegistry>,
+    }
+
+    impl TestInstance {
+        fn new() -> anyhow::Result<Self> {
+            let db = Arc::new(Database::open(":memory:")?);
+
+            let mut models = ModelRegistry::new();
+            models.register(ModelHandle {
+                short_name: "test".to_string(),
+                display_name: "Test Model".to_string(),
+                backend: ModelBackend::Mock {
+                    prefix: "[test]".to_string(),
+                },
+                available: true,
+                system_prompt: Some("You are a test assistant.".to_string()),
+                context_window: Some(8000),
+            });
+            let models = Arc::new(models);
+
+            let world = Arc::new(RwLock::new(World::new()));
+
+            let shared_state = Arc::new(SharedState {
+                world: world.clone(),
+                db: db.clone(),
+                config: Config::default(),
+                llm: Arc::new(LlmClient::new()?),
+                models: models.clone(),
+                mcp: Arc::new(McpClients::new()),
+            });
+
+            Ok(Self {
+                shared_state,
+                db,
+                world,
+                models,
+            })
+        }
+
+        /// Create room with optional vibe
+        async fn create_room(&self, name: &str, vibe: Option<&str>) {
+            let mut world = self.world.write().await;
+            world.create_room(name.to_string());
+            if let Some(v) = vibe {
+                if let Some(room) = world.get_room_mut(name) {
+                    room.context.vibe = Some(v.to_string());
+                }
+            }
+        }
+
+        /// Add chat message to room's ledger
+        async fn add_message(&self, room: &str, sender: &str, content: &str) {
+            let mut world = self.world.write().await;
+            if let Some(r) = world.get_room_mut(room) {
+                r.ledger
+                    .push(EntrySource::User(sender.to_string()), EntryContent::Chat(content.to_string()));
+            }
+        }
+
+        /// Add journal entry
+        async fn add_journal(&self, room: &str, kind: JournalKind, content: &str) {
+            let mut world = self.world.write().await;
+            if let Some(r) = world.get_room_mut(room) {
+                r.context.journal.push(JournalEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    timestamp: Utc::now(),
+                    author: "test".to_string(),
+                    content: content.to_string(),
+                    kind,
+                });
+            }
+        }
+
+        /// Add inspiration
+        async fn add_inspiration(&self, room: &str, content: &str) {
+            let mut world = self.world.write().await;
+            if let Some(r) = world.get_room_mut(room) {
+                r.context.inspirations.push(Inspiration {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    content: content.to_string(),
+                    added_by: "test".to_string(),
+                    added_at: Utc::now(),
+                });
+            }
+        }
+
+        /// Get a SessionContext for this instance
+        fn session_context(&self, room: &str) -> SessionContext {
+            let model = self.models.get("test").cloned();
+            SessionContext {
+                username: "testuser".to_string(),
+                model,
+                room_name: Some(room.to_string()),
+            }
+        }
+
+        /// Create a configured LuaToolState with shared_state, session_context, and hud_state
+        fn lua_tool_state(&self, room: &str) -> LuaToolState {
+            let state = LuaToolState::new();
+            state.set_shared_state(Some(self.shared_state.clone()));
+            state.set_session_context(Some(self.session_context(room)));
+
+            // Also set HudState with the room name (tools read room_name from HudState)
+            let mut hud = HudState::new();
+            hud.room_name = Some(room.to_string());
+            state.update_hud_state(hud);
+
+            state
+        }
+    }
 
     #[test]
     fn test_register_tools() {
@@ -551,5 +960,328 @@ mod tests {
         "#)
         .exec()
         .expect("kv_delete should work");
+    }
+
+    // =========================================================================
+    // Phase 2: Utility Tool Tests
+    // =========================================================================
+
+    #[test]
+    fn test_estimate_tokens() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local tokens = tools.estimate_tokens("hello world test!")
+            -- 17 chars / 4 = 4 tokens
+            assert(tokens == 4, "expected 4 tokens, got " .. tostring(tokens))
+        "#,
+        )
+        .exec()
+        .expect("estimate_tokens should work");
+    }
+
+    #[test]
+    fn test_truncate_short_text() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local short = tools.truncate("hello world", 100)
+            assert(short == "hello world", "short text should be unchanged")
+        "#,
+        )
+        .exec()
+        .expect("truncate short text should work");
+    }
+
+    #[test]
+    fn test_truncate_long_text() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            -- Create text that exceeds 2 tokens (8 chars)
+            local long = "a b c d e f g h i j k l m n o p"
+            local truncated = tools.truncate(long, 2)
+            assert(string.find(truncated, "%.%.%."), "long text should have ellipsis")
+            assert(#truncated < #long, "truncated should be shorter")
+        "#,
+        )
+        .exec()
+        .expect("truncate long text should work");
+    }
+
+    // =========================================================================
+    // Phase 3: Session Context Tool Tests
+    // =========================================================================
+
+    #[test]
+    fn test_current_user_without_context() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local user = tools.current_user()
+            assert(user == nil, "no session context should return nil")
+        "#,
+        )
+        .exec()
+        .expect("current_user without context should return nil");
+    }
+
+    #[test]
+    fn test_current_model_without_context() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local model = tools.current_model()
+            assert(model == nil, "no session context should return nil")
+        "#,
+        )
+        .exec()
+        .expect("current_model without context should return nil");
+    }
+
+    #[tokio::test]
+    async fn test_current_user_with_context() {
+        let instance = TestInstance::new().expect("should create instance");
+        instance.create_room("testroom", None).await;
+
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        state.set_shared_state(Some(instance.shared_state.clone()));
+        state.set_session_context(Some(instance.session_context("testroom")));
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local user = tools.current_user()
+            assert(user ~= nil, "should have user")
+            assert(user.name == "testuser", "username should be testuser")
+        "#,
+        )
+        .exec()
+        .expect("current_user with context should work");
+    }
+
+    #[tokio::test]
+    async fn test_current_model_with_context() {
+        let instance = TestInstance::new().expect("should create instance");
+        instance.create_room("testroom", None).await;
+
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        state.set_shared_state(Some(instance.shared_state.clone()));
+        state.set_session_context(Some(instance.session_context("testroom")));
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local model = tools.current_model()
+            assert(model ~= nil, "should have model")
+            assert(model.name == "test", "short_name should be test")
+            assert(model.display == "Test Model", "display_name")
+            assert(model.context_window == 8000, "context_window")
+        "#,
+        )
+        .exec()
+        .expect("current_model with context should work");
+    }
+
+    // =========================================================================
+    // Phase 4: SharedState Data Tool Tests
+    // =========================================================================
+
+    #[test]
+    fn test_history_without_shared_state() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local messages = tools.history(10)
+            assert(#messages == 0, "no shared state should return empty list")
+        "#,
+        )
+        .exec()
+        .expect("history without shared state should return empty");
+    }
+
+    #[test]
+    fn test_history_with_shared_state() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        rt.block_on(async {
+            instance.create_room("testroom", Some("A test vibe")).await;
+            instance
+                .add_message("testroom", "alice", "Hello world")
+                .await;
+            instance.add_message("testroom", "bob", "Hi alice!").await;
+        });
+
+        let lua = Lua::new();
+        let state = instance.lua_tool_state("testroom");
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local messages = tools.history(10)
+            assert(#messages == 2, "should have 2 messages, got " .. #messages)
+            assert(messages[1].author == "alice", "first author should be alice")
+            assert(messages[1].content == "Hello world", "first content")
+            assert(messages[2].author == "bob", "second author should be bob")
+        "#,
+        )
+        .exec()
+        .expect("history with shared state should work");
+    }
+
+    #[test]
+    fn test_journal_without_shared_state() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local entries = tools.journal(nil, 10)
+            assert(#entries == 0, "no shared state should return empty list")
+        "#,
+        )
+        .exec()
+        .expect("journal without shared state should return empty");
+    }
+
+    #[test]
+    fn test_journal_with_shared_state() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        rt.block_on(async {
+            instance.create_room("testroom", None).await;
+            instance
+                .add_journal("testroom", JournalKind::Note, "Test note")
+                .await;
+            instance
+                .add_journal("testroom", JournalKind::Decision, "Test decision")
+                .await;
+        });
+
+        let lua = Lua::new();
+        let state = instance.lua_tool_state("testroom");
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local entries = tools.journal(nil, 10)
+            assert(#entries == 2, "should have 2 journal entries")
+
+            -- Filter by kind
+            local notes = tools.journal("note", 10)
+            assert(#notes == 1, "should have 1 note")
+        "#,
+        )
+        .exec()
+        .expect("journal with shared state should work");
+    }
+
+    #[test]
+    fn test_inspirations_without_shared_state() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local inspirations = tools.inspirations()
+            assert(#inspirations == 0, "no shared state should return empty list")
+        "#,
+        )
+        .exec()
+        .expect("inspirations without shared state should return empty");
+    }
+
+    #[test]
+    fn test_inspirations_with_shared_state() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        rt.block_on(async {
+            instance.create_room("testroom", None).await;
+            instance
+                .add_inspiration("testroom", "Be creative!")
+                .await;
+        });
+
+        let lua = Lua::new();
+        let state = instance.lua_tool_state("testroom");
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local inspirations = tools.inspirations()
+            assert(#inspirations == 1, "should have 1 inspiration")
+            assert(inspirations[1].content == "Be creative!", "content")
+        "#,
+        )
+        .exec()
+        .expect("inspirations with shared state should work");
+    }
+
+    #[test]
+    fn test_rooms_without_shared_state() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local rooms = tools.rooms()
+            assert(#rooms == 0, "no shared state should return empty list")
+        "#,
+        )
+        .exec()
+        .expect("rooms without shared state should return empty");
+    }
+
+    #[test]
+    fn test_rooms_with_shared_state() {
+        // Create instance synchronously using tokio runtime block
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        // Create rooms synchronously using blocking runtime
+        rt.block_on(async {
+            instance.create_room("room1", None).await;
+            instance.create_room("room2", Some("A vibey room")).await;
+        });
+
+        // Now run Lua test outside the async context
+        let lua = Lua::new();
+        let state = instance.lua_tool_state("room1");
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            local rooms = tools.rooms()
+            assert(#rooms == 2, "should have 2 rooms")
+        "#,
+        )
+        .exec()
+        .expect("rooms with shared state should work");
     }
 }

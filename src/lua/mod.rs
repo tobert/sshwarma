@@ -9,7 +9,6 @@ pub mod mcp_bridge;
 pub mod render;
 pub mod tools;
 pub mod wrap;
-pub mod wrap_tools;
 
 pub use cache::ToolCache;
 pub use context::{build_hud_context, PendingNotification};
@@ -87,10 +86,6 @@ impl LuaRuntime {
         // Register tool functions (creates the tools table)
         register_tools(&lua, tool_state.clone())
             .map_err(|e| anyhow::anyhow!("failed to register Lua tools: {}", e))?;
-
-        // Register wrap tools under tools.wrap
-        wrap_tools::register_wrap_tools(&lua)
-            .map_err(|e| anyhow::anyhow!("failed to register wrap tools: {}", e))?;
 
         // Load the wrap script first (provides wrap() and default_wrap())
         lua.load(DEFAULT_WRAP_SCRIPT)
@@ -346,15 +341,32 @@ impl LuaRuntime {
         wrap_state: WrapState,
         target_tokens: usize,
     ) -> Result<WrapResult> {
-        // Set WrapState in registry for layer callbacks to access
-        wrap_tools::set_wrap_state(&self.lua, wrap_state)
-            .map_err(|e| anyhow::anyhow!("failed to set wrap state: {}", e))?;
+        use crate::lua::tools::SessionContext;
+
+        // Set session context for unified tools to access
+        self.tool_state.set_session_context(Some(SessionContext {
+            username: wrap_state.username.clone(),
+            model: Some(wrap_state.model.clone()),
+            room_name: wrap_state.room_name.clone(),
+        }));
+
+        // Set shared state for extended data tools
+        self.tool_state
+            .set_shared_state(Some(wrap_state.shared_state.clone()));
+
+        // Also set HudState with room_name so tools.history() etc. can find the room
+        // (tools use HudState.room_name to determine which room to read from)
+        {
+            let mut hud = self.tool_state.hud_state();
+            hud.room_name = wrap_state.room_name.clone();
+            self.tool_state.update_hud_state(hud);
+        }
 
         // Call compose_context from wrap.rs
         let result = wrap::compose_context(&self.lua, target_tokens);
 
-        // Clear wrap state (cleanup)
-        let _ = wrap_tools::clear_wrap_state(&self.lua);
+        // Cleanup session context (shared_state can persist for HUD)
+        self.tool_state.clear_session_context();
 
         result
     }
@@ -419,6 +431,80 @@ impl Default for LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::db::Database;
+    use crate::display::EntryContent;
+    use crate::display::EntrySource;
+    use crate::llm::LlmClient;
+    use crate::mcp::McpClients;
+    use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
+    use crate::state::SharedState;
+    use crate::world::World;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Reusable test fixture with real components (mirrors tools.rs TestInstance)
+    struct TestInstance {
+        shared_state: Arc<SharedState>,
+        world: Arc<RwLock<World>>,
+        models: Arc<ModelRegistry>,
+    }
+
+    impl TestInstance {
+        fn new() -> anyhow::Result<Self> {
+            let db = Arc::new(Database::open(":memory:")?);
+
+            let mut models = ModelRegistry::new();
+            models.register(ModelHandle {
+                short_name: "test".to_string(),
+                display_name: "Test Model".to_string(),
+                backend: ModelBackend::Mock {
+                    prefix: "[test]".to_string(),
+                },
+                available: true,
+                system_prompt: Some("You are a test assistant.".to_string()),
+                context_window: Some(8000),
+            });
+            let models = Arc::new(models);
+
+            let world = Arc::new(RwLock::new(World::new()));
+
+            let shared_state = Arc::new(SharedState {
+                world: world.clone(),
+                db,
+                config: Config::default(),
+                llm: Arc::new(LlmClient::new()?),
+                models: models.clone(),
+                mcp: Arc::new(McpClients::new()),
+            });
+
+            Ok(Self {
+                shared_state,
+                world,
+                models,
+            })
+        }
+
+        async fn create_room(&self, name: &str, vibe: Option<&str>) {
+            let mut world = self.world.write().await;
+            world.create_room(name.to_string());
+            if let Some(v) = vibe {
+                if let Some(room) = world.get_room_mut(name) {
+                    room.context.vibe = Some(v.to_string());
+                }
+            }
+        }
+
+        async fn add_message(&self, room: &str, sender: &str, content: &str) {
+            let mut world = self.world.write().await;
+            if let Some(r) = world.get_room_mut(room) {
+                r.ledger.push(
+                    EntrySource::User(sender.to_string()),
+                    EntryContent::Chat(content.to_string()),
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_lua_runtime_new() {
@@ -489,5 +575,276 @@ mod tests {
         let value = cache.get_data_blocking("test_key");
         assert!(value.is_some());
         assert_eq!(value.unwrap(), serde_json::json!({"foo": "bar"}));
+    }
+
+    // =========================================================================
+    // compose_context integration tests
+    // =========================================================================
+
+    #[test]
+    fn test_compose_context_basic() {
+        use crate::lua::wrap::WrapState;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        rt.block_on(async {
+            instance
+                .create_room("testroom", Some("Creative jam session"))
+                .await;
+            instance
+                .add_message("testroom", "alice", "Let's make music!")
+                .await;
+        });
+
+        let model = instance.models.get("test").unwrap().clone();
+
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        // Set up tool state for compose_context
+        runtime
+            .tool_state
+            .set_shared_state(Some(instance.shared_state.clone()));
+
+        let wrap_state = WrapState {
+            room_name: Some("testroom".to_string()),
+            username: "alice".to_string(),
+            model,
+            shared_state: instance.shared_state.clone(),
+        };
+
+        let result = runtime
+            .compose_context(wrap_state, 8000)
+            .expect("should compose context");
+
+        // System prompt should contain model identity and sshwarma info
+        assert!(
+            result.system_prompt.contains("Test Model"),
+            "system prompt should contain model name"
+        );
+        assert!(
+            result.system_prompt.contains("sshwarma"),
+            "system prompt should contain sshwarma"
+        );
+
+        // Context should contain room info or user info
+        // (room context is dynamic, so it goes to context not system_prompt)
+        assert!(
+            result.context.contains("testroom") || result.context.contains("alice"),
+            "context should contain room or user info"
+        );
+    }
+
+    #[test]
+    fn test_compose_context_with_history() {
+        use crate::lua::wrap::WrapState;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        rt.block_on(async {
+            instance.create_room("testroom", None).await;
+            instance
+                .add_message("testroom", "bob", "Hello everyone!")
+                .await;
+            instance
+                .add_message("testroom", "alice", "Hi bob, what's up?")
+                .await;
+        });
+
+        let model = instance.models.get("test").unwrap().clone();
+
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        runtime
+            .tool_state
+            .set_shared_state(Some(instance.shared_state.clone()));
+
+        let wrap_state = WrapState {
+            room_name: Some("testroom".to_string()),
+            username: "alice".to_string(),
+            model,
+            shared_state: instance.shared_state.clone(),
+        };
+
+        let result = runtime
+            .compose_context(wrap_state, 8000)
+            .expect("should compose context");
+
+        // Context should contain history with messages
+        assert!(
+            result.context.contains("Hello everyone") || result.context.contains("bob"),
+            "context should contain chat history"
+        );
+    }
+
+    #[test]
+    fn test_compose_context_budget_overflow() {
+        use crate::lua::wrap::WrapState;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        rt.block_on(async {
+            instance.create_room("testroom", None).await;
+            // Add many messages to exceed a tiny budget
+            for i in 0..100 {
+                instance
+                    .add_message(
+                        "testroom",
+                        "user",
+                        &format!("This is message number {} with some extra content to make it longer and use more tokens", i),
+                    )
+                    .await;
+            }
+        });
+
+        let model = instance.models.get("test").unwrap().clone();
+
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        runtime
+            .tool_state
+            .set_shared_state(Some(instance.shared_state.clone()));
+
+        let wrap_state = WrapState {
+            room_name: Some("testroom".to_string()),
+            username: "alice".to_string(),
+            model,
+            shared_state: instance.shared_state.clone(),
+        };
+
+        // Very small budget should trigger overflow error
+        let result = runtime.compose_context(wrap_state, 100);
+        assert!(result.is_err(), "should error on budget overflow");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Compaction required") || err_msg.contains("exceeds budget"),
+            "error should mention compaction or budget: {}",
+            err_msg
+        );
+    }
+
+    // =========================================================================
+    // wrap.lua Lua-level tests
+    // =========================================================================
+
+    #[test]
+    fn test_wrap_builder_chaining() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local w = wrap(10000)
+                :system()
+                :model_identity()
+                :room()
+
+            -- Should have 3 sources
+            assert(#w.sources == 3, "should have 3 sources, got " .. #w.sources)
+
+            -- Check priorities are set correctly
+            assert(w.sources[1].priority == 0, "system priority should be 0")
+            assert(w.sources[2].priority == 10, "model priority should be 10")
+            assert(w.sources[3].priority == 20, "room priority should be 20")
+        "#,
+            )
+            .exec()
+            .expect("wrap builder chaining should work");
+    }
+
+    #[test]
+    fn test_wrap_builder_custom_source() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local w = wrap(10000)
+                :custom("my_context", "This is custom content", 50, false)
+
+            assert(#w.sources == 1, "should have 1 source")
+            assert(w.sources[1].name == "my_context", "name should be my_context")
+            assert(w.sources[1].priority == 50, "priority should be 50")
+            assert(w.sources[1].is_system == false, "should not be system")
+        "#,
+            )
+            .exec()
+            .expect("custom source should work");
+    }
+
+    #[test]
+    fn test_wrap_system_vs_context_separation() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local w = wrap(10000)
+                :system()           -- is_system = true
+                :model_identity()   -- is_system = true
+                :room()             -- is_system = false
+                :history(10)        -- is_system = false
+
+            -- Count system vs context sources
+            local system_count = 0
+            local context_count = 0
+            for _, source in ipairs(w.sources) do
+                if source.is_system then
+                    system_count = system_count + 1
+                else
+                    context_count = context_count + 1
+                end
+            end
+
+            assert(system_count == 2, "should have 2 system sources, got " .. system_count)
+            assert(context_count == 2, "should have 2 context sources, got " .. context_count)
+        "#,
+            )
+            .exec()
+            .expect("system vs context separation should work");
+    }
+
+    #[test]
+    fn test_wrap_default_wrap_function() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            -- default_wrap should create a fully configured builder
+            local w = default_wrap(10000)
+
+            -- Should have multiple sources (system, model, user, room, participants, etc.)
+            assert(#w.sources >= 5, "default_wrap should have at least 5 sources, got " .. #w.sources)
+
+            -- Should have target_tokens set
+            assert(w.target_tokens == 10000, "target_tokens should be 10000")
+        "#,
+            )
+            .exec()
+            .expect("default_wrap should work");
+    }
+
+    #[test]
+    fn test_wrap_estimate_tokens() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            -- estimate_tokens uses ~4 chars per token heuristic
+            local result = tools.estimate_tokens("hello world test")  -- 16 chars
+            assert(result == 4, "16 chars should be 4 tokens, got " .. tostring(result))
+
+            local result2 = tools.estimate_tokens("")
+            assert(result2 == 0, "empty string should be 0 tokens")
+        "#,
+            )
+            .exec()
+            .expect("estimate_tokens should work");
     }
 }
