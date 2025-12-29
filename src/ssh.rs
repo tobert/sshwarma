@@ -446,15 +446,14 @@ async fn push_updates_task(
                 let mut ledger = ledger.lock().await;
                 ledger.append(placeholder_id, &text)
             }
-            LedgerUpdate::ToolCall { placeholder_id, tool_name } => {
-                let mut ledger = ledger.lock().await;
-                ledger.set_status(placeholder_id, StatusKind::RunningTool(Some(tool_name)))
+            LedgerUpdate::ToolCall { placeholder_id: _, tool_name: _ } => {
+                // Status shown in HUD, not in ledger
+                false
             }
             LedgerUpdate::ToolResult { placeholder_id, summary } => {
                 let mut ledger = ledger.lock().await;
-                // Append tool result summary, then go back to thinking
-                ledger.append(placeholder_id, &format!("\n[{}]\n", summary));
-                ledger.set_status(placeholder_id, StatusKind::Thinking)
+                // Append tool result summary (status shown in HUD)
+                ledger.append(placeholder_id, &format!("\n[{}]\n", summary))
             }
             LedgerUpdate::Complete { placeholder_id, model_name: _ } => {
                 let mut ledger = ledger.lock().await;
@@ -973,7 +972,7 @@ impl SshHandler {
                     name: model.short_name.clone(),
                     is_streaming: false,
                 },
-                EntryContent::Status(StatusKind::Thinking),
+                EntryContent::Status(StatusKind::Pending), // Invisible - status shown in HUD
             )
         };
 
