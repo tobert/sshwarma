@@ -15,7 +15,7 @@ use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::display::{
     DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
-    hud::{render_hud, HudState, ParticipantStatus, HUD_HEIGHT},
+    hud::{render_hud, HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
     styles::ctrl,
 };
 use crate::internal_tools::{InternalToolConfig, ToolContext};
@@ -306,6 +306,21 @@ impl server::Handler for SshHandler {
                 } else {
                     hud.set_room(None, std::collections::HashMap::new());
                 }
+
+                // Initialize MCP connections
+                let mcp_connections = self.state.mcp.list_connections().await;
+                hud.set_mcp_connections(
+                    mcp_connections
+                        .into_iter()
+                        .map(|c| McpConnectionState {
+                            name: c.name,
+                            tool_count: c.tool_count,
+                            connected: true,
+                            call_count: c.call_count,
+                            last_tool: c.last_tool,
+                        })
+                        .collect(),
+                );
             }
 
             // Add welcome to ledger
@@ -361,11 +376,12 @@ impl server::Handler for SshHandler {
         {
             let handle = session.handle();
             let hud_state = self.hud_state.clone();
+            let state = self.state.clone();
             let term_width = width;
             let term_height = height;
 
             tokio::spawn(async move {
-                hud_refresh_task(handle, channel, hud_state, term_width, term_height).await;
+                hud_refresh_task(handle, channel, hud_state, state, term_width, term_height).await;
             });
         }
 
@@ -475,42 +491,64 @@ async fn push_updates_task(
 }
 
 /// Background task that refreshes the HUD at 100ms intervals
-/// Updates spinner animation and clears expired notifications
+///
+/// Tiered update schedule:
+/// - Every tick (100ms): spinner animation, tick indicator, notifications
+/// - Every 10 ticks (1s): MCP connection status
 async fn hud_refresh_task(
     handle: Handle,
     channel: ChannelId,
     hud_state: Arc<Mutex<HudState>>,
+    state: Arc<SharedState>,
     term_width: u16,
     term_height: u16,
 ) {
     let hud_start_row = term_height.saturating_sub(HUD_HEIGHT);
     let mut interval = tokio::time::interval(Duration::from_millis(100));
+    let mut tick_count: u64 = 0;
 
     loop {
         interval.tick().await;
+        tick_count = tick_count.wrapping_add(1);
 
-        // Update HUD state (spinner frame, expired notifications)
+        // Every tick: spinner, notifications
         {
             let mut hud = hud_state.lock().await;
             hud.advance_spinner();
             hud.clear_expired_notification();
         }
 
-        // Always redraw - tick indicator shows HUD is alive
-        {
-            let hud_output = {
-                let hud = hud_state.lock().await;
-                let rendered = render_hud(&hud, term_width);
-                format!(
-                    "{}{}{}{}",
-                    ctrl::save_cursor(),
-                    ctrl::move_to(hud_start_row, 1),
-                    rendered,
-                    ctrl::restore_cursor()
-                )
-            };
-            let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
+        // Every 10 ticks (1 second): poll MCP status
+        if tick_count % 10 == 0 {
+            let mcp_connections = state.mcp.list_connections().await;
+            let mut hud = hud_state.lock().await;
+            hud.set_mcp_connections(
+                mcp_connections
+                    .into_iter()
+                    .map(|c| McpConnectionState {
+                        name: c.name,
+                        tool_count: c.tool_count,
+                        connected: true,
+                        call_count: c.call_count,
+                        last_tool: c.last_tool,
+                    })
+                    .collect(),
+            );
         }
+
+        // Render and send HUD
+        let hud_output = {
+            let hud = hud_state.lock().await;
+            let rendered = render_hud(&hud, term_width);
+            format!(
+                "{}{}{}{}",
+                ctrl::save_cursor(),
+                ctrl::move_to(hud_start_row, 1),
+                rendered,
+                ctrl::restore_cursor()
+            )
+        };
+        let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
     }
 }
 

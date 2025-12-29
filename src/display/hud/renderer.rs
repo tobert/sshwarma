@@ -192,14 +192,23 @@ fn render_mcp_row(state: &HudState, inner_width: usize) -> String {
         content.push_str(&"mcp: ".with(colors::DIM).to_string());
         for (i, conn) in state.mcp_connections.iter().enumerate() {
             if i > 0 {
-                content.push_str(", ");
+                content.push_str("  ");
             }
             let indicator = if conn.connected {
                 "●".with(colors::GREEN).to_string()
             } else {
                 "○".with(colors::RED).to_string()
             };
-            content.push_str(&format!("{} {} ({})", indicator, conn.name, conn.tool_count));
+
+            // Format: ● name (tools/calls) [last_tool]
+            let stats = format!("{}/{}", conn.tool_count, conn.call_count);
+            content.push_str(&format!("{} {} ", indicator, conn.name));
+            content.push_str(&format!("({})", stats).with(colors::DIM).to_string());
+
+            if let Some(ref last) = conn.last_tool {
+                content.push_str(" ");
+                content.push_str(&last.as_str().with(colors::CYAN).to_string());
+            }
         }
     }
 

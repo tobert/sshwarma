@@ -27,6 +27,10 @@ struct McpConnection {
     endpoint: String,
     service: Arc<McpClientService>,
     tools: Vec<Tool>,
+    /// Total tool calls made through this connection
+    call_count: u64,
+    /// Most recently called tool name
+    last_tool: Option<String>,
 }
 
 /// Tools and peer for use with rig agents
@@ -71,6 +75,8 @@ impl McpClients {
             endpoint: endpoint.to_string(),
             service: Arc::new(service),
             tools: tools_result.tools,
+            call_count: 0,
+            last_tool: None,
         };
 
         self.clients.write().await.insert(name.to_string(), connection);
@@ -123,33 +129,46 @@ impl McpClients {
 
     /// Call a tool by name, routing to the appropriate MCP
     pub async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<ToolResult> {
-        let clients = self.clients.read().await;
+        // Find which client has this tool and get the service
+        let (source, service) = {
+            let clients = self.clients.read().await;
+            let mut found = None;
+            for (src, conn) in clients.iter() {
+                if conn.tools.iter().any(|t| t.name == name) {
+                    found = Some((src.clone(), conn.service.clone()));
+                    break;
+                }
+            }
+            found.ok_or_else(|| anyhow::anyhow!("tool '{}' not found in any connected MCP", name))?
+        };
 
-        // Find which client has this tool
-        for (source, conn) in clients.iter() {
-            if conn.tools.iter().any(|t| t.name == name) {
-                debug!("calling tool '{}' on MCP '{}'", name, source);
+        debug!("calling tool '{}' on MCP '{}'", name, source);
 
-                let result: RmcpCallToolResult = conn.service.call_tool(CallToolRequestParam {
-                    name: name.to_string().into(),
-                    arguments: args.as_object().cloned(),
-                }).await.context("tool call failed")?;
+        let result: RmcpCallToolResult = service.call_tool(CallToolRequestParam {
+            name: name.to_string().into(),
+            arguments: args.as_object().cloned(),
+        }).await.context("tool call failed")?;
 
-                // Extract text content from result using as_text()
-                let content = result.content.iter()
-                    .filter_map(|c| c.as_text().map(|t| t.text.to_string()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                return Ok(ToolResult {
-                    content,
-                    is_error: result.is_error.unwrap_or(false),
-                    source: source.clone(),
-                });
+        // Update call stats
+        {
+            let mut clients = self.clients.write().await;
+            if let Some(conn) = clients.get_mut(&source) {
+                conn.call_count += 1;
+                conn.last_tool = Some(name.to_string());
             }
         }
 
-        Err(anyhow::anyhow!("tool '{}' not found in any connected MCP", name))
+        // Extract text content from result using as_text()
+        let content = result.content.iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(ToolResult {
+            content,
+            is_error: result.is_error.unwrap_or(false),
+            source,
+        })
     }
 
     /// List connected MCP servers
@@ -159,6 +178,8 @@ impl McpClients {
                 name: name.clone(),
                 endpoint: conn.endpoint.clone(),
                 tool_count: conn.tools.len(),
+                call_count: conn.call_count,
+                last_tool: conn.last_tool.clone(),
             })
             .collect()
     }
@@ -227,6 +248,8 @@ pub struct ConnectionInfo {
     pub name: String,
     pub endpoint: String,
     pub tool_count: usize,
+    pub call_count: u64,
+    pub last_tool: Option<String>,
 }
 
 // ============================================================================

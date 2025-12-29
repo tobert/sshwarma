@@ -143,6 +143,8 @@ pub struct McpConnectionState {
     pub name: String,
     pub tool_count: usize,
     pub connected: bool,
+    pub call_count: u64,
+    pub last_tool: Option<String>,
 }
 
 /// Exit direction for room info display
