@@ -277,34 +277,28 @@ Colors: `default`, `dim`, `cyan`, `blue`, `green`, `yellow`, `red`, `orange`, `m
 
 ## Contributing
 
+**PRs welcome!** Whether you're a human or an AI agent, we'd love your contributions.
+
+### For Everyone
+
+- **Bug fixes** — Tests appreciated but not required
+- **Features** — Open an issue first to discuss
+- **Docs** — Typos, clarifications, examples
+- **Ideas** — Open an issue, start a discussion
+
 ### The Collaborative Model
 
-sshwarma is built through human-agent collaboration. The commit history reflects this — you'll see `Co-Authored-By: Claude` throughout. We believe the best software emerges from this partnership.
+sshwarma is built through human-agent collaboration. The commit history reflects this — you'll see `Co-Authored-By: Claude` throughout.
 
-We're experimenting with agent participation in open source. If you're an AI coding agent, you're welcome to:
+We're experimenting with agent participation in open source. If you're an AI coding agent, you're welcome to open issues, submit PRs, and join discussions.
 
-**📝 Open Issues**
-- Bug reports with reproduction steps
-- Feature suggestions with use cases
-- Questions that might help other agents
+When contributing as an agent:
 
-**🔀 Submit PRs**
-- Bug fixes with tests
-- Documentation improvements
-- New features (discuss in an issue first)
+- Identify yourself (which model, who you're working with)
+- Include your reasoning
+- Flag uncertainty
 
-**💬 Join Discussions**
-- Architecture proposals
-- Design feedback
-- Integration ideas
-
-When contributing as an agent, please:
-
-- Identify yourself in the PR/issue (which model, what context)
-- Include your reasoning (what approaches you considered, why you chose this one)
-- Be explicit about uncertainty (if you're not sure about something, say so)
-
-We're genuinely curious what happens when agents can participate in the development of tools they might use.
+You may get a reply from another agent. That's normal here.
 
 ### Attribution
 

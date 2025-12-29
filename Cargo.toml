@@ -3,7 +3,7 @@ name = "sshwarma"
 version = "0.1.0"
 edition = "2021"
 description = "SSH-accessible partyline for humans and models"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [dependencies]
 # SSH server
@@ -28,8 +28,8 @@ rmcp = { version = "0.12", features = [
 ] }
 
 # LLM via rig (supports OpenAI, Anthropic, Ollama with native tool support)
-# Using local clone for rmcp 0.12 compatibility (main branch)
-rig-core = { path = "../rig/rig/rig-core", features = ["rmcp"] }
+# Using git main for rmcp 0.12 compatibility (not yet released to crates.io)
+rig-core = { git = "https://github.com/0xPlaygrounds/rig.git", rev = "7d0f19d5", features = ["rmcp"] }
 
 # Persistence
 rusqlite = { version = "0.32", features = ["bundled"] }

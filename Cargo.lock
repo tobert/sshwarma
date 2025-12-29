@@ -2574,6 +2574,7 @@ dependencies = [
 [[package]]
 name = "rig-core"
 version = "0.27.0"
+source = "git+https://github.com/0xPlaygrounds/rig.git?rev=7d0f19d5#7d0f19d56fcc280d154d4026aacb3f8f9fb2fe10"
 dependencies = [
  "as-any",
  "async-stream",

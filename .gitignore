@@ -1,3 +1,11 @@
 /target
 host_key
 *.db
+*.sqlite
+*.log
+.env*
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.gemini/
