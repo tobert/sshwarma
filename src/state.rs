@@ -17,5 +17,5 @@ pub struct SharedState {
     pub config: Config,
     pub llm: Arc<LlmClient>,
     pub models: Arc<ModelRegistry>,
-    pub mcp: McpClients,
+    pub mcp: Arc<McpClients>,
 }

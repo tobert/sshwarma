@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
     let db = Arc::new(db);
     let llm = Arc::new(llm);
     let models = Arc::new(models);
-    let mcp = McpClients::new();
+    let mcp = Arc::new(McpClients::new());
 
     let state = Arc::new(SharedState {
         world: world.clone(),

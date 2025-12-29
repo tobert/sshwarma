@@ -100,6 +100,15 @@ impl ToolCache {
         // The next refresh cycle will catch it
     }
 
+    /// Remove a cached value synchronously (blocking)
+    pub fn remove_blocking(&self, key: &str) -> Option<Value> {
+        if let Ok(mut guard) = self.cache.try_write() {
+            guard.remove(key).map(|r| r.data)
+        } else {
+            None
+        }
+    }
+
     /// Remove a cached value
     pub async fn remove(&self, key: &str) -> Option<CachedResult> {
         self.cache.write().await.remove(key)

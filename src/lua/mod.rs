@@ -5,13 +5,15 @@
 
 pub mod cache;
 pub mod context;
+pub mod mcp_bridge;
 pub mod render;
 pub mod tools;
 
 pub use cache::ToolCache;
 pub use context::{build_hud_context, PendingNotification};
+pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use render::{parse_lua_output, HUD_ROWS};
-pub use tools::LuaToolState;
+pub use tools::{register_mcp_tools, LuaToolState};
 
 use crate::display::hud::HudState;
 use crate::lua::tools::register_tools;
@@ -320,6 +322,46 @@ impl LuaRuntime {
     /// Get the path to the loaded user script, if any
     pub fn user_script_path(&self) -> Option<&PathBuf> {
         self.loaded_script_path.as_ref()
+    }
+
+    /// Call the background(tick) function if it exists
+    ///
+    /// This is called on a timer (e.g., 500ms at 120 BPM) to allow Lua scripts
+    /// to poll MCP tools and update state. The tick counter can be used for
+    /// subdivision timing (tick % 4 == 0 for every 4 ticks, etc.).
+    ///
+    /// If the script doesn't define a `background` function, this is a no-op.
+    pub fn call_background(&self, tick: u64) -> Result<()> {
+        let globals = self.lua.globals();
+
+        // Check if background function exists
+        let background_fn: Value = globals
+            .get("background")
+            .map_err(|e| anyhow::anyhow!("failed to get background: {}", e))?;
+
+        if background_fn == Value::Nil {
+            // No background function defined, this is fine
+            return Ok(());
+        }
+
+        let func: mlua::Function = background_fn
+            .as_function()
+            .ok_or_else(|| anyhow::anyhow!("background is not a function"))?
+            .clone();
+
+        func.call::<()>(tick)
+            .map_err(|e| anyhow::anyhow!("background() call failed: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Check if the script defines a background() function
+    pub fn has_background(&self) -> bool {
+        self.lua
+            .globals()
+            .get::<Value>("background")
+            .map(|v| v != Value::Nil)
+            .unwrap_or(false)
     }
 }
 

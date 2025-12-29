@@ -6,6 +6,7 @@
 use crate::display::hud::HudState;
 use crate::lua::cache::ToolCache;
 use crate::lua::context::{build_hud_context, build_notifications_table, PendingNotification};
+use crate::lua::mcp_bridge::McpBridge;
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::{Arc, RwLock};
 
@@ -116,7 +117,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("clear_notifications", clear_notifications_fn)?;
 
-    // tools.cached(key) -> value or nil
+    // tools.cached(key) -> value or nil (alias: kv_get)
     let cached_fn = {
         let state = state.clone();
         lua.create_function(move |lua, key: String| {
@@ -128,10 +129,71 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             }
         })?
     };
-    tools.set("cached", cached_fn)?;
+    tools.set("cached", cached_fn.clone())?;
+    tools.set("kv_get", cached_fn)?;
+
+    // tools.kv_set(key, value) -> nil
+    let kv_set_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, (key, value): (String, Value)| {
+            let json_value = lua_to_json(&value)?;
+            state.cache.set_blocking(key, json_value);
+            Ok(())
+        })?
+    };
+    tools.set("kv_set", kv_set_fn)?;
+
+    // tools.kv_delete(key) -> old value or nil
+    let kv_delete_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, key: String| {
+            if let Some(value) = state.cache.remove_blocking(&key) {
+                json_to_lua(lua, &value)
+            } else {
+                Ok(Value::Nil)
+            }
+        })?
+    };
+    tools.set("kv_delete", kv_delete_fn)?;
 
     // Set as global
     lua.globals().set("tools", tools)?;
+
+    Ok(())
+}
+
+/// Register MCP bridge functions in the Lua state
+///
+/// Adds to existing `tools` table:
+/// - `tools.mcp_call(server, tool, args)` - Queue async MCP call, returns request_id
+/// - `tools.mcp_result(request_id)` - Check result, returns (result, status)
+pub fn register_mcp_tools(lua: &Lua, bridge: Arc<McpBridge>) -> LuaResult<()> {
+    let tools: Table = lua.globals().get("tools")?;
+
+    // tools.mcp_call(server, tool, args) -> request_id
+    let mcp_call_fn = {
+        let bridge = bridge.clone();
+        lua.create_function(move |_lua, (server, tool, args): (String, String, Value)| {
+            let json_args = lua_to_json(&args)?;
+            let request_id = bridge.call(&server, &tool, json_args);
+            Ok(request_id)
+        })?
+    };
+    tools.set("mcp_call", mcp_call_fn)?;
+
+    // tools.mcp_result(request_id) -> (result, status)
+    let mcp_result_fn = {
+        let bridge = bridge.clone();
+        lua.create_function(move |lua, request_id: String| {
+            let (result, status) = bridge.result(&request_id);
+            let lua_result = match result {
+                Some(v) => json_to_lua(lua, &v)?,
+                None => Value::Nil,
+            };
+            Ok((lua_result, status))
+        })?
+    };
+    tools.set("mcp_result", mcp_result_fn)?;
 
     Ok(())
 }
@@ -309,5 +371,33 @@ mod tests {
         // Queue should be empty now
         let empty = state.drain_notifications();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_kv_api() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+
+        register_tools(&lua, state).expect("should register tools");
+
+        // Test kv_set and kv_get
+        lua.load(r#"
+            tools.kv_set("test.key", {foo = "bar", count = 42})
+            local val = tools.kv_get("test.key")
+            assert(val.foo == "bar", "foo should be bar")
+            assert(val.count == 42, "count should be 42")
+        "#)
+        .exec()
+        .expect("kv_set/kv_get should work");
+
+        // Test kv_delete
+        lua.load(r#"
+            local old = tools.kv_delete("test.key")
+            assert(old.foo == "bar", "deleted value should have foo")
+            local gone = tools.kv_get("test.key")
+            assert(gone == nil, "key should be deleted")
+        "#)
+        .exec()
+        .expect("kv_delete should work");
     }
 }

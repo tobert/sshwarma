@@ -19,7 +19,7 @@ use crate::display::{
     hud::{HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
     styles::ctrl,
 };
-use crate::lua::LuaRuntime;
+use crate::lua::{mcp_request_handler, register_mcp_tools, LuaRuntime, McpBridge};
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
@@ -137,6 +137,8 @@ impl server::Server for SshServer {
             main_channel: None,
             hud_state: Arc::new(Mutex::new(HudState::new())),
             lua_runtime: None, // Created after auth with username
+            mcp_bridge: None,  // Created after auth with lua_runtime
+            mcp_request_rx: None,
         }
     }
 
@@ -177,6 +179,10 @@ pub struct SshHandler {
     pub hud_state: Arc<Mutex<HudState>>,
     /// Lua runtime for HUD rendering (per-connection, created after auth)
     pub lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
+    /// MCP bridge for async Lua→MCP tool calls (per-connection)
+    pub mcp_bridge: Option<Arc<McpBridge>>,
+    /// Receiver for MCP requests (taken by handler task in shell_request)
+    pub mcp_request_rx: Option<mpsc::Receiver<crate::lua::mcp_bridge::McpRequest>>,
 }
 
 impl server::Handler for SshHandler {
@@ -228,10 +234,25 @@ impl server::Handler for SshHandler {
         self.player = Some(player);
 
         // Create Lua runtime with user-specific script lookup
-        self.lua_runtime = Some(Arc::new(Mutex::new(
+        let lua_runtime = Arc::new(Mutex::new(
             LuaRuntime::new_for_user(Some(&handle))
                 .expect("failed to create Lua runtime"),
-        )));
+        ));
+
+        // Create MCP bridge for async Lua→MCP tool calls
+        let (mcp_bridge, mcp_request_rx) = McpBridge::with_defaults();
+        let mcp_bridge = Arc::new(mcp_bridge);
+
+        // Register MCP tools with Lua runtime
+        {
+            let lua = lua_runtime.lock().await;
+            register_mcp_tools(lua.lua(), mcp_bridge.clone())
+                .expect("failed to register MCP tools");
+        }
+
+        self.lua_runtime = Some(lua_runtime);
+        self.mcp_bridge = Some(mcp_bridge);
+        self.mcp_request_rx = Some(mcp_request_rx);
 
         Ok(server::Auth::Accept)
     }
@@ -401,6 +422,27 @@ impl server::Handler for SshHandler {
 
             tokio::spawn(async move {
                 hud_refresh_task(handle, channel, hud_state, lua_runtime, state, term_width, term_height).await;
+            });
+        }
+
+        // Spawn MCP request handler task (processes async MCP calls from Lua)
+        if let Some(mcp_request_rx) = self.mcp_request_rx.take() {
+            let mcp_clients = self.state.mcp.clone();
+            let mcp_bridge = self.mcp_bridge.clone().expect("mcp_bridge not initialized");
+            let timeout = mcp_bridge.timeout();
+            let requests = mcp_bridge.requests();
+
+            tokio::spawn(async move {
+                mcp_request_handler(mcp_request_rx, mcp_clients, requests, timeout).await;
+            });
+        }
+
+        // Spawn background tick task (500ms interval, calls Lua background())
+        {
+            let lua_runtime = self.lua_runtime.clone().expect("lua_runtime not initialized");
+
+            tokio::spawn(async move {
+                background_tick_task(lua_runtime).await;
             });
         }
 
@@ -574,6 +616,30 @@ async fn hud_refresh_task(
             )
         };
         let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
+    }
+}
+
+/// Background tick task - calls Lua background() at 120 BPM (500ms)
+///
+/// This allows Lua scripts to poll MCP tools and update state on a regular
+/// interval. The tick counter enables subdivision timing:
+/// - tick % 1 == 0: every 500ms
+/// - tick % 2 == 0: every 1s
+/// - tick % 4 == 0: every 2s
+/// - tick % 8 == 0: every 4s
+async fn background_tick_task(lua_runtime: Arc<Mutex<LuaRuntime>>) {
+    let tick_interval = Duration::from_millis(500); // 120 BPM
+    let mut interval = tokio::time::interval(tick_interval);
+    let mut tick: u64 = 0;
+
+    loop {
+        interval.tick().await;
+        tick = tick.wrapping_add(1);
+
+        let lua = lua_runtime.lock().await;
+        if let Err(e) = lua.call_background(tick) {
+            tracing::warn!("background() error: {}", e);
+        }
     }
 }
 

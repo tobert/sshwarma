@@ -91,6 +91,95 @@ local state = {
 }
 
 --------------------------------------------------------------------------------
+-- Holler Polling Helpers (called from background())
+--------------------------------------------------------------------------------
+
+--- Poll garden_status from holler
+local function poll_garden()
+    if not tools or not tools.mcp_call then return end
+
+    local req = tools.kv_get("_req.garden")
+    if req then
+        -- Check result of pending request
+        local result, status = tools.mcp_result(req)
+        if status == "complete" then
+            tools.kv_set("holler.garden_status", result)
+            tools.kv_delete("_req.garden")
+        elseif status == "error" or status == "timeout" then
+            tools.kv_set("holler.garden_status", {_status = status})
+            tools.kv_delete("_req.garden")
+        end
+        -- pending: do nothing, check next tick
+    else
+        -- Start new request
+        local req_id = tools.mcp_call("holler", "garden_status", {})
+        tools.kv_set("_req.garden", req_id)
+    end
+end
+
+--- Poll job_list from holler
+local function poll_jobs()
+    if not tools or not tools.mcp_call then return end
+
+    local req = tools.kv_get("_req.jobs")
+    if req then
+        local result, status = tools.mcp_result(req)
+        if status == "complete" then
+            tools.kv_set("holler.job_list", result)
+            tools.kv_delete("_req.jobs")
+        elseif status == "error" or status == "timeout" then
+            tools.kv_set("holler.job_list", {_status = status})
+            tools.kv_delete("_req.jobs")
+        end
+    else
+        local req_id = tools.mcp_call("holler", "job_list", {})
+        tools.kv_set("_req.jobs", req_id)
+    end
+end
+
+--- Poll artifact_list from holler
+local function poll_artifacts()
+    if not tools or not tools.mcp_call then return end
+
+    local req = tools.kv_get("_req.artifacts")
+    if req then
+        local result, status = tools.mcp_result(req)
+        if status == "complete" then
+            tools.kv_set("holler.artifact_list", result)
+            tools.kv_delete("_req.artifacts")
+        elseif status == "error" or status == "timeout" then
+            tools.kv_set("holler.artifact_list", {_status = status})
+            tools.kv_delete("_req.artifacts")
+        end
+    else
+        local req_id = tools.mcp_call("holler", "artifact_list", {})
+        tools.kv_set("_req.artifacts", req_id)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Background Function (called every 500ms by Rust)
+--------------------------------------------------------------------------------
+
+--- Called every 500ms (120 BPM) for polling
+--- tick % 1 == 0: every 500ms
+--- tick % 2 == 0: every 1s
+--- tick % 4 == 0: every 2s
+--- @param tick number Monotonic tick counter
+function background(tick)
+    -- Garden status: every tick (500ms) for responsive playback display
+    poll_garden()
+
+    -- Jobs: every tick (500ms) for progress updates
+    poll_jobs()
+
+    -- Artifacts: every 4 ticks (2s) - less urgent
+    if tick % 4 == 0 then
+        poll_artifacts()
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Helper Functions
 --------------------------------------------------------------------------------
 
@@ -182,7 +271,11 @@ end
 
 --- Render top border (Row 1)
 local function render_top_border(width)
-    local inner = string.rep(box.h, width - 2)
+    -- Show "atobey" in the border to confirm this script is loaded
+    local label = " atobey "
+    local left_len = 3
+    local right_len = width - 2 - left_len - #label
+    local inner = string.rep(box.h, left_len) .. label .. string.rep(box.h, right_len)
     return { border(box.tl .. inner .. box.tr) }
 end
 
@@ -271,7 +364,14 @@ local function render_participants(ctx, inner_width)
     return segments
 end
 
---- Render status row (Row 3)
+--- Render a progress bar
+local function render_progress_bar(progress, width)
+    local filled = math.floor(progress * width)
+    local empty = width - filled
+    return string.rep("█", filled) .. string.rep("░", empty)
+end
+
+--- Render status row (Row 3) - model status or job progress
 local function render_status(ctx, inner_width)
     local segments = {}
 
@@ -279,28 +379,85 @@ local function render_status(ctx, inner_width)
     table.insert(segments, seg("  "))  -- padding to match participants
 
     local content_len = 2
-    local status_text = nil
+    local status_shown = false
 
-    -- Find first active participant with status
-    for _, p in ipairs(ctx.participants or {}) do
-        if p.status == "thinking" then
-            status_text = "thinking"
-            break
-        elseif p.status == "running_tool" then
-            status_text = p.status_detail and ("running " .. p.status_detail) or "running tool"
-            break
-        elseif p.status == "error" then
-            status_text = p.status_detail and p.status_detail:sub(1, 20) or "error"
-            break
+    -- Check for running jobs first
+    local jobs = nil
+    if tools and tools.kv_get then
+        jobs = tools.kv_get("holler.job_list")
+    end
+
+    if jobs and jobs.jobs then
+        -- Show first running/pending job
+        for _, job in ipairs(jobs.jobs) do
+            if job.status == "running" or job.status == "pending" then
+                -- Job icon
+                table.insert(segments, c("⏳ ", colors.yellow))
+                content_len = content_len + 3
+
+                -- Job ID (truncated)
+                local job_id = job.id or "job"
+                if #job_id > 12 then
+                    job_id = job_id:sub(1, 12) .. "…"
+                end
+                table.insert(segments, seg(job_id .. ": "))
+                content_len = content_len + #job_id + 2
+
+                -- Tool name
+                local tool = job.tool or "unknown"
+                table.insert(segments, c(tool, colors.cyan))
+                table.insert(segments, seg(" "))
+                content_len = content_len + #tool + 1
+
+                -- Progress bar if available
+                if job.progress then
+                    local bar_width = 10
+                    local bar = render_progress_bar(job.progress, bar_width)
+                    table.insert(segments, seg("["))
+                    table.insert(segments, c(bar, colors.green))
+                    table.insert(segments, seg("] "))
+                    local pct = string.format("%.0f%%", job.progress * 100)
+                    table.insert(segments, dim(pct))
+                    content_len = content_len + 2 + bar_width + 1 + #pct
+                elseif job.status == "pending" then
+                    table.insert(segments, dim("pending"))
+                    content_len = content_len + 7
+                else
+                    table.insert(segments, dim("running"))
+                    content_len = content_len + 7
+                end
+
+                status_shown = true
+                break
+            end
         end
     end
 
-    if status_text then
-        -- Indent to roughly align with model names
-        local indent = "            "  -- 12 spaces
-        table.insert(segments, seg(indent))
-        table.insert(segments, dim(status_text))
-        content_len = content_len + visible_len(indent) + visible_len(status_text)
+    -- Fall back to model status if no jobs
+    if not status_shown then
+        local status_text = nil
+
+        -- Find first active participant with status
+        for _, p in ipairs(ctx.participants or {}) do
+            if p.status == "thinking" then
+                status_text = "thinking"
+                break
+            elseif p.status == "running_tool" then
+                status_text = p.status_detail and ("running " .. p.status_detail) or "running tool"
+                break
+            elseif p.status == "error" then
+                status_text = p.status_detail and p.status_detail:sub(1, 20) or "error"
+                break
+            end
+        end
+
+        if status_text then
+            -- Indent to roughly align with model names
+            local indent = "            "  -- 12 spaces
+            table.insert(segments, seg(indent))
+            table.insert(segments, dim(status_text))
+            content_len = content_len + visible_len(indent) + visible_len(status_text)
+        end
     end
 
     -- Pad to fill row
@@ -314,44 +471,63 @@ local function render_status(ctx, inner_width)
     return segments
 end
 
---- Render room details row (Row 4) - vibe, user count, session info
-local function render_room_details(ctx, inner_width)
+--- Render garden status row (Row 4)
+local function render_garden(inner_width)
     local segments = {}
 
     table.insert(segments, border(box.v))
     table.insert(segments, seg("  "))
 
     local content_len = 2
+    local garden = nil
 
-    -- Count participants by type
-    local user_count = 0
-    local model_count = 0
-    for _, p in ipairs(ctx.participants or {}) do
-        if p.kind == "user" then
-            user_count = user_count + 1
-        else
-            model_count = model_count + 1
-        end
+    if tools and tools.kv_get then
+        garden = tools.kv_get("holler.garden_status")
     end
 
-    -- User/model counts
-    local counts = string.format("%d user%s, %d model%s",
-        user_count, user_count == 1 and "" or "s",
-        model_count, model_count == 1 and "" or "s")
-    table.insert(segments, dim(counts))
-    content_len = content_len + visible_len(counts)
+    if not garden then
+        -- Waiting for first poll
+        table.insert(segments, dim("🎵 ... waiting"))
+        content_len = content_len + 15
+    elseif garden._status == "error" or garden._status == "timeout" then
+        -- Garden offline or error
+        table.insert(segments, c("🎵 ■ offline", colors.dim))
+        content_len = content_len + 12
+    else
+        -- Garden connected
+        local icon = garden.playing and "▶" or "■"
+        local icon_color = garden.playing and colors.green or colors.dim
 
-    -- Vibe if set
-    if ctx.vibe and ctx.vibe ~= "" then
-        local vibe_preview = ctx.vibe
-        local max_vibe_len = 30
-        if visible_len(vibe_preview) > max_vibe_len then
-            vibe_preview = vibe_preview:sub(1, max_vibe_len - 1) .. "…"
+        table.insert(segments, seg("🎵 "))
+        table.insert(segments, c(icon, icon_color))
+        content_len = content_len + 4
+
+        -- BPM
+        local bpm = garden.bpm or 120
+        table.insert(segments, seg(" "))
+        table.insert(segments, c(string.format("%.0f", bpm), colors.cyan))
+        table.insert(segments, dim("bpm"))
+        content_len = content_len + 1 + #string.format("%.0f", bpm) + 3
+
+        -- Beat position
+        local beat = garden.beat or 0
+        table.insert(segments, seg(" │ beat "))
+        table.insert(segments, c(string.format("%.1f", beat), colors.yellow))
+        content_len = content_len + 8 + #string.format("%.1f", beat)
+
+        -- Simple beat visualization (8 chars)
+        local beat_pos = math.floor(beat) % 16
+        local viz = ""
+        for i = 0, 7 do
+            if i == math.floor(beat_pos / 2) then
+                viz = viz .. "▓"
+            else
+                viz = viz .. "░"
+            end
         end
-        table.insert(segments, seg(" │ "))
-        table.insert(segments, c("♪ ", colors.cyan))
-        table.insert(segments, dim(vibe_preview))
-        content_len = content_len + 3 + 2 + visible_len(vibe_preview)
+        table.insert(segments, seg(" "))
+        table.insert(segments, dim(viz))
+        content_len = content_len + 1 + 8
     end
 
     -- Pad to fill row
@@ -569,10 +745,109 @@ function render_hud(now_ms, width, height)
         render_top_border(width),               -- Row 1: top border
         render_participants(ctx, inner_width),  -- Row 2: participants
         render_status(ctx, inner_width),        -- Row 3: status
-        render_room_details(ctx, inner_width),  -- Row 4: room details
+        render_garden(inner_width),             -- Row 4: garden status
         render_mcp(ctx, inner_width),           -- Row 5: MCP connections
         render_room(ctx, now_ms, inner_width),  -- Row 6: room info
         render_bottom_border(width, now_ms),    -- Row 7: bottom border + notification
         {},                                     -- Row 8: empty (input line handled by Rust)
     }
 end
+
+--------------------------------------------------------------------------------
+-- Mock tools for standalone testing
+--------------------------------------------------------------------------------
+
+if not tools then
+    -- Mock KV store for testing
+    local mock_kv = {
+        ["holler.garden_status"] = {playing = true, bpm = 120, beat = 42.5},
+        ["holler.job_list"] = {
+            jobs = {
+                {id = "job_abc123", tool = "sample", status = "running", progress = 0.65},
+            }
+        },
+    }
+
+    tools = {
+        hud_state = function()
+            return {
+                room = "hootenanny",
+                session_start_ms = 0,
+                participants = {
+                    {name = "alice", kind = "user", status = "idle"},
+                    {name = "bob", kind = "user", status = "idle"},
+                    {name = "qwen-8b", kind = "model", status = "idle"},
+                    {name = "qwen-4b", kind = "model", status = "idle"},
+                },
+                mcp = {
+                    {name = "holler", tools = 7, calls = 12, last_tool = "sample", connected = true},
+                    {name = "exa", tools = 3, calls = 5, connected = true},
+                },
+                exits = {n = "kitchen", e = "garden"},
+                pending_notifications = {},
+            }
+        end,
+        clear_notifications = function() end,
+        kv_get = function(key)
+            return mock_kv[key]
+        end,
+        kv_set = function(key, value)
+            mock_kv[key] = value
+        end,
+        kv_delete = function(key)
+            mock_kv[key] = nil
+        end,
+        mcp_call = function(server, tool, args)
+            return "mock_req_" .. tool
+        end,
+        mcp_result = function(req_id)
+            return nil, "pending"
+        end,
+    }
+end
+
+--------------------------------------------------------------------------------
+-- Standalone test (run with: lua hud.lua)
+--------------------------------------------------------------------------------
+
+if arg and arg[0] then
+    -- Running as script
+    local function dump_segments(row)
+        local line = ""
+        for _, seg in ipairs(row) do
+            line = line .. (seg.Text or "")
+        end
+        return line
+    end
+
+    -- Simulate some time passing with a notification
+    state.notifications = {
+        {message = "bob joined", created_ms = 0, ttl_ms = 5000},
+    }
+
+    local rows = render_hud(1000, 80, 8)
+
+    print("=== HUD Output (80 columns) ===")
+    for i, row in ipairs(rows) do
+        local line = dump_segments(row)
+        if line ~= "" then
+            print(string.format("Row %d: %s", i, line))
+        else
+            print(string.format("Row %d: (empty)", i))
+        end
+    end
+
+    print("\n=== Segment Detail (Row 2) ===")
+    for i, seg in ipairs(rows[2]) do
+        local fg = seg.Fg or "default"
+        local text = seg.Text or ""
+        print(string.format("  [%d] fg=%s text=%q", i, fg, text))
+    end
+end
+
+return {
+    render_hud = render_hud,
+    colors = colors,
+    box = box,
+    spinner_frames = spinner_frames,
+}
