@@ -43,7 +43,7 @@ impl SystemPromptBuilder {
     }
 
     /// Global layer: sshwarma environment description
-    fn global_layer() -> String {
+    pub fn global_layer() -> String {
         r#"You are an AI assistant in **sshwarma**, a collaborative SSH partyline where humans and AI models work together.
 
 ## Environment
@@ -64,7 +64,7 @@ impl SystemPromptBuilder {
     }
 
     /// Model layer: per-model personality and capabilities
-    fn model_layer(model: &ModelHandle) -> String {
+    pub fn model_layer(model: &ModelHandle) -> String {
         let mut layer = format!("## Your Identity\n");
         layer.push_str(&format!("You are **{}**.\n", model.display_name));
 
@@ -77,7 +77,7 @@ impl SystemPromptBuilder {
     }
 
     /// Room layer: context, vibe, and assets
-    fn room_layer(room: &Room) -> String {
+    pub fn room_layer(room: &Room) -> String {
         let mut layer = format!("**Room:** {}\n", room.name);
 
         if let Some(description) = &room.description {
@@ -115,6 +115,7 @@ mod tests {
             backend: ModelBackend::Mock { prefix: "Test".to_string() },
             available: true,
             system_prompt: Some("You are a helpful test assistant.".to_string()),
+            context_window: Some(30000),
         }
     }
 

@@ -8,12 +8,15 @@ pub mod context;
 pub mod mcp_bridge;
 pub mod render;
 pub mod tools;
+pub mod wrap;
+pub mod wrap_tools;
 
 pub use cache::ToolCache;
 pub use context::{build_hud_context, PendingNotification};
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use render::{parse_lua_output, HUD_ROWS};
 pub use tools::{register_mcp_tools, LuaToolState};
+pub use wrap::{compose_context, WrapResult, WrapState};
 
 use crate::display::hud::HudState;
 use crate::lua::tools::register_tools;
@@ -26,6 +29,9 @@ use tracing::{debug, info, warn};
 
 /// Embedded default HUD script
 const DEFAULT_HUD_SCRIPT: &str = include_str!("../embedded/hud.lua");
+
+/// Embedded wrap script for context composition
+const DEFAULT_WRAP_SCRIPT: &str = include_str!("../embedded/wrap.lua");
 
 /// Get the XDG config path for sshwarma
 fn config_path() -> Option<PathBuf> {
@@ -78,17 +84,27 @@ impl LuaRuntime {
         let lua = Lua::new();
         let tool_state = LuaToolState::new();
 
-        // Register tool functions
+        // Register tool functions (creates the tools table)
         register_tools(&lua, tool_state.clone())
             .map_err(|e| anyhow::anyhow!("failed to register Lua tools: {}", e))?;
 
-        // Load the default embedded script
+        // Register wrap tools under tools.wrap
+        wrap_tools::register_wrap_tools(&lua)
+            .map_err(|e| anyhow::anyhow!("failed to register wrap tools: {}", e))?;
+
+        // Load the wrap script first (provides wrap() and default_wrap())
+        lua.load(DEFAULT_WRAP_SCRIPT)
+            .set_name("embedded:wrap.lua")
+            .exec()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded wrap script: {}", e))?;
+
+        // Load the default HUD script
         lua.load(DEFAULT_HUD_SCRIPT)
             .set_name("embedded:hud.lua")
             .exec()
             .map_err(|e| anyhow::anyhow!("failed to load embedded HUD script: {}", e))?;
 
-        info!("Lua runtime initialized with embedded HUD script");
+        info!("Lua runtime initialized with embedded scripts");
 
         Ok(Self {
             lua,
@@ -312,6 +328,35 @@ impl LuaRuntime {
     pub fn render_hud_string(&self, now_ms: i64, width: u16, height: u16) -> Result<String> {
         let table = self.render_hud(now_ms, width, height)?;
         parse_lua_output(table)
+    }
+
+    /// Compose context for LLM interactions
+    ///
+    /// Calls Lua's `default_wrap()` function with the target token budget,
+    /// then extracts system_prompt and context strings.
+    ///
+    /// # Arguments
+    /// - `wrap_state`: State needed for context composition (room, user, model)
+    /// - `target_tokens`: Token budget for context (e.g., model's context_window)
+    ///
+    /// # Returns
+    /// WrapResult with system_prompt (stable, for preamble) and context (dynamic)
+    pub fn compose_context(
+        &self,
+        wrap_state: WrapState,
+        target_tokens: usize,
+    ) -> Result<WrapResult> {
+        // Set WrapState in registry for layer callbacks to access
+        wrap_tools::set_wrap_state(&self.lua, wrap_state)
+            .map_err(|e| anyhow::anyhow!("failed to set wrap state: {}", e))?;
+
+        // Call compose_context from wrap.rs
+        let result = wrap::compose_context(&self.lua, target_tokens);
+
+        // Clear wrap state (cleanup)
+        let _ = wrap_tools::clear_wrap_state(&self.lua);
+
+        result
     }
 
     /// Check if a user script is loaded (vs embedded default)
