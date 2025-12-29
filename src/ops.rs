@@ -152,23 +152,30 @@ pub async fn say(
     sender: &str,
     message: &str,
 ) -> Result<()> {
-    use crate::world::{MessageContent, Sender};
+    use crate::display::{EntryContent, EntrySource, LedgerEntry};
+    use chrono::Utc;
+
+    // Create the entry
+    let entry = LedgerEntry {
+        id: crate::display::EntryId(0), // Will be assigned by ledger/db
+        timestamp: Utc::now(),
+        source: EntrySource::User(sender.to_string()),
+        content: EntryContent::Chat(message.to_string()),
+        mutable: false,
+        ephemeral: false,
+        collapsible: true,
+    };
 
     // Add to in-memory world
     {
         let mut world = state.world.write().await;
         if let Some(room) = world.get_room_mut(room_name) {
-            room.add_message(
-                Sender::User(sender.to_string()),
-                MessageContent::Chat(message.to_string()),
-            );
+            room.add_entry(entry.source.clone(), entry.content.clone());
         }
     }
 
     // Persist to database
-    state
-        .db
-        .add_message(room_name, "user", sender, "chat", message)?;
+    state.db.add_ledger_entry(room_name, &entry)?;
 
     Ok(())
 }

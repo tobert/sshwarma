@@ -1,51 +1,42 @@
 //! Communication: say, tell, broadcast
 
-use crate::world::{Message, MessageContent, Room, Sender};
+use crate::display::{EntryContent, EntrySource, LedgerEntry};
+use crate::world::Room;
 
 /// Send a chat message to a room
 pub fn say(room: &mut Room, username: &str, message: &str) -> String {
-    room.add_message(
-        Sender::User(username.to_string()),
-        MessageContent::Chat(message.to_string()),
+    room.add_entry(
+        EntrySource::User(username.to_string()),
+        EntryContent::Chat(message.to_string()),
     );
     format!("{}: {}", username, message)
 }
 
-/// Send a private message (tell) to a user or model
-pub fn tell(room: &mut Room, from: &str, to: &str, message: &str) -> String {
-    room.add_message(
-        Sender::User(from.to_string()),
-        MessageContent::Tell {
-            to: to.to_string(),
-            message: message.to_string(),
-        },
-    );
-    format!("{} → {}: {}", from, to, message)
-}
-
-/// Format message for display
-pub fn format_message(msg: &Message) -> String {
-    let sender = match &msg.sender {
-        Sender::User(name) => name.clone(),
-        Sender::Model(name) => format!("@{}", name),
-        Sender::System => "[system]".to_string(),
+/// Format a ledger entry for display (simple text form)
+pub fn format_entry(entry: &LedgerEntry) -> Option<String> {
+    let sender = match &entry.source {
+        EntrySource::User(name) => name.clone(),
+        EntrySource::Model { name, .. } => format!("@{}", name),
+        EntrySource::System => "[system]".to_string(),
+        EntrySource::Command { command } => format!("/{}", command),
     };
 
-    match &msg.content {
-        MessageContent::Chat(text) => format!("{}: {}", sender, text),
-        MessageContent::Tell { to, message } => format!("{} → {}: {}", sender, to, message),
-        MessageContent::ToolRun { tool, result } => {
-            format!("[{} ran {}]\n{}", sender, tool, result)
+    match &entry.content {
+        EntryContent::Chat(text) => Some(format!("{}: {}", sender, text)),
+        EntryContent::CommandOutput(text) => Some(text.clone()),
+        EntryContent::Presence { user, action } => {
+            use crate::display::PresenceAction;
+            match action {
+                PresenceAction::Join => Some(format!("{} joined", user)),
+                PresenceAction::Leave => Some(format!("{} left", user)),
+            }
         }
-        MessageContent::ArtifactCreated { artifact } => {
-            format!(
-                "New artifact: [{}] {} (by {})",
-                format!("{:?}", artifact.artifact_type),
-                artifact.name,
-                artifact.created_by
-            )
-        }
-        MessageContent::Join(who) => format!("{} joined", who),
-        MessageContent::Leave(who) => format!("{} left", who),
+        EntryContent::Error(msg) => Some(format!("[error] {}", msg)),
+        EntryContent::Compaction(summary) => Some(format!("--- {} ---", summary)),
+        // Skip transient/display-only entries
+        EntryContent::Status(_)
+        | EntryContent::RoomHeader { .. }
+        | EntryContent::Welcome { .. }
+        | EntryContent::HistorySeparator { .. } => None,
     }
 }

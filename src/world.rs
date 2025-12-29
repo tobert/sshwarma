@@ -16,8 +16,7 @@ pub struct Room {
     pub users: Vec<String>,
     pub models: Vec<ModelHandle>,
     pub artifacts: Vec<ArtifactRef>,
-    pub history: Vec<Message>,
-    /// Room's conversation ledger - ready to render
+    /// Room's conversation ledger - the authoritative history
     pub ledger: Ledger,
     pub context: RoomContext,
 }
@@ -49,32 +48,6 @@ pub enum ArtifactType {
     Text,
     Image,
     Other(String),
-}
-
-/// A message in the room history
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub id: usize,
-    pub timestamp: DateTime<Utc>,
-    pub sender: Sender,
-    pub content: MessageContent,
-}
-
-#[derive(Debug, Clone)]
-pub enum Sender {
-    User(String),
-    Model(String),
-    System,
-}
-
-#[derive(Debug, Clone)]
-pub enum MessageContent {
-    Chat(String),
-    Tell { to: String, message: String },
-    ToolRun { tool: String, result: String },
-    ArtifactCreated { artifact: ArtifactRef },
-    Join(String),
-    Leave(String),
 }
 
 /// Rich context for a room beyond basic metadata
@@ -179,7 +152,6 @@ impl Room {
             users: Vec::new(),
             models: Vec::new(),
             artifacts: Vec::new(),
-            history: Vec::new(),
             ledger: Ledger::new(500),
             context: RoomContext::default(),
         }
@@ -190,48 +162,45 @@ impl Room {
     }
 
     pub fn add_user(&mut self, username: String) {
+        use crate::display::PresenceAction;
         if !self.users.contains(&username) {
             self.users.push(username.clone());
-            self.add_message(Sender::System, MessageContent::Join(username));
+            self.ledger.push(
+                EntrySource::System,
+                EntryContent::Presence {
+                    user: username,
+                    action: PresenceAction::Join,
+                },
+            );
         }
     }
 
     pub fn remove_user(&mut self, username: &str) {
+        use crate::display::PresenceAction;
         self.users.retain(|u| u != username);
-        self.add_message(Sender::System, MessageContent::Leave(username.to_string()));
-    }
-
-    pub fn add_message(&mut self, sender: Sender, content: MessageContent) {
-        let id = self.history.len();
-
-        // Also push to ledger for rendering
-        let source = match &sender {
-            Sender::User(name) => EntrySource::User(name.clone()),
-            Sender::Model(name) => EntrySource::Model {
-                name: name.clone(),
-                is_streaming: false,
+        self.ledger.push(
+            EntrySource::System,
+            EntryContent::Presence {
+                user: username.to_string(),
+                action: PresenceAction::Leave,
             },
-            Sender::System => EntrySource::System,
-        };
+        );
+    }
 
-        if let MessageContent::Chat(text) = &content {
-            self.ledger.push(source, EntryContent::Chat(text.clone()));
+    /// Add an entry to the room's ledger
+    pub fn add_entry(&mut self, source: EntrySource, content: EntryContent) -> crate::display::EntryId {
+        self.ledger.push(source, content)
+    }
+
+    /// Load ledger entries from DB (call once when room is first accessed)
+    pub fn load_entries_from_db(&mut self, entries: &[crate::display::LedgerEntry]) {
+        for entry in entries {
+            self.ledger.push(entry.source.clone(), entry.content.clone());
         }
-
-        self.history.push(Message {
-            id,
-            timestamp: Utc::now(),
-            sender,
-            content,
-        });
     }
 
-    pub fn recent_history(&self, count: usize) -> &[Message] {
-        let start = self.history.len().saturating_sub(count);
-        &self.history[start..]
-    }
-
-    /// Load history from DB into ledger (call once when room is first accessed)
+    /// Load history from legacy messages table into ledger
+    /// Used for backward compatibility with existing databases
     pub fn load_history_from_db(&mut self, messages: &[crate::db::MessageRow]) {
         for msg in messages {
             let source = match msg.sender_type.as_str() {

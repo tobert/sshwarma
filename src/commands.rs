@@ -1,11 +1,44 @@
 //! REPL command implementations
 
+use crate::lua::WrapState;
+use crate::model::{ModelBackend, ModelHandle};
 use crate::ops;
 use crate::ssh::SshHandler;
-use crate::world::{MessageContent, Sender};
+use crate::display::{EntryContent, EntrySource};
+
+/// Result of a command execution
+pub struct CommandResult {
+    /// Output text to display
+    pub text: String,
+    /// If true, output is displayed but excluded from context/history
+    pub ephemeral: bool,
+}
+
+impl CommandResult {
+    /// Create a normal command result (included in history)
+    pub fn normal(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ephemeral: false,
+        }
+    }
+
+    /// Create an ephemeral result (displayed but not in history)
+    pub fn ephemeral(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ephemeral: true,
+        }
+    }
+
+    /// Check if result has any output
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
 
 impl SshHandler {
-    pub async fn handle_input(&mut self, input: &str) -> String {
+    pub async fn handle_input(&mut self, input: &str) -> CommandResult {
         let input = input.trim();
 
         if input.starts_with('/') {
@@ -14,40 +47,42 @@ impl SshHandler {
             let args = parts.get(1).copied().unwrap_or("");
 
             match *cmd {
-                "help" => self.cmd_help(),
-                "rooms" => self.cmd_rooms().await,
-                "who" => self.cmd_who().await,
-                "join" => self.cmd_join(args).await,
-                "create" => self.cmd_create(args).await,
-                "leave" => self.cmd_leave().await,
-                "look" => self.cmd_look(args).await,
-                "examine" => self.cmd_examine(args).await,
-                "history" => self.cmd_history(args).await,
-                "tools" => self.cmd_tools().await,
-                "run" => self.cmd_run(args).await,
-                "mcp" => self.cmd_mcp(args).await,
+                "help" => CommandResult::normal(self.cmd_help()),
+                "rooms" => CommandResult::normal(self.cmd_rooms().await),
+                "who" => CommandResult::normal(self.cmd_who().await),
+                "join" => CommandResult::normal(self.cmd_join(args).await),
+                "create" => CommandResult::normal(self.cmd_create(args).await),
+                "leave" => CommandResult::normal(self.cmd_leave().await),
+                "look" => CommandResult::normal(self.cmd_look(args).await),
+                "examine" => CommandResult::normal(self.cmd_examine(args).await),
+                "history" => CommandResult::normal(self.cmd_history(args).await),
+                "tools" => CommandResult::normal(self.cmd_tools().await),
+                "run" => CommandResult::normal(self.cmd_run(args).await),
+                "mcp" => CommandResult::normal(self.cmd_mcp(args).await),
                 // Room context commands
-                "vibe" => self.cmd_vibe(args).await,
-                "note" => self.cmd_journal(args, "note").await,
-                "decide" => self.cmd_journal(args, "decision").await,
-                "idea" => self.cmd_journal(args, "idea").await,
-                "milestone" => self.cmd_journal(args, "milestone").await,
-                "journal" => self.cmd_journal_list(args).await,
-                "bring" => self.cmd_bring(args).await,
-                "drop" => self.cmd_drop(args).await,
-                "inspire" => self.cmd_inspire(args).await,
-                "dig" => self.cmd_dig(args).await,
-                "go" => self.cmd_go(args).await,
-                "exits" => self.cmd_exits().await,
-                "fork" => self.cmd_fork(args).await,
-                "nav" => self.cmd_nav(args).await,
-                "quit" => "Goodbye!".to_string(),
-                _ => format!("Unknown command: /{}", cmd),
+                "vibe" => CommandResult::normal(self.cmd_vibe(args).await),
+                "note" => CommandResult::normal(self.cmd_journal(args, "note").await),
+                "decide" => CommandResult::normal(self.cmd_journal(args, "decision").await),
+                "idea" => CommandResult::normal(self.cmd_journal(args, "idea").await),
+                "milestone" => CommandResult::normal(self.cmd_journal(args, "milestone").await),
+                "journal" => CommandResult::normal(self.cmd_journal_list(args).await),
+                "bring" => CommandResult::normal(self.cmd_bring(args).await),
+                "drop" => CommandResult::normal(self.cmd_drop(args).await),
+                "inspire" => CommandResult::normal(self.cmd_inspire(args).await),
+                "dig" => CommandResult::normal(self.cmd_dig(args).await),
+                "go" => CommandResult::normal(self.cmd_go(args).await),
+                "exits" => CommandResult::normal(self.cmd_exits().await),
+                "fork" => CommandResult::normal(self.cmd_fork(args).await),
+                "nav" => CommandResult::normal(self.cmd_nav(args).await),
+                // Debug commands - ephemeral (not included in history/context)
+                "wrap" => CommandResult::ephemeral(self.cmd_wrap(args).await),
+                "quit" => CommandResult::normal("Goodbye!"),
+                _ => CommandResult::normal(format!("Unknown command: /{}", cmd)),
             }
         } else if input.starts_with('@') {
-            self.cmd_mention(input).await
+            CommandResult::normal(self.cmd_mention(input).await)
         } else {
-            self.cmd_say(input).await
+            CommandResult::normal(self.cmd_say(input).await)
         }
     }
 
@@ -87,6 +122,9 @@ Communication:
 Tools:
   /tools              List available tools
   /run <tool> [args]  Invoke tool with JSON args
+
+Debug:
+  /wrap [model]       Preview context composition
 
 MCP:
   /mcp                List connected MCP servers
@@ -349,20 +387,22 @@ MCP:
 
         let mut output = format!("{} → @{}: {}\r\n", username, model_name, message);
 
-        // Build context from room history
+        // Build context from room ledger
         let history = if let Some(ref room_name) =
             self.player.as_ref().and_then(|p| p.current_room.clone())
         {
             let world = self.state.world.read().await;
             if let Some(room) = world.get_room(room_name) {
-                room.recent_history(10)
+                room.ledger
+                    .recent(10)
                     .iter()
-                    .filter_map(|msg| match &msg.content {
-                        MessageContent::Chat(text) => {
-                            let role = match &msg.sender {
-                                Sender::User(_) => "user",
-                                Sender::Model(_) => "assistant",
-                                Sender::System => return None,
+                    .filter(|e| !e.ephemeral)
+                    .filter_map(|entry| match &entry.content {
+                        EntryContent::Chat(text) => {
+                            let role = match &entry.source {
+                                EntrySource::User(_) => "user",
+                                EntrySource::Model { .. } => "assistant",
+                                EntrySource::System | EntrySource::Command { .. } => return None,
                             };
                             Some((role.to_string(), text.clone()))
                         }
@@ -395,22 +435,29 @@ MCP:
                 if let Some(ref room_name) =
                     self.player.as_ref().and_then(|p| p.current_room.clone())
                 {
+                    use crate::display::LedgerEntry;
+                    use chrono::Utc;
+
+                    let entry = LedgerEntry {
+                        id: crate::display::EntryId(0),
+                        timestamp: Utc::now(),
+                        source: EntrySource::Model {
+                            name: model.short_name.clone(),
+                            is_streaming: false,
+                        },
+                        content: EntryContent::Chat(response.clone()),
+                        mutable: false,
+                        ephemeral: false,
+                        collapsible: true,
+                    };
+
                     {
                         let mut world = self.state.world.write().await;
                         if let Some(room) = world.get_room_mut(room_name) {
-                            room.add_message(
-                                Sender::Model(model.short_name.clone()),
-                                MessageContent::Chat(response.clone()),
-                            );
+                            room.add_entry(entry.source.clone(), entry.content.clone());
                         }
                     }
-                    let _ = self.state.db.add_message(
-                        room_name,
-                        "model",
-                        &model.short_name,
-                        "chat",
-                        &response,
-                    );
+                    let _ = self.state.db.add_ledger_entry(room_name, &entry);
                 }
 
                 let formatted = response.replace('\n', "\r\n");
@@ -869,6 +916,80 @@ MCP:
             }
         } else {
             "Usage: /nav [on|off]".to_string()
+        }
+    }
+
+    async fn cmd_wrap(&self, args: &str) -> String {
+        let username = self.username().unwrap_or_else(|| "anonymous".to_string());
+        let room_name = self.current_room();
+
+        // Get model from args or use a default preview model
+        let model = if args.trim().is_empty() {
+            // Use a mock model for preview
+            ModelHandle {
+                short_name: "preview".to_string(),
+                display_name: "Preview Model".to_string(),
+                backend: ModelBackend::Mock {
+                    prefix: "[preview]".to_string(),
+                },
+                available: true,
+                system_prompt: Some("This is a preview of context composition.".to_string()),
+                context_window: Some(30000),
+            }
+        } else {
+            // Look up specified model
+            match self.state.models.get(args.trim()) {
+                Some(m) => m.clone(),
+                None => {
+                    let available: Vec<_> = self.state.models.available()
+                        .iter()
+                        .map(|m| m.short_name.as_str())
+                        .collect();
+                    return format!(
+                        "Unknown model '{}'. Available: {}",
+                        args.trim(),
+                        available.join(", ")
+                    );
+                }
+            }
+        };
+
+        let target_tokens = model.context_window.unwrap_or(30000);
+
+        // Get lua_runtime and compose context
+        let lua_runtime = match &self.lua_runtime {
+            Some(rt) => rt,
+            None => return "Lua runtime not initialized.".to_string(),
+        };
+
+        let wrap_state = WrapState {
+            room_name,
+            username,
+            model: model.clone(),
+            shared_state: self.state.clone(),
+        };
+
+        let lua = lua_runtime.lock().await;
+        match lua.compose_context(wrap_state, target_tokens) {
+            Ok(result) => {
+                let system_tokens = result.system_prompt.len() / 4;
+                let context_tokens = result.context.len() / 4;
+
+                format!(
+                    "─── wrap() preview for @{} ───\r\n\r\n\
+                     === SYSTEM PROMPT ({} tokens, cacheable) ===\r\n{}\r\n\r\n\
+                     === CONTEXT ({} tokens, dynamic) ===\r\n{}\r\n\r\n\
+                     Total: ~{} tokens of {} budget",
+                    model.short_name,
+                    system_tokens,
+                    result.system_prompt,
+                    context_tokens,
+                    if result.context.is_empty() { "(empty)" } else { &result.context },
+                    system_tokens + context_tokens,
+                    target_tokens
+                )
+            }
+            Err(e) => format!("Error composing context: {}", e),
         }
     }
 }

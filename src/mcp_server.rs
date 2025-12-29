@@ -18,9 +18,12 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use crate::config::Config;
 use crate::db::Database;
 use crate::llm::LlmClient;
-use crate::model::ModelRegistry;
+use crate::lua::{LuaRuntime, WrapState};
+use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
+use crate::state::SharedState;
 use crate::world::{JournalKind, World};
 use tokio::sync::RwLock;
 
@@ -182,6 +185,17 @@ pub struct ForkRoomParams {
     pub new_name: String,
 }
 
+/// Parameters for preview_wrap
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PreviewWrapParams {
+    #[schemars(description = "Model short name (e.g. 'qwen-8b'). If not specified, uses a preview model.")]
+    pub model: Option<String>,
+    #[schemars(description = "Room to preview context for (optional)")]
+    pub room: Option<String>,
+    #[schemars(description = "Username to simulate (defaults to 'claude')")]
+    pub username: Option<String>,
+}
+
 #[tool_router]
 impl SshwarmaMcpServer {
     pub fn new(state: Arc<McpServerState>) -> Self {
@@ -212,22 +226,39 @@ impl SshwarmaMcpServer {
 
     #[tool(description = "Get recent message history from a room")]
     async fn get_history(&self, Parameters(params): Parameters<GetHistoryParams>) -> String {
+        use crate::display::{EntryContent, EntrySource};
+
         let limit = params.limit.unwrap_or(50).min(200);
 
-        match self.state.db.recent_messages(&params.room, limit) {
-            Ok(messages) => {
+        match self.state.db.recent_entries(&params.room, limit) {
+            Ok(entries) => {
+                // Filter to only chat messages
+                let messages: Vec<_> = entries
+                    .iter()
+                    .filter(|e| !e.ephemeral)
+                    .filter_map(|entry| {
+                        if let EntryContent::Chat(text) = &entry.content {
+                            let sender = match &entry.source {
+                                EntrySource::User(name) => name.clone(),
+                                EntrySource::Model { name, .. } => name.clone(),
+                                EntrySource::System => "system".to_string(),
+                                EntrySource::Command { command } => format!("/{}", command),
+                            };
+                            let ts = entry.timestamp.format("%H:%M").to_string();
+                            Some((ts, sender, text.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
                 if messages.is_empty() {
                     return format!("No messages in room '{}'.", params.room);
                 }
 
                 let mut output = format!("--- History for {} ({} messages) ---\n", params.room, messages.len());
-                for msg in messages {
-                    output.push_str(&format!(
-                        "[{}] {}: {}\n",
-                        &msg.timestamp[11..16],
-                        msg.sender_name,
-                        msg.content
-                    ));
+                for (ts, sender, content) in messages {
+                    output.push_str(&format!("[{}] {}: {}\n", ts, sender, content));
                 }
                 output
             }
@@ -248,18 +279,28 @@ impl SshwarmaMcpServer {
         }
 
         // Add message to in-memory room
+        use crate::display::{EntryContent, EntrySource, LedgerEntry, EntryId};
+        use chrono::Utc;
+
+        let entry = LedgerEntry {
+            id: EntryId(0),
+            timestamp: Utc::now(),
+            source: EntrySource::User(sender.clone()),
+            content: EntryContent::Chat(params.message.clone()),
+            mutable: false,
+            ephemeral: false,
+            collapsible: true,
+        };
+
         {
             let mut world = self.state.world.write().await;
             if let Some(room) = world.get_room_mut(&params.room) {
-                room.add_message(
-                    crate::world::Sender::User(sender.clone()),
-                    crate::world::MessageContent::Chat(params.message.clone()),
-                );
+                room.add_entry(entry.source.clone(), entry.content.clone());
             }
         }
 
         // Persist to database
-        match self.state.db.add_message(&params.room, "user", &sender, "chat", &params.message) {
+        match self.state.db.add_ledger_entry(&params.room, &entry) {
             Ok(_) => format!("{}: {}", sender, params.message),
             Err(e) => format!("Error saving message: {}", e),
         }
@@ -283,19 +324,24 @@ impl SshwarmaMcpServer {
             }
         };
 
-        // Build context from room history if provided
+        // Build context from room ledger if provided
+        use crate::display::{EntryContent, EntrySource, LedgerEntry, EntryId};
+        use chrono::Utc;
+
         let history = if let Some(ref room_name) = params.room {
             let world = self.state.world.read().await;
             if let Some(room) = world.get_room(room_name) {
-                room.recent_history(10)
+                room.ledger
+                    .recent(10)
                     .iter()
-                    .filter_map(|msg| {
-                        match &msg.content {
-                            crate::world::MessageContent::Chat(text) => {
-                                let role = match &msg.sender {
-                                    crate::world::Sender::User(_) => "user",
-                                    crate::world::Sender::Model(_) => "assistant",
-                                    crate::world::Sender::System => return None,
+                    .filter(|e| !e.ephemeral)
+                    .filter_map(|entry| {
+                        match &entry.content {
+                            EntryContent::Chat(text) => {
+                                let role = match &entry.source {
+                                    EntrySource::User(_) => "user",
+                                    EntrySource::Model { .. } => "assistant",
+                                    EntrySource::System | EntrySource::Command { .. } => return None,
                                 };
                                 Some((role.to_string(), text.clone()))
                             }
@@ -319,16 +365,26 @@ impl SshwarmaMcpServer {
             Ok(response) => {
                 // Record in room if specified
                 if let Some(ref room_name) = params.room {
+                    let entry = LedgerEntry {
+                        id: EntryId(0),
+                        timestamp: Utc::now(),
+                        source: EntrySource::Model {
+                            name: model.short_name.clone(),
+                            is_streaming: false,
+                        },
+                        content: EntryContent::Chat(response.clone()),
+                        mutable: false,
+                        ephemeral: false,
+                        collapsible: true,
+                    };
+
                     {
                         let mut world = self.state.world.write().await;
                         if let Some(room) = world.get_room_mut(room_name) {
-                            room.add_message(
-                                crate::world::Sender::Model(model.short_name.clone()),
-                                crate::world::MessageContent::Chat(response.clone()),
-                            );
+                            room.add_entry(entry.source.clone(), entry.content.clone());
                         }
                     }
-                    let _ = self.state.db.add_message(room_name, "model", &model.short_name, "chat", &response);
+                    let _ = self.state.db.add_ledger_entry(room_name, &entry);
                 }
 
                 format!("{}: {}", model.short_name, response)
@@ -643,6 +699,89 @@ impl SshwarmaMcpServer {
                 params.new_name, params.source
             ),
             Err(e) => format!("Error forking context: {}", e),
+        }
+    }
+
+    #[tool(description = "Preview what context would be composed for an LLM interaction")]
+    async fn preview_wrap(&self, Parameters(params): Parameters<PreviewWrapParams>) -> String {
+        let username = params.username.unwrap_or_else(|| "claude".to_string());
+
+        // Get model from params or use a preview mock
+        let model = if let Some(model_name) = &params.model {
+            match self.state.models.get(model_name) {
+                Some(m) => m.clone(),
+                None => {
+                    let available: Vec<_> = self.state.models.available()
+                        .iter()
+                        .map(|m| m.short_name.as_str())
+                        .collect();
+                    return format!(
+                        "Unknown model '{}'. Available: {}",
+                        model_name,
+                        available.join(", ")
+                    );
+                }
+            }
+        } else {
+            // Mock model for preview
+            ModelHandle {
+                short_name: "preview".to_string(),
+                display_name: "Preview Model".to_string(),
+                backend: ModelBackend::Mock {
+                    prefix: "[preview]".to_string(),
+                },
+                available: true,
+                system_prompt: Some("This is a preview of context composition.".to_string()),
+                context_window: Some(30000),
+            }
+        };
+
+        let target_tokens = model.context_window.unwrap_or(30000);
+
+        // Create a temporary LuaRuntime for the preview
+        let lua_runtime = match LuaRuntime::new() {
+            Ok(rt) => rt,
+            Err(e) => return format!("Error creating Lua runtime: {}", e),
+        };
+
+        // Build SharedState from McpServerState components
+        // Note: MCP server doesn't have MCP clients, so we create minimal state
+        let shared_state = Arc::new(SharedState {
+            world: self.state.world.clone(),
+            db: self.state.db.clone(),
+            config: Config::default(),
+            llm: self.state.llm.clone(),
+            models: self.state.models.clone(),
+            mcp: Arc::new(crate::mcp::McpClients::new()),
+        });
+
+        let wrap_state = WrapState {
+            room_name: params.room,
+            username,
+            model: model.clone(),
+            shared_state,
+        };
+
+        match lua_runtime.compose_context(wrap_state, target_tokens) {
+            Ok(result) => {
+                let system_tokens = result.system_prompt.len() / 4;
+                let context_tokens = result.context.len() / 4;
+
+                format!(
+                    "=== wrap() preview for @{} ===\n\n\
+                     --- SYSTEM PROMPT ({} tokens, cacheable) ---\n{}\n\n\
+                     --- CONTEXT ({} tokens, dynamic) ---\n{}\n\n\
+                     Total: ~{} tokens of {} budget",
+                    model.short_name,
+                    system_tokens,
+                    result.system_prompt,
+                    context_tokens,
+                    if result.context.is_empty() { "(empty)" } else { &result.context },
+                    system_tokens + context_tokens,
+                    target_tokens
+                )
+            }
+            Err(e) => format!("Error composing context: {}", e),
         }
     }
 }

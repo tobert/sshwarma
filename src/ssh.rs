@@ -19,13 +19,14 @@ use crate::display::{
     hud::{HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
     styles::ctrl,
 };
-use crate::lua::{mcp_request_handler, register_mcp_tools, LuaRuntime, McpBridge};
+use crate::lua::{mcp_request_handler, register_mcp_tools, LuaRuntime, McpBridge, WrapState};
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
-use crate::prompt::SystemPromptBuilder;
-use crate::world::{MessageContent, Sender};
+
+// Note: SystemPromptBuilder still exists in prompt.rs for layer building,
+// but we now use Lua wrap() for context composition
 
 /// Normalize a tool's input_schema for llama.cpp compatibility:
 /// 1. Strip "default" keys (llama.cpp can't parse them)
@@ -325,7 +326,12 @@ impl server::Handler for SshHandler {
                 if let Some(room_name) = &player.current_room {
                     let world = self.state.world.read().await;
                     if let Some(room) = world.get_room(room_name) {
-                        hud.set_room(Some(room_name.clone()), room.context.exits.clone());
+                        hud.set_room(
+                            Some(room_name.clone()),
+                            room.description.clone(),
+                            room.context.vibe.clone(),
+                            room.context.exits.clone(),
+                        );
                         // Add other users and models
                         for user in &room.users {
                             if user != &player.username {
@@ -337,7 +343,7 @@ impl server::Handler for SshHandler {
                         }
                     }
                 } else {
-                    hud.set_room(None, std::collections::HashMap::new());
+                    hud.set_room(None, None, None, std::collections::HashMap::new());
                 }
 
                 // Initialize MCP connections
@@ -742,15 +748,21 @@ impl SshHandler {
                     // Track room before command to detect /join
                     let room_before = self.player.as_ref().and_then(|p| p.current_room.clone());
 
-                    let response = self.handle_input(&line).await;
+                    let result = self.handle_input(&line).await;
 
                     // Add command output to ledger if non-empty
-                    if !response.is_empty() {
+                    if !result.is_empty() {
                         let mut ledger = self.ledger.lock().await;
-                        ledger.push(
-                            EntrySource::Command { command: line.split_whitespace().next().unwrap_or("").to_string() },
-                            EntryContent::CommandOutput(response),
-                        );
+                        let source = EntrySource::Command {
+                            command: line.split_whitespace().next().unwrap_or("").to_string(),
+                        };
+                        let content = EntryContent::CommandOutput(result.text);
+
+                        if result.ephemeral {
+                            ledger.push_ephemeral(source, content);
+                        } else {
+                            ledger.push(source, content);
+                        }
                     }
 
                     // Check if we joined a new room - if so, render room's ledger
@@ -1062,12 +1074,35 @@ impl SshHandler {
         output.push_str(&rendered);
         let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
 
-        // Build 4-layer system prompt
+        // Build context using Lua wrap() system
         let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
-        let system_prompt = {
-            let world = self.state.world.read().await;
-            let room = room_name.as_ref().and_then(|name| world.get_room(name));
-            SystemPromptBuilder::build(&model, room, &username, None)
+        let (system_prompt, context_prefix) = {
+            let lua_runtime = self.lua_runtime.as_ref().expect("lua_runtime not initialized");
+            let lua = lua_runtime.lock().await;
+
+            // Create WrapState for context composition
+            let wrap_state = WrapState {
+                room_name: room_name.clone(),
+                username: username.clone(),
+                model: model.clone(),
+                shared_state: self.state.clone(),
+            };
+
+            // Get token budget from model's context_window (default 30K)
+            let target_tokens = model.context_window.unwrap_or(30000);
+
+            match lua.compose_context(wrap_state, target_tokens) {
+                Ok(result) => (result.system_prompt, result.context),
+                Err(e) => {
+                    tracing::warn!("wrap() failed, falling back to basic prompt: {}", e);
+                    // Fallback to minimal system prompt
+                    let fallback = format!(
+                        "You are {} in sshwarma. You are talking with {}.",
+                        model.display_name, username
+                    );
+                    (fallback, String::new())
+                }
+            }
         };
 
         // Get MCP tools for rig agent
@@ -1154,7 +1189,14 @@ impl SshHandler {
         let update_tx = self.update_tx.clone();
         let hud_state = self.hud_state.clone();
         let model_short = model.short_name.clone();
-        let message_owned = message.to_string();
+
+        // Prepend context to user message (context is dynamic room/history state)
+        let message_with_context = if context_prefix.is_empty() {
+            message.to_string()
+        } else {
+            format!("{}\n\n---\n\n{}", context_prefix, message)
+        };
+        let message_owned = message_with_context;
 
         // Spawn background task - returns immediately
         tokio::spawn(async move {
@@ -1236,16 +1278,29 @@ impl SshHandler {
 
             // Save to room history
             if let Some(ref room) = room_name {
+                use crate::display::LedgerEntry;
+                use chrono::Utc;
+
+                let entry = LedgerEntry {
+                    id: crate::display::EntryId(0), // Will be assigned
+                    timestamp: Utc::now(),
+                    source: EntrySource::Model {
+                        name: model_short.clone(),
+                        is_streaming: false,
+                    },
+                    content: EntryContent::Chat(full_response.clone()),
+                    mutable: false,
+                    ephemeral: false,
+                    collapsible: true,
+                };
+
                 {
                     let mut world = world.write().await;
                     if let Some(r) = world.get_room_mut(room) {
-                        r.add_message(
-                            Sender::Model(model_short.clone()),
-                            MessageContent::Chat(full_response.clone()),
-                        );
+                        r.add_entry(entry.source.clone(), entry.content.clone());
                     }
                 }
-                let _ = db.add_message(room, "model", &model_short, "chat", &full_response);
+                let _ = db.add_ledger_entry(room, &entry);
             }
 
             // Send completion to finalize the placeholder

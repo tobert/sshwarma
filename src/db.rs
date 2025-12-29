@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
 
+use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction};
 use crate::world::{AssetBinding, Inspiration, JournalEntry, JournalKind};
 
 /// Database handle (thread-safe via Mutex)
@@ -150,6 +151,27 @@ impl Database {
                 added_at TEXT NOT NULL,
                 FOREIGN KEY (room) REFERENCES rooms(name)
             );
+
+            -- Ledger entries (replaces messages table)
+            CREATE TABLE IF NOT EXISTS ledger_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                -- EntrySource fields
+                source_type TEXT NOT NULL,
+                source_name TEXT,
+                source_streaming INTEGER,
+                -- EntryContent fields
+                content_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_meta TEXT,
+                -- Entry flags
+                ephemeral INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ledger_room ON ledger_entries(room);
+            CREATE INDEX IF NOT EXISTS idx_ledger_timestamp ON ledger_entries(timestamp);
             "#,
         )?;
 
@@ -328,7 +350,7 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Get recent messages for a room
+    /// Get recent messages for a room (legacy - use recent_entries instead)
     pub fn recent_messages(&self, room: &str, limit: usize) -> Result<Vec<MessageRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -353,6 +375,162 @@ impl Database {
         }
         messages.reverse(); // Oldest first
         Ok(messages)
+    }
+
+    // =========================================================================
+    // Ledger Entry Management (new)
+    // =========================================================================
+
+    /// Add a ledger entry to the database
+    pub fn add_ledger_entry(&self, room: &str, entry: &LedgerEntry) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let timestamp = entry.timestamp.to_rfc3339();
+
+        // Convert EntrySource to DB fields
+        let (source_type, source_name, source_streaming) = match &entry.source {
+            EntrySource::User(name) => ("user", Some(name.clone()), None),
+            EntrySource::Model { name, is_streaming } => {
+                ("model", Some(name.clone()), Some(if *is_streaming { 1 } else { 0 }))
+            }
+            EntrySource::System => ("system", None, None),
+            EntrySource::Command { command } => ("command", Some(command.clone()), None),
+        };
+
+        // Convert EntryContent to DB fields
+        let (content_type, content, content_meta) = match &entry.content {
+            EntryContent::Chat(text) => ("chat", text.clone(), None),
+            EntryContent::CommandOutput(text) => ("command_output", text.clone(), None),
+            EntryContent::Status(_) => {
+                // Status entries are transient, don't persist them
+                return Ok(0);
+            }
+            EntryContent::RoomHeader { name, description } => {
+                let meta = serde_json::json!({ "description": description });
+                ("room_header", name.clone(), Some(meta.to_string()))
+            }
+            EntryContent::Welcome { username } => ("welcome", username.clone(), None),
+            EntryContent::HistorySeparator { label } => ("history_separator", label.clone(), None),
+            EntryContent::Error(msg) => ("error", msg.clone(), None),
+            EntryContent::Presence { user, action } => {
+                let action_str = match action {
+                    PresenceAction::Join => "join",
+                    PresenceAction::Leave => "leave",
+                };
+                let meta = serde_json::json!({ "action": action_str });
+                ("presence", user.clone(), Some(meta.to_string()))
+            }
+            EntryContent::Compaction(summary) => ("compaction", summary.clone(), None),
+        };
+
+        conn.execute(
+            "INSERT INTO ledger_entries \
+             (room, timestamp, source_type, source_name, source_streaming, \
+              content_type, content, content_meta, ephemeral) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                room,
+                timestamp,
+                source_type,
+                source_name,
+                source_streaming,
+                content_type,
+                content,
+                content_meta,
+                if entry.ephemeral { 1 } else { 0 }
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get recent ledger entries for a room
+    pub fn recent_entries(&self, room: &str, limit: usize) -> Result<Vec<LedgerEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, source_type, source_name, source_streaming, \
+             content_type, content, content_meta, ephemeral \
+             FROM ledger_entries WHERE room = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![room, limit], |row| {
+            let id: i64 = row.get(0)?;
+            let timestamp_str: String = row.get(1)?;
+            let source_type: String = row.get(2)?;
+            let source_name: Option<String> = row.get(3)?;
+            let source_streaming: Option<i32> = row.get(4)?;
+            let content_type: String = row.get(5)?;
+            let content: String = row.get(6)?;
+            let content_meta: Option<String> = row.get(7)?;
+            let ephemeral: i32 = row.get(8)?;
+
+            // Parse EntrySource
+            let source = match source_type.as_str() {
+                "user" => EntrySource::User(source_name.unwrap_or_default()),
+                "model" => EntrySource::Model {
+                    name: source_name.unwrap_or_default(),
+                    is_streaming: source_streaming.unwrap_or(0) == 1,
+                },
+                "system" => EntrySource::System,
+                "command" => EntrySource::Command {
+                    command: source_name.unwrap_or_default(),
+                },
+                _ => EntrySource::System,
+            };
+
+            // Parse EntryContent
+            let entry_content = match content_type.as_str() {
+                "chat" => EntryContent::Chat(content),
+                "command_output" => EntryContent::CommandOutput(content),
+                "room_header" => {
+                    let desc = content_meta
+                        .as_ref()
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        .and_then(|v| v.get("description").and_then(|d| d.as_str()).map(String::from));
+                    EntryContent::RoomHeader {
+                        name: content,
+                        description: desc,
+                    }
+                }
+                "welcome" => EntryContent::Welcome { username: content },
+                "history_separator" => EntryContent::HistorySeparator { label: content },
+                "error" => EntryContent::Error(content),
+                "presence" => {
+                    let action = content_meta
+                        .as_ref()
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(String::from))
+                        .unwrap_or_else(|| "join".to_string());
+                    EntryContent::Presence {
+                        user: content,
+                        action: if action == "leave" {
+                            PresenceAction::Leave
+                        } else {
+                            PresenceAction::Join
+                        },
+                    }
+                }
+                "compaction" => EntryContent::Compaction(content),
+                _ => EntryContent::Chat(content),
+            };
+
+            Ok(LedgerEntry {
+                id: EntryId(id as u64),
+                timestamp: chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                source,
+                content: entry_content,
+                mutable: false, // DB entries are never mutable
+                ephemeral: ephemeral == 1,
+                collapsible: true,
+            })
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        entries.reverse(); // Oldest first
+        Ok(entries)
     }
 
     /// Record an artifact

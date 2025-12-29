@@ -134,6 +134,7 @@ fn create_test_model_registry() -> ModelRegistry {
         },
         available: true,
         system_prompt: None,
+        context_window: None,
     });
 
     registry.register(ModelHandle {
@@ -144,6 +145,7 @@ fn create_test_model_registry() -> ModelRegistry {
         },
         available: true,
         system_prompt: None,
+        context_window: None,
     });
 
     registry
@@ -376,6 +378,7 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
         },
         available: true,
         system_prompt: None,
+        context_window: None,
     });
 
     let state = Arc::new(McpServerState {
