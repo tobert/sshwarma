@@ -136,10 +136,7 @@ impl server::Server for SshServer {
             session_handle: None,
             main_channel: None,
             hud_state: Arc::new(Mutex::new(HudState::new())),
-            lua_runtime: Arc::new(Mutex::new(
-                LuaRuntime::new_with_user_script()
-                    .expect("failed to create Lua runtime"),
-            )),
+            lua_runtime: None, // Created after auth with username
         }
     }
 
@@ -178,8 +175,8 @@ pub struct SshHandler {
     pub main_channel: Option<ChannelId>,
     /// HUD state (shared with refresh task)
     pub hud_state: Arc<Mutex<HudState>>,
-    /// Lua runtime for HUD rendering (per-connection)
-    pub lua_runtime: Arc<Mutex<LuaRuntime>>,
+    /// Lua runtime for HUD rendering (per-connection, created after auth)
+    pub lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
 }
 
 impl server::Handler for SshHandler {
@@ -229,6 +226,13 @@ impl server::Handler for SshHandler {
         let player = PlayerSession::new(handle.clone());
         let _ = self.state.db.start_session(&player.session_id, &handle);
         self.player = Some(player);
+
+        // Create Lua runtime with user-specific script lookup
+        self.lua_runtime = Some(Arc::new(Mutex::new(
+            LuaRuntime::new_for_user(Some(&handle))
+                .expect("failed to create Lua runtime"),
+        )));
+
         Ok(server::Auth::Accept)
     }
 
@@ -356,7 +360,8 @@ impl server::Handler for SshHandler {
             let hud_start_row = height.saturating_sub(HUD_HEIGHT);
             let hud_output = {
                 let hud = self.hud_state.lock().await;
-                let lua = self.lua_runtime.lock().await;
+                let lua_runtime = self.lua_runtime.as_ref().expect("lua_runtime not initialized");
+                let lua = lua_runtime.lock().await;
                 lua.update_state(hud.clone());
                 let now_ms = Utc::now().timestamp_millis();
                 let rendered = lua.render_hud_string(now_ms, width, height)
@@ -376,7 +381,7 @@ impl server::Handler for SshHandler {
             let ledger = self.ledger.clone();
             let display = self.display.clone();
             let hud_state_for_updates = self.hud_state.clone();
-            let lua_runtime_for_updates = self.lua_runtime.clone();
+            let lua_runtime_for_updates = self.lua_runtime.clone().expect("lua_runtime not initialized");
             let term_width = width;
             let term_height = height;
 
@@ -389,7 +394,7 @@ impl server::Handler for SshHandler {
         {
             let handle = session.handle();
             let hud_state = self.hud_state.clone();
-            let lua_runtime = self.lua_runtime.clone();
+            let lua_runtime = self.lua_runtime.clone().expect("lua_runtime not initialized");
             let state = self.state.clone();
             let term_width = width;
             let term_height = height;
@@ -603,7 +608,8 @@ impl SshHandler {
         // Render HUD
         let hud_rendered = {
             let hud = self.hud_state.lock().await;
-            let lua = self.lua_runtime.lock().await;
+            let lua_runtime = self.lua_runtime.as_ref().expect("lua_runtime not initialized");
+            let lua = lua_runtime.lock().await;
             lua.update_state(hud.clone());
             let now_ms = Utc::now().timestamp_millis();
             lua.render_hud_string(now_ms, width, height)

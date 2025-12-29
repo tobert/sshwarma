@@ -50,6 +50,11 @@ pub fn user_hud_script_path() -> PathBuf {
     user_config_dir().join("hud.lua")
 }
 
+/// Path to a specific user's HUD script (e.g., atobey.lua, claude.lua)
+pub fn user_named_script_path(username: &str) -> PathBuf {
+    user_config_dir().join(format!("{}.lua", username))
+}
+
 /// Lua runtime for HUD rendering
 ///
 /// Manages the Lua state, script loading, and hot-reloading.
@@ -95,9 +100,38 @@ impl LuaRuntime {
     ///
     /// Falls back to embedded script if user script doesn't exist or fails.
     pub fn new_with_user_script() -> Result<Self> {
+        Self::new_for_user(None)
+    }
+
+    /// Create a new Lua runtime for a specific user
+    ///
+    /// Script lookup order:
+    /// 1. `{username}.lua` (e.g., atobey.lua, claude.lua)
+    /// 2. `hud.lua` (shared fallback)
+    /// 3. Embedded default
+    pub fn new_for_user(username: Option<&str>) -> Result<Self> {
         let mut runtime = Self::new()?;
 
-        // Try to load user script
+        // Try user-specific script first (e.g., atobey.lua)
+        if let Some(name) = username {
+            let named_path = user_named_script_path(name);
+            if named_path.exists() {
+                match runtime.load_script(&named_path) {
+                    Ok(()) => {
+                        info!("Loaded HUD script for '{}' from {:?}", name, named_path);
+                        return Ok(runtime);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load HUD script {:?}: {}. Trying fallback.",
+                            named_path, e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Try shared user script (hud.lua)
         let user_path = user_hud_script_path();
         if user_path.exists() {
             match runtime.load_script(&user_path) {
