@@ -387,7 +387,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Try to get history from SharedState
             if let Some(shared) = state.shared_state() {
-                let world = shared.world.blocking_read();
+                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
                 if let Some(room) = world.rooms.get(&room_name) {
                     let mut idx = 1;
                     for entry in room.ledger.recent(limit).iter().filter(|e| !e.ephemeral) {
@@ -439,7 +439,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Try to get journal from SharedState
             if let Some(shared) = state.shared_state() {
-                let world = shared.world.blocking_read();
+                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
                 if let Some(room) = world.rooms.get(&room_name) {
                     let mut idx = 1;
                     let entries: Vec<_> = room
@@ -483,7 +483,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Try to get inspirations from SharedState
             if let Some(shared) = state.shared_state() {
-                let world = shared.world.blocking_read();
+                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
                 if let Some(room) = world.rooms.get(&room_name) {
                     for (i, insp) in room.context.inspirations.iter().enumerate() {
                         let row = lua.create_table()?;
@@ -505,7 +505,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             let list = lua.create_table()?;
 
             if let Some(shared) = state.shared_state() {
-                let world = shared.world.blocking_read();
+                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
                 let mut idx = 1;
                 for (name, room) in &world.rooms {
                     let row = lua.create_table()?;
