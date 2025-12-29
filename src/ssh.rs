@@ -25,9 +25,6 @@ use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
 
-// Note: SystemPromptBuilder still exists in prompt.rs for layer building,
-// but we now use Lua wrap() for context composition
-
 /// Normalize a tool's input_schema for llama.cpp compatibility:
 /// 1. Strip "default" keys (llama.cpp can't parse them)
 /// 2. Add "type": "object" to schemas with only "description" (invalid JSON Schema)

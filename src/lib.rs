@@ -19,7 +19,6 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod model;
 pub mod ops;
-pub mod prompt;
 pub mod player;
 pub mod ssh;
 pub mod state;
