@@ -156,10 +156,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("kv_delete", kv_delete_fn)?;
 
-    // Create tools.sshwarma namespace (mirrors sshwarma_* internal tools)
-    let sshwarma = lua.create_table()?;
+    // Room/participant tools (mirrors sshwarma_* internal tools)
 
-    // tools.sshwarma.look() -> room summary
+    // tools.look() -> room summary
     let look_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
@@ -219,9 +218,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             Ok(result)
         })?
     };
-    sshwarma.set("look", look_fn)?;
+    tools.set("look", look_fn)?;
 
-    // tools.sshwarma.who() -> participant list
+    // tools.who() -> participant list
     let who_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
@@ -240,9 +239,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             Ok(list)
         })?
     };
-    sshwarma.set("who", who_fn)?;
+    tools.set("who", who_fn)?;
 
-    // tools.sshwarma.exits() -> exit list
+    // tools.exits() -> exit list
     let exits_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
@@ -259,9 +258,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             Ok(list)
         })?
     };
-    sshwarma.set("exits", exits_fn)?;
+    tools.set("exits", exits_fn)?;
 
-    // tools.sshwarma.vibe() -> string or nil
+    // tools.vibe() -> string or nil
     let vibe_fn = {
         let state = state.clone();
         lua.create_function(move |_lua, ()| {
@@ -269,10 +268,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             Ok(hud.vibe.clone())
         })?
     };
-    sshwarma.set("vibe", vibe_fn)?;
+    tools.set("vibe", vibe_fn)?;
 
-    // tools.sshwarma.mcp() -> MCP connections (same as ctx.mcp in old API)
-    let mcp_fn = {
+    // tools.mcp_connections() -> MCP connections
+    let mcp_connections_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
             let hud = state.hud_state();
@@ -293,9 +292,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             Ok(list)
         })?
     };
-    sshwarma.set("mcp", mcp_fn)?;
+    tools.set("mcp_connections", mcp_connections_fn)?;
 
-    // tools.sshwarma.session() -> session info
+    // tools.session() -> session info
     let session_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
@@ -307,9 +306,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             Ok(result)
         })?
     };
-    sshwarma.set("session", session_fn)?;
-
-    tools.set("sshwarma", sshwarma)?;
+    tools.set("session", session_fn)?;
 
     // Set as global
     lua.globals().set("tools", tools)?;

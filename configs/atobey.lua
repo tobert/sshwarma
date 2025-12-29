@@ -3,10 +3,10 @@
 --
 -- Interface:
 --   Rust calls: render_hud(now_ms, width, height)
---   Lua calls:  tools.sshwarma.look() - room summary
---               tools.sshwarma.who()  - participant list
---               tools.sshwarma.mcp()  - MCP connections
---               tools.sshwarma.session() - session info
+--   Lua calls:  tools.look() - room summary
+--               tools.who()  - participant list
+--               tools.mcp_connections()  - MCP connections
+--               tools.session() - session info
 --               tools.mcp_call() / tools.mcp_result() - async MCP calls
 --               tools.kv_get() / tools.kv_set() - KV store
 --
@@ -284,7 +284,7 @@ local function render_top_border(width)
 end
 
 --- Render participants row (Row 2)
---- @param who table Array from tools.sshwarma.who() - [{name, is_model, status, glyph}]
+--- @param who table Array from tools.who() - [{name, is_model, status, glyph}]
 local function render_participants(who, inner_width)
     local segments = {}
 
@@ -367,7 +367,7 @@ local function render_progress_bar(progress, width)
 end
 
 --- Render status row (Row 3) - model status or job progress
---- @param who table Array from tools.sshwarma.who()
+--- @param who table Array from tools.who()
 local function render_status(who, inner_width)
     local segments = {}
 
@@ -533,7 +533,7 @@ local function render_garden(inner_width)
 end
 
 --- Render MCP connections row (Row 5)
---- @param mcp table Array from tools.sshwarma.mcp()
+--- @param mcp table Array from tools.mcp_connections()
 local function render_mcp(mcp, inner_width)
     local segments = {}
 
@@ -595,8 +595,8 @@ local function render_mcp(mcp, inner_width)
 end
 
 --- Render room info row (Row 6)
---- @param look table Room info from tools.sshwarma.look()
---- @param session table Session info from tools.sshwarma.session()
+--- @param look table Room info from tools.look()
+--- @param session table Session info from tools.session()
 local function render_room(look, session, now_ms, inner_width)
     local segments = {}
 
@@ -702,17 +702,17 @@ function render_hud(now_ms, width, height)
         state.last_render_ms = now_ms
     end
 
-    -- 2. Get state from Rust via tools.sshwarma namespace
+    -- 2. Get state from Rust via tools namespace
     local look = {}
     local who = {}
     local mcp = {}
     local session = {}
 
-    if tools and tools.sshwarma then
-        look = tools.sshwarma.look() or {}
-        who = tools.sshwarma.who() or {}
-        mcp = tools.sshwarma.mcp() or {}
-        session = tools.sshwarma.session() or {}
+    if tools and tools.look then
+        look = tools.look() or {}
+        who = tools.who() or {}
+        mcp = tools.mcp_connections() or {}
+        session = tools.session() or {}
     end
 
     -- 3. Drain pending notifications from Rust
@@ -770,39 +770,37 @@ if not tools then
     }
 
     tools = {
-        sshwarma = {
-            look = function()
-                return {
-                    room = "hootenanny",
-                    description = "A cozy room for jamming",
-                    vibe = "lo-fi beats to code to",
-                    users = {"alice", "bob"},
-                    models = {"qwen-8b", "qwen-4b"},
-                    exits = {n = "kitchen", e = "garden"},
-                }
-            end,
-            who = function()
-                return {
-                    {name = "alice", is_model = false, status = "", glyph = ""},
-                    {name = "bob", is_model = false, status = "", glyph = ""},
-                    {name = "qwen-8b", is_model = true, status = "", glyph = "◇"},
-                    {name = "qwen-4b", is_model = true, status = "", glyph = "◇"},
-                }
-            end,
-            mcp = function()
-                return {
-                    {name = "holler", tools = 7, calls = 12, last_tool = "sample", connected = true},
-                    {name = "exa", tools = 3, calls = 5, connected = true},
-                }
-            end,
-            session = function()
-                return {
-                    start_ms = 0,
-                    duration = "0:05:23",
-                    spinner_frame = 0,
-                }
-            end,
-        },
+        look = function()
+            return {
+                room = "hootenanny",
+                description = "A cozy room for jamming",
+                vibe = "lo-fi beats to code to",
+                users = {"alice", "bob"},
+                models = {"qwen-8b", "qwen-4b"},
+                exits = {n = "kitchen", e = "garden"},
+            }
+        end,
+        who = function()
+            return {
+                {name = "alice", is_model = false, status = "", glyph = ""},
+                {name = "bob", is_model = false, status = "", glyph = ""},
+                {name = "qwen-8b", is_model = true, status = "", glyph = "◇"},
+                {name = "qwen-4b", is_model = true, status = "", glyph = "◇"},
+            }
+        end,
+        mcp_connections = function()
+            return {
+                {name = "holler", tools = 7, calls = 12, last_tool = "sample", connected = true},
+                {name = "exa", tools = 3, calls = 5, connected = true},
+            }
+        end,
+        session = function()
+            return {
+                start_ms = 0,
+                duration = "0:05:23",
+                spinner_frame = 0,
+            }
+        end,
         clear_notifications = function() return {} end,
         kv_get = function(key)
             return mock_kv[key]

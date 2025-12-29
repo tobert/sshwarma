@@ -3,10 +3,10 @@
 --
 -- Interface:
 --   Rust calls: render_hud(now_ms, width, height)
---   Lua calls:  tools.sshwarma.look() - room summary
---               tools.sshwarma.who()  - participant list
---               tools.sshwarma.mcp()  - MCP connections
---               tools.sshwarma.session() - session info
+--   Lua calls:  tools.look() - room summary
+--               tools.who()  - participant list
+--               tools.mcp_connections()  - MCP connections
+--               tools.session() - session info
 --               tools.clear_notifications() - drain pending notifications
 --
 -- Returns array of 8 rows, each row is array of segments:
@@ -190,7 +190,7 @@ local function render_top_border(width)
 end
 
 --- Render participants row (Row 2)
---- @param who table Array from tools.sshwarma.who() - [{name, is_model, status, glyph}]
+--- @param who table Array from tools.who() - [{name, is_model, status, glyph}]
 local function render_participants(who, inner_width)
     local segments = {}
 
@@ -266,7 +266,7 @@ local function render_participants(who, inner_width)
 end
 
 --- Render status row (Row 3)
---- @param who table Array from tools.sshwarma.who() - [{name, is_model, status, glyph}]
+--- @param who table Array from tools.who() - [{name, is_model, status, glyph}]
 local function render_status(who, inner_width)
     local segments = {}
 
@@ -305,8 +305,8 @@ local function render_status(who, inner_width)
 end
 
 --- Render room details row (Row 4) - vibe, user count, session info
---- @param who table Array from tools.sshwarma.who()
---- @param look table Room info from tools.sshwarma.look()
+--- @param who table Array from tools.who()
+--- @param look table Room info from tools.look()
 local function render_room_details(who, look, inner_width)
     local segments = {}
 
@@ -359,7 +359,7 @@ local function render_room_details(who, look, inner_width)
 end
 
 --- Render MCP connections row (Row 5)
---- @param mcp table Array from tools.sshwarma.mcp() - [{name, tools, connected, calls, last_tool}]
+--- @param mcp table Array from tools.mcp_connections() - [{name, tools, connected, calls, last_tool}]
 local function render_mcp(mcp, inner_width)
     local segments = {}
 
@@ -421,8 +421,8 @@ local function render_mcp(mcp, inner_width)
 end
 
 --- Render room info row (Row 6)
---- @param look table Room info from tools.sshwarma.look()
---- @param session table Session info from tools.sshwarma.session()
+--- @param look table Room info from tools.look()
+--- @param session table Session info from tools.session()
 local function render_room(look, session, now_ms, inner_width)
     local segments = {}
 
@@ -528,17 +528,17 @@ function render_hud(now_ms, width, height)
         state.last_render_ms = now_ms
     end
 
-    -- 2. Get state from Rust via tools.sshwarma namespace
+    -- 2. Get state from Rust via tools namespace
     local look = {}
     local who = {}
     local mcp = {}
     local session = {}
 
-    if tools and tools.sshwarma then
-        look = tools.sshwarma.look() or {}
-        who = tools.sshwarma.who() or {}
-        mcp = tools.sshwarma.mcp() or {}
-        session = tools.sshwarma.session() or {}
+    if tools and tools.look then
+        look = tools.look() or {}
+        who = tools.who() or {}
+        mcp = tools.mcp_connections() or {}
+        session = tools.session() or {}
     end
 
     -- 3. Drain pending notifications from Rust
