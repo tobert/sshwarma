@@ -66,6 +66,9 @@ pub enum EntryContent {
         user: String,
         action: PresenceAction,
     },
+    /// Compaction marker - summarizes older history
+    /// Entries before a Compaction can be dropped from context (they're summarized)
+    Compaction(String),
 }
 
 /// A single entry in the display ledger
@@ -77,6 +80,9 @@ pub struct LedgerEntry {
     pub content: EntryContent,
     /// If true, this entry can be updated (streaming, status)
     pub mutable: bool,
+    /// If true, this entry is displayed but excluded from context/history
+    /// Used for debug output like /wrap, system info, etc.
+    pub ephemeral: bool,
     /// True if this entry should be collapsed with adjacent blanks
     pub collapsible: bool,
 }
@@ -109,6 +115,7 @@ impl Ledger {
             source,
             content,
             mutable: false,
+            ephemeral: false,
             collapsible: true,
         });
 
@@ -131,6 +138,7 @@ impl Ledger {
             source,
             content,
             mutable: true,
+            ephemeral: false,
             collapsible: false, // Placeholders shouldn't be collapsed
         });
 
@@ -139,6 +147,50 @@ impl Ledger {
         }
 
         id
+    }
+
+    /// Add an ephemeral entry (displayed but excluded from context/history)
+    /// Used for debug output like /wrap, system info, etc.
+    pub fn push_ephemeral(&mut self, source: EntrySource, content: EntryContent) -> EntryId {
+        let id = EntryId(self.next_id);
+        self.next_id += 1;
+
+        self.entries.push(LedgerEntry {
+            id,
+            timestamp: Utc::now(),
+            source,
+            content,
+            mutable: false,
+            ephemeral: true,
+            collapsible: true,
+        });
+
+        if self.entries.len() > self.capacity {
+            self.entries.remove(0);
+        }
+
+        id
+    }
+
+    /// Toggle ephemeral status of an entry by ID
+    /// Returns true if found and toggled
+    pub fn toggle_ephemeral(&mut self, id: EntryId) -> Option<bool> {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.ephemeral = !entry.ephemeral;
+            Some(entry.ephemeral)
+        } else {
+            None
+        }
+    }
+
+    /// Set ephemeral status of an entry by ID
+    pub fn set_ephemeral(&mut self, id: EntryId, ephemeral: bool) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.ephemeral = ephemeral;
+            true
+        } else {
+            false
+        }
     }
 
     /// Update a mutable entry's content
@@ -242,6 +294,24 @@ impl Ledger {
     /// Clear all entries
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Get the N most recent entries
+    pub fn recent(&self, count: usize) -> &[LedgerEntry] {
+        let start = self.entries.len().saturating_sub(count);
+        &self.entries[start..]
+    }
+
+    /// Get non-ephemeral entries for context building
+    /// Skips ephemeral entries and returns only those suitable for model context
+    pub fn context_entries(&self) -> impl Iterator<Item = &LedgerEntry> {
+        self.entries.iter().filter(|e| !e.ephemeral)
+    }
+
+    /// Insert a compaction marker that summarizes older entries
+    /// Returns the ID of the compaction entry
+    pub fn compact(&mut self, summary: String) -> EntryId {
+        self.push(EntrySource::System, EntryContent::Compaction(summary))
     }
 }
 

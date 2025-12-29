@@ -103,6 +103,13 @@ pub fn render_entry(entry: &LedgerEntry, config: &RenderConfig) -> String {
             };
             output.push_str(&styles::system(&format!("* {} {}", user, verb)));
         }
+
+        EntryContent::Compaction(summary) => {
+            // Render compaction marker as a separator with the summary
+            output.push_str(&styles::separator(Some("summarized"), config.width.min(50)));
+            output.push_str(ctrl::CRLF);
+            output.push_str(&styles::dim(summary));
+        }
     }
 
     output
@@ -243,6 +250,7 @@ mod tests {
             source,
             content,
             mutable: false,
+            ephemeral: false,
             collapsible: true,
         }
     }
