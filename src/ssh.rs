@@ -1,6 +1,7 @@
 //! SSH server and connection handler
 
 use anyhow::Result;
+use chrono::Utc;
 use rig::tool::server::ToolServer;
 use rmcp::model::Tool;
 use russh::server::{self, Handle, Msg, Session};
@@ -15,9 +16,10 @@ use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::display::{
     DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
-    hud::{render_hud, HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
+    hud::{HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
     styles::ctrl,
 };
+use crate::lua::LuaRuntime;
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
@@ -134,6 +136,10 @@ impl server::Server for SshServer {
             session_handle: None,
             main_channel: None,
             hud_state: Arc::new(Mutex::new(HudState::new())),
+            lua_runtime: Arc::new(Mutex::new(
+                LuaRuntime::new_with_user_script()
+                    .expect("failed to create Lua runtime"),
+            )),
         }
     }
 
@@ -172,6 +178,8 @@ pub struct SshHandler {
     pub main_channel: Option<ChannelId>,
     /// HUD state (shared with refresh task)
     pub hud_state: Arc<Mutex<HudState>>,
+    /// Lua runtime for HUD rendering (per-connection)
+    pub lua_runtime: Arc<Mutex<LuaRuntime>>,
 }
 
 impl server::Handler for SshHandler {
@@ -348,7 +356,11 @@ impl server::Handler for SshHandler {
             let hud_start_row = height.saturating_sub(HUD_HEIGHT);
             let hud_output = {
                 let hud = self.hud_state.lock().await;
-                let rendered = render_hud(&hud, width);
+                let lua = self.lua_runtime.lock().await;
+                lua.update_state(hud.clone());
+                let now_ms = Utc::now().timestamp_millis();
+                let rendered = lua.render_hud_string(now_ms, width, height)
+                    .unwrap_or_else(|e| format!("HUD error: {}", e));
                 format!(
                     "{}{}",
                     ctrl::move_to(hud_start_row, 1),
@@ -364,24 +376,26 @@ impl server::Handler for SshHandler {
             let ledger = self.ledger.clone();
             let display = self.display.clone();
             let hud_state_for_updates = self.hud_state.clone();
+            let lua_runtime_for_updates = self.lua_runtime.clone();
             let term_width = width;
             let term_height = height;
 
             tokio::spawn(async move {
-                push_updates_task(handle, channel, update_rx, ledger, display, hud_state_for_updates, term_width, term_height).await;
+                push_updates_task(handle, channel, update_rx, ledger, display, hud_state_for_updates, lua_runtime_for_updates, term_width, term_height).await;
             });
         }
 
-        // Spawn HUD refresh task (100ms interval for spinner animation)
+        // Spawn HUD refresh task (100ms interval, Lua renders)
         {
             let handle = session.handle();
             let hud_state = self.hud_state.clone();
+            let lua_runtime = self.lua_runtime.clone();
             let state = self.state.clone();
             let term_width = width;
             let term_height = height;
 
             tokio::spawn(async move {
-                hud_refresh_task(handle, channel, hud_state, state, term_width, term_height).await;
+                hud_refresh_task(handle, channel, hud_state, lua_runtime, state, term_width, term_height).await;
             });
         }
 
@@ -413,6 +427,7 @@ async fn push_updates_task(
     ledger: Arc<Mutex<Ledger>>,
     display: Arc<Mutex<DisplayBuffer>>,
     hud_state: Arc<Mutex<HudState>>,
+    lua_runtime: Arc<Mutex<LuaRuntime>>,
     term_width: u16,
     term_height: u16,
 ) {
@@ -479,7 +494,11 @@ async fn push_updates_task(
         // Redraw HUD at bottom
         let hud_output = {
             let hud = hud_state.lock().await;
-            let rendered = render_hud(&hud, term_width);
+            let lua = lua_runtime.lock().await;
+            lua.update_state(hud.clone());
+            let now_ms = Utc::now().timestamp_millis();
+            let rendered = lua.render_hud_string(now_ms, term_width, term_height)
+                .unwrap_or_else(|e| format!("HUD error: {}", e));
             format!(
                 "{}{}",
                 ctrl::move_to(hud_start_row, 1),
@@ -493,12 +512,13 @@ async fn push_updates_task(
 /// Background task that refreshes the HUD at 100ms intervals
 ///
 /// Tiered update schedule:
-/// - Every tick (100ms): spinner animation, tick indicator, notifications
-/// - Every 10 ticks (1s): MCP connection status
+/// - Every tick (100ms): Lua renders HUD (handles spinner, notifications)
+/// - Every 10 ticks (1s): Poll MCP connection status, check Lua hot-reload
 async fn hud_refresh_task(
     handle: Handle,
     channel: ChannelId,
     hud_state: Arc<Mutex<HudState>>,
+    lua_runtime: Arc<Mutex<LuaRuntime>>,
     state: Arc<SharedState>,
     term_width: u16,
     term_height: u16,
@@ -511,14 +531,7 @@ async fn hud_refresh_task(
         interval.tick().await;
         tick_count = tick_count.wrapping_add(1);
 
-        // Every tick: spinner, notifications
-        {
-            let mut hud = hud_state.lock().await;
-            hud.advance_spinner();
-            hud.clear_expired_notification();
-        }
-
-        // Every 10 ticks (1 second): poll MCP status
+        // Every 10 ticks (1 second): poll MCP status and check hot-reload
         if tick_count % 10 == 0 {
             let mcp_connections = state.mcp.list_connections().await;
             let mut hud = hud_state.lock().await;
@@ -534,12 +547,20 @@ async fn hud_refresh_task(
                     })
                     .collect(),
             );
+
+            // Check for Lua script hot-reload
+            let mut lua = lua_runtime.lock().await;
+            lua.check_reload();
         }
 
-        // Render and send HUD
+        // Render and send HUD (Lua manages spinner, notifications, timing)
         let hud_output = {
             let hud = hud_state.lock().await;
-            let rendered = render_hud(&hud, term_width);
+            let lua = lua_runtime.lock().await;
+            lua.update_state(hud.clone());
+            let now_ms = Utc::now().timestamp_millis();
+            let rendered = lua.render_hud_string(now_ms, term_width, term_height)
+                .unwrap_or_else(|e| format!("HUD error: {}", e));
             format!(
                 "{}{}{}{}",
                 ctrl::save_cursor(),
@@ -582,7 +603,11 @@ impl SshHandler {
         // Render HUD
         let hud_rendered = {
             let hud = self.hud_state.lock().await;
-            render_hud(&hud, width)
+            let lua = self.lua_runtime.lock().await;
+            lua.update_state(hud.clone());
+            let now_ms = Utc::now().timestamp_millis();
+            lua.render_hud_string(now_ms, width, height)
+                .unwrap_or_else(|e| format!("HUD error: {}", e))
         };
         output.push_str(&ctrl::move_to(hud_start_row, 1));
         output.push_str(&hud_rendered);

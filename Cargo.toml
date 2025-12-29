@@ -64,5 +64,9 @@ nucleo-matcher = "0.3"
 # Terminal output formatting
 crossterm = "0.28"
 
+# Lua scripting for HUD customization
+# send feature enables Send+Sync for Lua state (needed for async handlers)
+mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
+
 [dev-dependencies]
 tokio-test = "0.4"

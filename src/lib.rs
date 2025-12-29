@@ -14,6 +14,7 @@ pub mod internal_tools;
 pub mod interp;
 pub mod line_editor;
 pub mod llm;
+pub mod lua;
 pub mod mcp;
 pub mod mcp_server;
 pub mod model;
