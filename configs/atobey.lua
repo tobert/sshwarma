@@ -1,10 +1,14 @@
--- sshwarma HUD renderer
--- Default HUD rendering script for the terminal display
+-- sshwarma HUD renderer (atobey config)
+-- Custom HUD with holler integration
 --
 -- Interface:
 --   Rust calls: render_hud(now_ms, width, height)
---   Lua calls:  tools.hud_state() to get raw state
---               tools.clear_notifications() to drain pending notifications
+--   Lua calls:  tools.sshwarma.look() - room summary
+--               tools.sshwarma.who()  - participant list
+--               tools.sshwarma.mcp()  - MCP connections
+--               tools.sshwarma.session() - session info
+--               tools.mcp_call() / tools.mcp_result() - async MCP calls
+--               tools.kv_get() / tools.kv_set() - KV store
 --
 -- Returns array of 8 rows, each row is array of segments:
 --   { {Text = "...", Fg = "#rrggbb", Bg = "#rrggbb"}, ... }
@@ -280,7 +284,8 @@ local function render_top_border(width)
 end
 
 --- Render participants row (Row 2)
-local function render_participants(ctx, inner_width)
+--- @param who table Array from tools.sshwarma.who() - [{name, is_model, status, glyph}]
+local function render_participants(who, inner_width)
     local segments = {}
 
     -- Left border
@@ -292,17 +297,17 @@ local function render_participants(ctx, inner_width)
     -- Sort: users first, then models
     local users = {}
     local models = {}
-    for _, p in ipairs(ctx.participants or {}) do
-        if p.kind == "user" then
-            table.insert(users, p)
-        else
+    for _, p in ipairs(who or {}) do
+        if p.is_model then
             table.insert(models, p)
+        else
+            table.insert(users, p)
         end
     end
 
     local is_first = true
 
-    -- Render users (no glyph for idle)
+    -- Render users (just name)
     for _, p in ipairs(users) do
         if not is_first then
             table.insert(segments, seg("  "))
@@ -310,11 +315,6 @@ local function render_participants(ctx, inner_width)
         end
         is_first = false
 
-        -- Users just show name (maybe with emoji status)
-        if p.status == "emoji" and p.status_detail then
-            table.insert(segments, seg(p.status_detail .. " "))
-            content_len = content_len + 2
-        end
         table.insert(segments, seg(p.name))
         content_len = content_len + visible_len(p.name)
     end
@@ -327,22 +327,17 @@ local function render_participants(ctx, inner_width)
         end
         is_first = false
 
-        -- Determine glyph and color
-        local glyph, glyph_color
-        if p.status == "thinking" or p.status == "running_tool" then
+        -- Determine glyph and color based on status
+        local glyph = p.glyph or status_glyphs.idle
+        local glyph_color = colors.dim
+
+        local status = p.status or ""
+        if status:find("thinking") or status:find("running") then
             glyph = get_spinner()
             glyph_color = colors.cyan
-        elseif p.status == "error" then
-            glyph = status_glyphs.error
+        elseif status:find("error") then
             glyph_color = colors.red
-        elseif p.status == "offline" then
-            glyph = status_glyphs.offline
-            glyph_color = colors.dim
-        elseif p.status == "emoji" and p.status_detail then
-            glyph = p.status_detail
-            glyph_color = nil
-        else
-            glyph = status_glyphs.idle
+        elseif status == "away" then
             glyph_color = colors.dim
         end
 
@@ -372,7 +367,8 @@ local function render_progress_bar(progress, width)
 end
 
 --- Render status row (Row 3) - model status or job progress
-local function render_status(ctx, inner_width)
+--- @param who table Array from tools.sshwarma.who()
+local function render_status(who, inner_width)
     local segments = {}
 
     table.insert(segments, border(box.v))
@@ -438,15 +434,10 @@ local function render_status(ctx, inner_width)
         local status_text = nil
 
         -- Find first active participant with status
-        for _, p in ipairs(ctx.participants or {}) do
-            if p.status == "thinking" then
-                status_text = "thinking"
-                break
-            elseif p.status == "running_tool" then
-                status_text = p.status_detail and ("running " .. p.status_detail) or "running tool"
-                break
-            elseif p.status == "error" then
-                status_text = p.status_detail and p.status_detail:sub(1, 20) or "error"
+        for _, p in ipairs(who or {}) do
+            local status = p.status or ""
+            if status ~= "" then
+                status_text = status
                 break
             end
         end
@@ -542,7 +533,8 @@ local function render_garden(inner_width)
 end
 
 --- Render MCP connections row (Row 5)
-local function render_mcp(ctx, inner_width)
+--- @param mcp table Array from tools.sshwarma.mcp()
+local function render_mcp(mcp, inner_width)
     local segments = {}
 
     table.insert(segments, border(box.v))
@@ -550,7 +542,7 @@ local function render_mcp(ctx, inner_width)
 
     local content_len = 2
 
-    local mcp = ctx.mcp or {}
+    mcp = mcp or {}
 
     if #mcp == 0 then
         table.insert(segments, dim("no MCP connections"))
@@ -603,7 +595,9 @@ local function render_mcp(ctx, inner_width)
 end
 
 --- Render room info row (Row 6)
-local function render_room(ctx, now_ms, inner_width)
+--- @param look table Room info from tools.sshwarma.look()
+--- @param session table Session info from tools.sshwarma.session()
+local function render_room(look, session, now_ms, inner_width)
     local segments = {}
 
     table.insert(segments, border(box.v))
@@ -612,12 +606,12 @@ local function render_room(ctx, now_ms, inner_width)
     local content_len = 2
 
     -- Room name
-    local room_name = ctx.room or "lobby"
+    local room_name = look.room or "lobby"
     table.insert(segments, c(room_name, colors.cyan))
     content_len = content_len + visible_len(room_name)
 
     -- Exits
-    local arrows = exits_to_arrows(ctx.exits)
+    local arrows = exits_to_arrows(look.exits)
     if arrows ~= "" then
         table.insert(segments, seg(" │ "))
         table.insert(segments, seg(arrows))
@@ -625,8 +619,7 @@ local function render_room(ctx, now_ms, inner_width)
     end
 
     -- Duration
-    local duration_ms = now_ms - (ctx.session_start_ms or now_ms)
-    local duration_str = format_duration(duration_ms)
+    local duration_str = session.duration or "0:00:00"
     table.insert(segments, seg(" │ "))
     table.insert(segments, dim(duration_str))
     content_len = content_len + 3 + visible_len(duration_str)
@@ -709,23 +702,31 @@ function render_hud(now_ms, width, height)
         state.last_render_ms = now_ms
     end
 
-    -- 2. Get raw state from Rust
-    local ctx = {}
-    if tools and tools.hud_state then
-        ctx = tools.hud_state() or {}
+    -- 2. Get state from Rust via tools.sshwarma namespace
+    local look = {}
+    local who = {}
+    local mcp = {}
+    local session = {}
+
+    if tools and tools.sshwarma then
+        look = tools.sshwarma.look() or {}
+        who = tools.sshwarma.who() or {}
+        mcp = tools.sshwarma.mcp() or {}
+        session = tools.sshwarma.session() or {}
     end
 
     -- 3. Drain pending notifications from Rust
-    local pending = ctx.pending_notifications or {}
-    for _, n in ipairs(pending) do
-        table.insert(state.notifications, {
-            message    = n.message,
-            created_ms = n.created_ms,
-            ttl_ms     = n.ttl_ms,
-        })
-    end
-    if #pending > 0 and tools and tools.clear_notifications then
-        tools.clear_notifications()
+    if tools and tools.clear_notifications then
+        local pending = tools.clear_notifications()
+        if pending then
+            for _, n in ipairs(pending) do
+                table.insert(state.notifications, {
+                    message    = n.message,
+                    created_ms = n.created_at_ms,
+                    ttl_ms     = n.ttl_ms,
+                })
+            end
+        end
     end
 
     -- 4. Expire old notifications
@@ -742,14 +743,14 @@ function render_hud(now_ms, width, height)
 
     -- 6. Render each row
     return {
-        render_top_border(width),               -- Row 1: top border
-        render_participants(ctx, inner_width),  -- Row 2: participants
-        render_status(ctx, inner_width),        -- Row 3: status
-        render_garden(inner_width),             -- Row 4: garden status
-        render_mcp(ctx, inner_width),           -- Row 5: MCP connections
-        render_room(ctx, now_ms, inner_width),  -- Row 6: room info
-        render_bottom_border(width, now_ms),    -- Row 7: bottom border + notification
-        {},                                     -- Row 8: empty (input line handled by Rust)
+        render_top_border(width),                        -- Row 1: top border
+        render_participants(who, inner_width),           -- Row 2: participants
+        render_status(who, inner_width),                 -- Row 3: status / job progress
+        render_garden(inner_width),                      -- Row 4: garden status
+        render_mcp(mcp, inner_width),                    -- Row 5: MCP connections
+        render_room(look, session, now_ms, inner_width), -- Row 6: room info
+        render_bottom_border(width, now_ms),             -- Row 7: bottom border + notification
+        {},                                              -- Row 8: empty (input line handled by Rust)
     }
 end
 
@@ -769,25 +770,40 @@ if not tools then
     }
 
     tools = {
-        hud_state = function()
-            return {
-                room = "hootenanny",
-                session_start_ms = 0,
-                participants = {
-                    {name = "alice", kind = "user", status = "idle"},
-                    {name = "bob", kind = "user", status = "idle"},
-                    {name = "qwen-8b", kind = "model", status = "idle"},
-                    {name = "qwen-4b", kind = "model", status = "idle"},
-                },
-                mcp = {
+        sshwarma = {
+            look = function()
+                return {
+                    room = "hootenanny",
+                    description = "A cozy room for jamming",
+                    vibe = "lo-fi beats to code to",
+                    users = {"alice", "bob"},
+                    models = {"qwen-8b", "qwen-4b"},
+                    exits = {n = "kitchen", e = "garden"},
+                }
+            end,
+            who = function()
+                return {
+                    {name = "alice", is_model = false, status = "", glyph = ""},
+                    {name = "bob", is_model = false, status = "", glyph = ""},
+                    {name = "qwen-8b", is_model = true, status = "", glyph = "◇"},
+                    {name = "qwen-4b", is_model = true, status = "", glyph = "◇"},
+                }
+            end,
+            mcp = function()
+                return {
                     {name = "holler", tools = 7, calls = 12, last_tool = "sample", connected = true},
                     {name = "exa", tools = 3, calls = 5, connected = true},
-                },
-                exits = {n = "kitchen", e = "garden"},
-                pending_notifications = {},
-            }
-        end,
-        clear_notifications = function() end,
+                }
+            end,
+            session = function()
+                return {
+                    start_ms = 0,
+                    duration = "0:05:23",
+                    spinner_frame = 0,
+                }
+            end,
+        },
+        clear_notifications = function() return {} end,
         kv_get = function(key)
             return mock_kv[key]
         end,
