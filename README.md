@@ -259,19 +259,37 @@ Supported backends: `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini`, `mock
 
 ### Custom HUD
 
-Drop a Lua script in `~/.config/sshwarma/hud.lua`:
+Drop a Lua script in `~/.config/sshwarma/hud.lua` or `~/.config/sshwarma/yourusername.lua`:
 
 ```lua
--- Receives: now_ms (timestamp), width, height
+-- render_hud: Called every ~100ms
 -- Returns: array of 8 rows, each row is array of segments
--- Each segment: {text = "...", color = "cyan"}
-
 function render_hud(now_ms, width, height)
+    local ctx = tools.hud_state()  -- Get room state from Rust
     local rows = {}
     -- Your rendering logic here
     return rows
 end
+
+-- background: Optional, called every 500ms (120 BPM)
+-- Use for polling MCP tools, updating state
+function background(tick)
+    -- tick % 1 == 0: every 500ms
+    -- tick % 4 == 0: every 2s
+    if tick % 4 == 0 then
+        local req_id = tools.mcp_call("holler", "garden_status", {})
+        tools.kv_set("_req.garden", req_id)
+    end
+end
 ```
+
+**Lua API:**
+- `tools.hud_state()` — Get room/participant state from Rust
+- `tools.kv_get(key)`, `tools.kv_set(key, val)`, `tools.kv_delete(key)` — Persistent KV store
+- `tools.mcp_call(server, tool, args)` — Async MCP call, returns request_id
+- `tools.mcp_result(req_id)` — Poll for result: `(result, status)`
+
+See `configs/atobey.lua` for a full example with holler integration.
 
 Colors: `default`, `dim`, `cyan`, `blue`, `green`, `yellow`, `red`, `orange`, `magenta`
 

@@ -194,58 +194,80 @@ The heads-up display is rendered by Lua, making it fully customizable. An 8-line
 1. **Embedded default**: Ships with `src/embedded/hud.lua`
 2. **User override**: Drop a script in `~/.config/sshwarma/hud.lua`
 3. **Per-user scripts**: `~/.config/sshwarma/{username}.lua` for individual customization
-4. **Hot-reloading**: Scripts are checked on each render; no restart needed
+4. **Hot-reloading**: Scripts are checked every second; no restart needed
+5. **Example configs**: See `configs/` directory for shareable user scripts
 
-### The Render Contract
+### Lua API
 
 ```lua
--- Called every ~100ms with current state
--- Returns: array of 8 rows, each row is array of segments
--- Each segment: {text = "...", color = "cyan"}
+-- Core state (read-only, updated by Rust)
+tools.hud_state()              -- Get room/participant/MCP state
+tools.clear_notifications()    -- Drain notification queue
 
+-- KV Store (persistent across calls, shared between background and render)
+tools.kv_get(key)              -- Read value or nil
+tools.kv_set(key, value)       -- Write value
+tools.kv_delete(key)           -- Remove key
+
+-- Async MCP Operations (for background polling)
+tools.mcp_call(server, tool, args)  -- Returns request_id immediately
+tools.mcp_result(request_id)        -- Returns (result, status)
+                                    -- status: "pending"|"complete"|"error"|"timeout"
+```
+
+### Required Functions
+
+```lua
+-- Called every ~100ms for rendering
 function render_hud(now_ms, width, height)
-    local state = hud_state()  -- Get current state from Rust
+    local ctx = tools.hud_state()
     local rows = {}
-
-    -- Build your 8 rows here...
-
+    -- Build 8 rows of segments: {Text = "...", Fg = "#rrggbb"}
     return rows
+end
+
+-- Optional: Called every 500ms (120 BPM) for background work
+function background(tick)
+    -- tick % 1 == 0: every 500ms
+    -- tick % 2 == 0: every 1s
+    -- tick % 4 == 0: every 2s
+    if tick % 4 == 0 then
+        poll_artifacts()  -- Your polling logic
+    end
 end
 ```
 
 ### Available State
 
-The `hud_state()` function returns:
+The `tools.hud_state()` function returns:
 
 ```lua
 {
     participants = {
-        {name = "alice", kind = "user"},
-        {name = "qwen-8b", kind = "model", status = "thinking", task = "reviewing code"},
+        {name = "alice", kind = "user", status = "idle"},
+        {name = "qwen-8b", kind = "model", status = "thinking", status_detail = "sample"},
     },
-    mcp_connections = {
-        {name = "holler", tools = 12, calls = 3, last_tool = "sample"},
-        {name = "exa", tools = 2, calls = 0, last_tool = nil},
+    mcp = {
+        {name = "holler", tools = 12, calls = 3, last_tool = "sample", connected = true},
+        {name = "exa", tools = 2, calls = 0, connected = true},
     },
     room = "workshop",
-    exits = {"north", "east", "down"},
-    session_secs = 3723,
-    notifications = {
-        {message = "bob joined", expires_ms = 1234567890},
-    },
+    vibe = "collaborative coding",
+    exits = {n = "studio", e = "garden"},
+    session_start_ms = 1234567890,
 }
 ```
 
 ### Colors
 
-`default`, `dim`, `cyan`, `blue`, `green`, `yellow`, `red`, `orange`, `magenta`
+`#rrggbb` hex codes, or use a palette: `dim`, `cyan`, `blue`, `green`, `yellow`, `red`, `orange`, `magenta`
 
 ### Status Glyphs
 
 ```
 Agent status:   ◈ active   ◇ idle   ◌ offline   ◉ error
 Spinners:       ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏  (100ms cycle)
-Progress:       ▰▰▰▰▰▱▱▱▱▱
+Progress:       █████░░░░░
 Exit arrows:    ↑ north  → east  ↓ south  ← west
 ```
 
@@ -281,11 +303,15 @@ src/
 │   ├── mod.rs            # LuaRuntime: state management, script loading, hot-reload
 │   ├── context.rs        # Build HudContext to pass to Lua
 │   ├── render.rs         # Parse Lua output into terminal segments
-│   ├── tools.rs          # Register Lua callbacks (hud_state, clear_notifications)
-│   └── cache.rs          # Cache Lua chunks to reduce re-parsing
+│   ├── tools.rs          # Register Lua callbacks (hud_state, kv_*, mcp_*)
+│   ├── cache.rs          # ToolCache: KV store for background→render data sharing
+│   └── mcp_bridge.rs     # Async MCP bridge: sync Lua ↔ async MCP calls
 │
 ├── embedded/             # Compiled-in resources
 │   └── hud.lua           # Default HUD script
+│
+├── configs/              # Example user HUD scripts (symlink to ~/.config/sshwarma/)
+│   └── atobey.lua        # Example: holler integration with garden/job polling
 │
 ├── completion/           # Tab completion
 │   ├── mod.rs            # Completion engine
