@@ -202,6 +202,10 @@ pub struct HudState {
     pub mcp_connections: Vec<McpConnectionState>,
     /// Current room name (None = lobby)
     pub room_name: Option<String>,
+    /// Room description
+    pub description: Option<String>,
+    /// Room vibe (creative direction/mood)
+    pub vibe: Option<String>,
     /// Exits from current room (direction string -> room name)
     pub exits: HashMap<String, String>,
     /// Session start time
@@ -224,6 +228,8 @@ impl HudState {
             participants: Vec::new(),
             mcp_connections: Vec::new(),
             room_name: None,
+            description: None,
+            vibe: None,
             exits: HashMap::new(),
             session_start: Utc::now(),
             notification: None,
@@ -331,8 +337,16 @@ impl HudState {
     }
 
     /// Set room context
-    pub fn set_room(&mut self, name: Option<String>, exits: HashMap<String, String>) {
+    pub fn set_room(
+        &mut self,
+        name: Option<String>,
+        description: Option<String>,
+        vibe: Option<String>,
+        exits: HashMap<String, String>,
+    ) {
         self.room_name = name;
+        self.description = description;
+        self.vibe = vibe;
         self.exits = exits;
     }
 

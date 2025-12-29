@@ -156,6 +156,161 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("kv_delete", kv_delete_fn)?;
 
+    // Create tools.sshwarma namespace (mirrors sshwarma_* internal tools)
+    let sshwarma = lua.create_table()?;
+
+    // tools.sshwarma.look() -> room summary
+    let look_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let hud = state.hud_state();
+            let result = lua.create_table()?;
+
+            // Room name
+            if let Some(ref room) = hud.room_name {
+                result.set("room", room.clone())?;
+            } else {
+                result.set("room", Value::Nil)?;
+            }
+
+            // Description
+            if let Some(ref desc) = hud.description {
+                result.set("description", desc.clone())?;
+            } else {
+                result.set("description", Value::Nil)?;
+            }
+
+            // Vibe
+            if let Some(ref vibe) = hud.vibe {
+                result.set("vibe", vibe.clone())?;
+            } else {
+                result.set("vibe", Value::Nil)?;
+            }
+
+            // Users array
+            let users = lua.create_table()?;
+            let mut user_idx = 1;
+            for p in &hud.participants {
+                if p.is_user() {
+                    users.set(user_idx, p.name.clone())?;
+                    user_idx += 1;
+                }
+            }
+            result.set("users", users)?;
+
+            // Models array
+            let models = lua.create_table()?;
+            let mut model_idx = 1;
+            for p in &hud.participants {
+                if p.is_model() {
+                    models.set(model_idx, p.name.clone())?;
+                    model_idx += 1;
+                }
+            }
+            result.set("models", models)?;
+
+            // Exits table
+            let exits = lua.create_table()?;
+            for (dir, room) in &hud.exits {
+                exits.set(dir.clone(), room.clone())?;
+            }
+            result.set("exits", exits)?;
+
+            Ok(result)
+        })?
+    };
+    sshwarma.set("look", look_fn)?;
+
+    // tools.sshwarma.who() -> participant list
+    let who_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let hud = state.hud_state();
+            let list = lua.create_table()?;
+
+            for (i, p) in hud.participants.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", p.name.clone())?;
+                entry.set("is_model", p.is_model())?;
+                entry.set("status", p.status.text())?;
+                entry.set("glyph", p.status.glyph())?;
+                list.set(i + 1, entry)?;
+            }
+
+            Ok(list)
+        })?
+    };
+    sshwarma.set("who", who_fn)?;
+
+    // tools.sshwarma.exits() -> exit list
+    let exits_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let hud = state.hud_state();
+            let list = lua.create_table()?;
+
+            for (i, (dir, dest)) in hud.exits.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("direction", dir.clone())?;
+                entry.set("destination", dest.clone())?;
+                list.set(i + 1, entry)?;
+            }
+
+            Ok(list)
+        })?
+    };
+    sshwarma.set("exits", exits_fn)?;
+
+    // tools.sshwarma.vibe() -> string or nil
+    let vibe_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, ()| {
+            let hud = state.hud_state();
+            Ok(hud.vibe.clone())
+        })?
+    };
+    sshwarma.set("vibe", vibe_fn)?;
+
+    // tools.sshwarma.mcp() -> MCP connections (same as ctx.mcp in old API)
+    let mcp_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let hud = state.hud_state();
+            let list = lua.create_table()?;
+
+            for (i, m) in hud.mcp_connections.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", m.name.clone())?;
+                entry.set("tools", m.tool_count)?;
+                entry.set("connected", m.connected)?;
+                entry.set("calls", m.call_count)?;
+                if let Some(ref last_tool) = m.last_tool {
+                    entry.set("last_tool", last_tool.clone())?;
+                }
+                list.set(i + 1, entry)?;
+            }
+
+            Ok(list)
+        })?
+    };
+    sshwarma.set("mcp", mcp_fn)?;
+
+    // tools.sshwarma.session() -> session info
+    let session_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let hud = state.hud_state();
+            let result = lua.create_table()?;
+            result.set("start_ms", hud.session_start.timestamp_millis())?;
+            result.set("duration", hud.duration_string())?;
+            result.set("spinner_frame", hud.spinner_frame)?;
+            Ok(result)
+        })?
+    };
+    sshwarma.set("session", session_fn)?;
+
+    tools.set("sshwarma", sshwarma)?;
+
     // Set as global
     lua.globals().set("tools", tools)?;
 
