@@ -2,7 +2,7 @@
 name = "sshwarma"
 version = "0.1.0"
 edition = "2021"
-description = "SSH-accessible partyline for humans and models"
+description = "MUD-inspired collaboration space for humans, models, and tools"
 license = "MIT"
 
 [dependencies]

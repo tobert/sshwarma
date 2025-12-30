@@ -99,7 +99,7 @@ end
 
 --- Format the global system layer (static sshwarma environment description)
 local function format_system_layer()
-    local content = [[You are an AI assistant in **sshwarma**, a collaborative SSH partyline where humans and AI models work together.
+    local content = [[You are an AI assistant in **sshwarma**, a MUD-inspired collaboration space for humans, models, and tools.
 
 ## Environment
 - MUD-style text interface accessed via SSH

@@ -1,15 +1,15 @@
 # sshwarma - Coding Agent Context
 
-sshwarma is an SSH-accessible partyline where humans and AI models collaborate in shared rooms. Think MUD meets IRC meets collaborative coding—a text adventure interface for multi-user, multi-model conversations with tool access.
+sshwarma is a MUD-inspired collaboration space for humans, models, and tools. Think text adventure meets multi-agent workspace—rooms with vibes, journals, and tool access where humans and AI models work together.
 
 ## Core Concepts
 
 ### The Metaphor
 
-- **Partyline**: A room where users and models hang out. Named after telephone party lines where multiple people share a connection.
-- **Lobby**: Where you land on connection. List rooms, join or create partylines.
+- **Rooms**: Shared spaces where users and models collaborate. Have vibes, journals, exits to other rooms, and bound assets.
+- **Lobby**: Where you land on connection. List rooms, join or create new ones.
 - **Models**: AI models (qwen-8b, claude, etc.) that lurk in rooms and respond to @mentions.
-- **Rooms**: Have vibes, journals, exits to other rooms, and bound assets.
+- **Tools**: MCP-connected capabilities available to both humans and models.
 
 ### Interface Style
 
@@ -23,7 +23,7 @@ MUD-style text adventure with REPL ergonomics:
 Welcome, amy.
 
 lobby> /rooms
-Partylines:
+Rooms:
   hootenanny ... 2 users, qwen-8b
 
 lobby> /join hootenanny
@@ -58,10 +58,10 @@ qwen-8b: Here are the tools available...
 
 ```
 Navigation:
-  /rooms              List partylines
-  /join <room>        Enter a partyline
+  /rooms              List rooms
+  /join <room>        Enter a room
   /leave              Return to lobby
-  /create <name>      New partyline
+  /create <name>      Create a new room
   /fork [name]        Fork current room (inherits vibe, assets, inspirations)
   /go <direction>     Navigate through an exit
   /dig <dir> <room>   Create exit to another room

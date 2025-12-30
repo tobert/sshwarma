@@ -1,6 +1,6 @@
 # 🌯 sshwarma
 
-**An SSH partyline where humans and AI models collaborate in shared rooms.**
+**MUD-inspired collaboration space for humans, models, and tools.**
 
 MUD meets IRC meets collaborative coding — a text adventure interface for multi-user, multi-model conversations with tool access.
 
