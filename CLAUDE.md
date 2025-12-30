@@ -365,6 +365,20 @@ src/bin/
 - Comments explain "why", not "what"
 - No organizational comments
 
+### Async/Blocking Patterns
+
+When calling `blocking_read()` or `blocking_write()` on `RwLock` from async contexts (like `async fn` handlers), wrap them with `tokio::task::block_in_place()` to avoid panics:
+
+```rust
+// BAD: panics in async context
+let world = self.state.world.blocking_write();
+
+// GOOD: safe in async context
+let world = tokio::task::block_in_place(|| self.state.world.blocking_write());
+```
+
+This applies to commands.rs, internal_tools.rs, and any async code that needs synchronous lock access.
+
 ### Version Control
 
 - Never use wildcards when staging files

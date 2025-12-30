@@ -10,7 +10,7 @@ use crate::lua::context::{build_hud_context, build_notifications_table, PendingN
 use crate::lua::mcp_bridge::McpBridge;
 use crate::model::ModelHandle;
 use crate::state::SharedState;
-use crate::world::JournalKind;
+use crate::world::{JournalKind, ProfileTarget};
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::{Arc, RwLock};
 
@@ -562,6 +562,79 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("current_model", current_model_fn)?;
+
+    // tools.get_profiles(model_name) -> [{name, target_type, system_prompt, context_prefix, context_suffix, priority}]
+    // Returns profiles applicable to this model, sorted by priority
+    let get_profiles_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, model_name: String| {
+            let list = lua.create_table()?;
+
+            // Get room name from HudState
+            let hud = state.hud_state();
+            let room_name = match &hud.room_name {
+                Some(name) => name.clone(),
+                None => return Ok(list),
+            };
+
+            // Try to get profiles from SharedState
+            if let Some(shared) = state.shared_state() {
+                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
+                if let Some(room) = world.rooms.get(&room_name) {
+                    // Get roles assigned to this model
+                    let model_roles: Vec<&String> = room
+                        .context
+                        .role_assignments
+                        .get(&model_name)
+                        .map(|roles| roles.iter().collect())
+                        .unwrap_or_default();
+
+                    // Filter profiles that apply to this model
+                    let mut applicable: Vec<_> = room
+                        .context
+                        .profiles
+                        .iter()
+                        .filter(|p| match &p.target {
+                            ProfileTarget::Room => true,
+                            ProfileTarget::Model(m) => m == &model_name,
+                            ProfileTarget::Role(r) => model_roles.contains(&r),
+                        })
+                        .collect();
+
+                    // Sort by priority (lower = first)
+                    applicable.sort_by_key(|p| p.priority);
+
+                    // Build result table
+                    for (i, profile) in applicable.iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("name", profile.name.clone())?;
+                        row.set(
+                            "target_type",
+                            match &profile.target {
+                                ProfileTarget::Room => "room",
+                                ProfileTarget::Model(_) => "model",
+                                ProfileTarget::Role(_) => "role",
+                            },
+                        )?;
+                        if let Some(ref sp) = profile.system_prompt {
+                            row.set("system_prompt", sp.clone())?;
+                        }
+                        if let Some(ref cp) = profile.context_prefix {
+                            row.set("context_prefix", cp.clone())?;
+                        }
+                        if let Some(ref cs) = profile.context_suffix {
+                            row.set("context_suffix", cs.clone())?;
+                        }
+                        row.set("priority", profile.priority)?;
+                        list.set(i + 1, row)?;
+                    }
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("get_profiles", get_profiles_fn)?;
 
     // Utility tools
 

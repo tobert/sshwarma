@@ -5,6 +5,7 @@ use crate::model::{ModelBackend, ModelHandle};
 use crate::ops;
 use crate::ssh::SshHandler;
 use crate::display::{EntryContent, EntrySource};
+use crate::world::{Profile, ProfileTarget};
 
 /// Result of a command execution
 pub struct CommandResult {
@@ -69,6 +70,7 @@ impl SshHandler {
                 "bring" => CommandResult::normal(self.cmd_bring(args).await),
                 "drop" => CommandResult::normal(self.cmd_drop(args).await),
                 "inspire" => CommandResult::normal(self.cmd_inspire(args).await),
+                "profile" => CommandResult::normal(self.cmd_profile(args).await),
                 "dig" => CommandResult::normal(self.cmd_dig(args).await),
                 "go" => CommandResult::normal(self.cmd_go(args).await),
                 "exits" => CommandResult::normal(self.cmd_exits().await),
@@ -114,6 +116,13 @@ Room Context:
   /drop <role>        Unbind asset
   /inspire <text>     Add to mood board
   /nav [on|off]       Toggle model navigation
+
+Profiles:
+  /profile            List profiles and roles
+  /profile add <name> --model=X|--role=X|--room "prompt"
+  /profile remove <name>
+  /profile assign <model> <role>
+  /profile unassign <model> <role>
 
 Communication:
   <text>              Say to room
@@ -990,6 +999,233 @@ MCP:
                 )
             }
             Err(e) => format!("Error composing context: {}", e),
+        }
+    }
+
+    async fn cmd_profile(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to manage profiles.".to_string(),
+        };
+
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        let subcmd = parts.first().copied().unwrap_or("");
+        let rest = parts.get(1).copied().unwrap_or("");
+
+        match subcmd {
+            "list" | "" => {
+                let mut output = String::new();
+
+                // Get profiles from DB
+                let profiles = match self.state.db.get_profiles(&room) {
+                    Ok(p) => p,
+                    Err(e) => return format!("Error loading profiles: {}", e),
+                };
+
+                if profiles.is_empty() {
+                    output.push_str("No profiles defined.\r\n");
+                } else {
+                    output.push_str("Profiles:\r\n");
+                    for p in &profiles {
+                        let target = match &p.target {
+                            ProfileTarget::Room => "room".to_string(),
+                            ProfileTarget::Model(m) => format!("model:{}", m),
+                            ProfileTarget::Role(r) => format!("role:{}", r),
+                        };
+                        output.push_str(&format!(
+                            "  {} [{}] (priority {})\r\n",
+                            p.name, target, p.priority
+                        ));
+                        if let Some(ref sp) = p.system_prompt {
+                            let preview = if sp.len() > 50 { &sp[..50] } else { sp };
+                            output.push_str(&format!("    system: {}...\r\n", preview));
+                        }
+                    }
+                }
+
+                // Get role assignments from DB
+                let assignments = match self.state.db.get_role_assignments(&room) {
+                    Ok(a) => a,
+                    Err(e) => return format!("Error loading role assignments: {}", e),
+                };
+
+                if !assignments.is_empty() {
+                    output.push_str("\r\nRole assignments:\r\n");
+                    for (model, roles) in &assignments {
+                        output.push_str(&format!("  @{}: {}\r\n", model, roles.join(", ")));
+                    }
+                }
+
+                if output.is_empty() {
+                    "No profiles or role assignments.\r\n\r\nUsage:\r\n  /profile add <name> --model=X|--role=X|--room \"prompt\"\r\n  /profile remove <name>\r\n  /profile assign <model> <role>\r\n  /profile unassign <model> <role>".to_string()
+                } else {
+                    output
+                }
+            }
+
+            "add" => {
+                // Parse: <name> --model=X|--role=X|--room [--priority=N] "prompt"
+                // Simplified parsing: look for flags and quoted content
+                let rest_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                let name = rest_parts.first().copied().unwrap_or("");
+                if name.is_empty() {
+                    return "Usage: /profile add <name> --model=X|--role=X|--room \"prompt\"".to_string();
+                }
+
+                let remaining = rest_parts.get(1).copied().unwrap_or("");
+
+                // Parse target and prompt from remaining
+                let mut target = ProfileTarget::Room;
+                let mut priority = 0i32;
+                let mut prompt = String::new();
+
+                // Simple flag parsing
+                let tokens: Vec<&str> = remaining.split_whitespace().collect();
+                let mut i = 0;
+                while i < tokens.len() {
+                    let tok = tokens[i];
+                    if tok.starts_with("--model=") {
+                        target = ProfileTarget::Model(tok.trim_start_matches("--model=").to_string());
+                    } else if tok.starts_with("--role=") {
+                        target = ProfileTarget::Role(tok.trim_start_matches("--role=").to_string());
+                    } else if tok == "--room" {
+                        target = ProfileTarget::Room;
+                    } else if tok.starts_with("--priority=") {
+                        priority = tok.trim_start_matches("--priority=").parse().unwrap_or(0);
+                    } else if tok.starts_with('"') {
+                        // Collect quoted content
+                        let mut quoted = tok.trim_start_matches('"').to_string();
+                        if quoted.ends_with('"') {
+                            quoted = quoted.trim_end_matches('"').to_string();
+                        } else {
+                            // Multi-word quote
+                            i += 1;
+                            while i < tokens.len() {
+                                let t = tokens[i];
+                                quoted.push(' ');
+                                if t.ends_with('"') {
+                                    quoted.push_str(t.trim_end_matches('"'));
+                                    break;
+                                } else {
+                                    quoted.push_str(t);
+                                }
+                                i += 1;
+                            }
+                        }
+                        prompt = quoted;
+                    }
+                    i += 1;
+                }
+
+                if prompt.is_empty() {
+                    return "Usage: /profile add <name> --model=X|--role=X|--room \"prompt\"".to_string();
+                }
+
+                let profile = Profile {
+                    name: name.to_string(),
+                    target,
+                    system_prompt: Some(prompt.clone()),
+                    context_prefix: None,
+                    context_suffix: None,
+                    priority,
+                };
+
+                // Save to DB
+                if let Err(e) = self.state.db.add_profile(&room, &profile) {
+                    return format!("Error saving profile: {}", e);
+                }
+
+                // Update in-memory world
+                {
+                    let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
+                    if let Some(r) = world.rooms.get_mut(&room) {
+                        r.context.profiles.retain(|p| p.name != name);
+                        r.context.profiles.push(profile);
+                        r.context.profiles.sort_by_key(|p| p.priority);
+                    }
+                }
+
+                format!("Added profile '{}'", name)
+            }
+
+            "remove" => {
+                let name = rest.trim();
+                if name.is_empty() {
+                    return "Usage: /profile remove <name>".to_string();
+                }
+
+                match self.state.db.remove_profile(&room, name) {
+                    Ok(true) => {
+                        // Update in-memory
+                        {
+                            let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
+                            if let Some(r) = world.rooms.get_mut(&room) {
+                                r.context.profiles.retain(|p| p.name != name);
+                            }
+                        }
+                        format!("Removed profile '{}'", name)
+                    }
+                    Ok(false) => format!("Profile '{}' not found", name),
+                    Err(e) => format!("Error removing profile: {}", e),
+                }
+            }
+
+            "assign" => {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() != 2 {
+                    return "Usage: /profile assign <model> <role>".to_string();
+                }
+                let model = parts[0];
+                let role = parts[1];
+
+                if let Err(e) = self.state.db.assign_role(&room, model, role) {
+                    return format!("Error assigning role: {}", e);
+                }
+
+                // Update in-memory
+                {
+                    let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
+                    if let Some(r) = world.rooms.get_mut(&room) {
+                        r.context.role_assignments
+                            .entry(model.to_string())
+                            .or_default()
+                            .push(role.to_string());
+                    }
+                }
+
+                format!("Assigned role '{}' to @{}", role, model)
+            }
+
+            "unassign" => {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() != 2 {
+                    return "Usage: /profile unassign <model> <role>".to_string();
+                }
+                let model = parts[0];
+                let role = parts[1];
+
+                match self.state.db.unassign_role(&room, model, role) {
+                    Ok(true) => {
+                        // Update in-memory
+                        {
+                            let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
+                            if let Some(r) = world.rooms.get_mut(&room) {
+                                if let Some(roles) = r.context.role_assignments.get_mut(model) {
+                                    roles.retain(|r| r != role);
+                                }
+                            }
+                        }
+                        format!("Unassigned role '{}' from @{}", role, model)
+                    }
+                    Ok(false) => format!("@{} doesn't have role '{}'", model, role),
+                    Err(e) => format!("Error unassigning role: {}", e),
+                }
+            }
+
+            _ => format!(
+                "Unknown profile command: {}. Try: list, add, remove, assign, unassign",
+                subcmd
+            ),
         }
     }
 }

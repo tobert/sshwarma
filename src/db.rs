@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction};
-use crate::world::{AssetBinding, Inspiration, JournalEntry, JournalKind};
+use crate::world::{AssetBinding, Inspiration, JournalEntry, JournalKind, Profile, ProfileTarget};
 
 /// Database handle (thread-safe via Mutex)
 pub struct Database {
@@ -149,6 +149,29 @@ impl Database {
                 content TEXT NOT NULL,
                 added_by TEXT NOT NULL,
                 added_at TEXT NOT NULL,
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
+
+            -- Profiles for customizing model behavior
+            CREATE TABLE IF NOT EXISTS room_profiles (
+                room TEXT NOT NULL,
+                name TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_value TEXT,
+                system_prompt TEXT,
+                context_prefix TEXT,
+                context_suffix TEXT,
+                priority INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (room, name),
+                FOREIGN KEY (room) REFERENCES rooms(name)
+            );
+
+            -- Role assignments: which models have which roles
+            CREATE TABLE IF NOT EXISTS room_role_assignments (
+                room TEXT NOT NULL,
+                model_handle TEXT NOT NULL,
+                role_name TEXT NOT NULL,
+                PRIMARY KEY (room, model_handle, role_name),
                 FOREIGN KEY (room) REFERENCES rooms(name)
             );
 
@@ -1047,6 +1070,137 @@ impl Database {
         }
 
         Ok(ancestry)
+    }
+
+    // =========================================================================
+    // Profiles
+    // =========================================================================
+
+    /// Add or update a profile in a room
+    pub fn add_profile(&self, room: &str, profile: &Profile) -> Result<()> {
+        let (target_type, target_value) = match &profile.target {
+            ProfileTarget::Model(m) => ("model", Some(m.as_str())),
+            ProfileTarget::Role(r) => ("role", Some(r.as_str())),
+            ProfileTarget::Room => ("room", None),
+        };
+
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO room_profiles (room, name, target_type, target_value, system_prompt, context_prefix, context_suffix, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(room, name) DO UPDATE SET
+                target_type = ?3, target_value = ?4, system_prompt = ?5,
+                context_prefix = ?6, context_suffix = ?7, priority = ?8",
+            params![
+                room,
+                profile.name,
+                target_type,
+                target_value,
+                profile.system_prompt,
+                profile.context_prefix,
+                profile.context_suffix,
+                profile.priority,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a profile from a room
+    pub fn remove_profile(&self, room: &str, name: &str) -> Result<bool> {
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM room_profiles WHERE room = ?1 AND name = ?2",
+            params![room, name],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get all profiles for a room
+    pub fn get_profiles(&self, room: &str) -> Result<Vec<Profile>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, target_type, target_value, system_prompt, context_prefix, context_suffix, priority
+             FROM room_profiles WHERE room = ?1 ORDER BY priority",
+        )?;
+
+        let mut profiles = Vec::new();
+        let mut rows = stmt.query(params![room])?;
+
+        while let Some(row) = rows.next()? {
+            let target_type: String = row.get(1)?;
+            let target_value: Option<String> = row.get(2)?;
+
+            let target = match target_type.as_str() {
+                "model" => ProfileTarget::Model(target_value.unwrap_or_default()),
+                "role" => ProfileTarget::Role(target_value.unwrap_or_default()),
+                "room" => ProfileTarget::Room,
+                _ => continue, // Skip invalid entries
+            };
+
+            profiles.push(Profile {
+                name: row.get(0)?,
+                target,
+                system_prompt: row.get(3)?,
+                context_prefix: row.get(4)?,
+                context_suffix: row.get(5)?,
+                priority: row.get(6)?,
+            });
+        }
+
+        Ok(profiles)
+    }
+
+    /// Assign a role to a model in a room
+    pub fn assign_role(&self, room: &str, model_handle: &str, role_name: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO room_role_assignments (room, model_handle, role_name)
+             VALUES (?1, ?2, ?3)",
+            params![room, model_handle, role_name],
+        )?;
+        Ok(())
+    }
+
+    /// Unassign a role from a model in a room
+    pub fn unassign_role(&self, room: &str, model_handle: &str, role_name: &str) -> Result<bool> {
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM room_role_assignments WHERE room = ?1 AND model_handle = ?2 AND role_name = ?3",
+            params![room, model_handle, role_name],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get all role assignments for a room (model_handle -> [role_names])
+    pub fn get_role_assignments(&self, room: &str) -> Result<HashMap<String, Vec<String>>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT model_handle, role_name FROM room_role_assignments WHERE room = ?1",
+        )?;
+
+        let mut assignments: HashMap<String, Vec<String>> = HashMap::new();
+        let mut rows = stmt.query(params![room])?;
+
+        while let Some(row) = rows.next()? {
+            let model: String = row.get(0)?;
+            let role: String = row.get(1)?;
+            assignments.entry(model).or_default().push(role);
+        }
+
+        Ok(assignments)
+    }
+
+    /// Get roles assigned to a specific model in a room
+    pub fn get_model_roles(&self, room: &str, model_handle: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT role_name FROM room_role_assignments WHERE room = ?1 AND model_handle = ?2",
+        )?;
+
+        let mut roles = Vec::new();
+        let mut rows = stmt.query(params![room, model_handle])?;
+
+        while let Some(row) = rows.next()? {
+            roles.push(row.get(0)?);
+        }
+
+        Ok(roles)
     }
 }
 

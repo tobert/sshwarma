@@ -67,6 +67,10 @@ pub struct RoomContext {
     pub tags: HashSet<String>,
     /// Parent room for fork DAG
     pub parent: Option<String>,
+    /// Profiles that customize model behavior
+    pub profiles: Vec<Profile>,
+    /// Role assignments: model_handle -> [role_names]
+    pub role_assignments: HashMap<String, Vec<String>>,
 }
 
 /// A journal entry - intentional documentation of the creative process
@@ -140,6 +144,34 @@ pub struct Inspiration {
     pub content: String,
     pub added_by: String,
     pub added_at: DateTime<Utc>,
+}
+
+/// A profile that customizes model behavior in a room
+#[derive(Debug, Clone)]
+pub struct Profile {
+    /// Unique identifier within the room
+    pub name: String,
+    /// What this profile targets
+    pub target: ProfileTarget,
+    /// System prompt addition (goes to preamble)
+    pub system_prompt: Option<String>,
+    /// Context prefix (prepended to dynamic context)
+    pub context_prefix: Option<String>,
+    /// Context suffix (appended to dynamic context)
+    pub context_suffix: Option<String>,
+    /// Priority for stacking (lower = applied first)
+    pub priority: i32,
+}
+
+/// What a profile applies to
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileTarget {
+    /// Applies to specific model by handle (e.g., "qwen-4b")
+    Model(String),
+    /// Applies to any model with this role assigned (e.g., "creative")
+    Role(String),
+    /// Applies to all models in the room
+    Room,
 }
 
 impl Room {

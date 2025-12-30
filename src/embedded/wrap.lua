@@ -56,12 +56,15 @@ end
 local function format_model_layer()
     local model = tools.current_model()
     if not model then
-        return layer_result("## Your Identity\nYou are an AI assistant.\n")
+        error("wrap: model identity layer requires a model in session context")
+    end
+    if not model.name or model.name == "" then
+        error("wrap: model.name is required but empty")
     end
 
     local lines = {}
     table.insert(lines, "## Your Identity")
-    table.insert(lines, "You are **" .. (model.display or model.name or "AI Assistant") .. "**.")
+    table.insert(lines, "You are **@" .. model.name .. "**.")
 
     if model.system_prompt then
         table.insert(lines, "")
@@ -177,6 +180,78 @@ local function format_inspirations_layer()
     return layer_result(table.concat(lines, "\n"))
 end
 
+--- Format the profiles system layer (system_prompt additions from profiles)
+local function format_profiles_system_layer()
+    local model = tools.current_model()
+    if not model then return layer_result("") end
+
+    local profiles = tools.get_profiles(model.name)
+    if not profiles or #profiles == 0 then
+        return layer_result("")
+    end
+
+    local parts = {}
+    for _, profile in ipairs(profiles) do
+        if profile.system_prompt then
+            table.insert(parts, profile.system_prompt)
+        end
+    end
+
+    if #parts == 0 then
+        return layer_result("")
+    end
+
+    return layer_result(table.concat(parts, "\n\n"))
+end
+
+--- Format the profiles context prefix layer
+local function format_profiles_prefix_layer()
+    local model = tools.current_model()
+    if not model then return layer_result("") end
+
+    local profiles = tools.get_profiles(model.name)
+    if not profiles or #profiles == 0 then
+        return layer_result("")
+    end
+
+    local parts = {}
+    for _, profile in ipairs(profiles) do
+        if profile.context_prefix then
+            table.insert(parts, profile.context_prefix)
+        end
+    end
+
+    if #parts == 0 then
+        return layer_result("")
+    end
+
+    return layer_result(table.concat(parts, "\n\n"))
+end
+
+--- Format the profiles context suffix layer
+local function format_profiles_suffix_layer()
+    local model = tools.current_model()
+    if not model then return layer_result("") end
+
+    local profiles = tools.get_profiles(model.name)
+    if not profiles or #profiles == 0 then
+        return layer_result("")
+    end
+
+    local parts = {}
+    for _, profile in ipairs(profiles) do
+        if profile.context_suffix then
+            table.insert(parts, profile.context_suffix)
+        end
+    end
+
+    if #parts == 0 then
+        return layer_result("")
+    end
+
+    return layer_result(table.concat(parts, "\n\n"))
+end
+
 --------------------------------------------------------------------------------
 -- WrapBuilder class
 --------------------------------------------------------------------------------
@@ -250,6 +325,18 @@ end
 -- Built-in source: Inspiration board
 function WrapBuilder:inspirations()
     return self:add_source("inspirations", 70, format_inspirations_layer, false)
+end
+
+-- Built-in source: Room profiles
+-- Adds three layers:
+--   profiles_system (priority 15, is_system) - system_prompt additions
+--   profiles_prefix (priority 35, context) - context prefix
+--   profiles_suffix (priority 95, context) - context suffix
+function WrapBuilder:profiles()
+    self:add_source("profiles_system", 15, format_profiles_system_layer, true)
+    self:add_source("profiles_prefix", 35, format_profiles_prefix_layer, false)
+    self:add_source("profiles_suffix", 95, format_profiles_suffix_layer, false)
+    return self
 end
 
 -- Add a custom source with explicit content
@@ -329,6 +416,7 @@ function default_wrap(target_tokens)
     return wrap(target_tokens)
         :system()
         :model_identity()
+        :profiles()  -- Room-specific profile customizations
         :user()
         :room()
         :participants()

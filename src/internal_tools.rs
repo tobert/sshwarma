@@ -95,6 +95,14 @@ pub async fn register_tools(
             handle.add_tool(SshwarmaFork { ctx: ctx.clone() }).await?;
             count += 5;
         }
+
+        // Profile tools (always available in rooms)
+        handle.add_tool(SshwarmaListProfiles { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaAddProfile { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaRemoveProfile { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaAssignRole { ctx: ctx.clone() }).await?;
+        handle.add_tool(SshwarmaUnassignRole { ctx: ctx.clone() }).await?;
+        count += 5;
     }
 
     Ok(count)
@@ -907,6 +915,365 @@ impl ToolDyn for SshwarmaFork {
             .map_err(anyhow_to_tool_error)?;
 
             serde_json::to_string(&summary).map_err(ToolError::JsonError)
+        })
+    }
+}
+
+// ============================================================================
+// Profile Tools
+// ============================================================================
+
+/// List profiles in room
+#[derive(Clone)]
+struct SshwarmaListProfiles {
+    ctx: ToolContext,
+}
+
+impl ToolDyn for SshwarmaListProfiles {
+    fn name(&self) -> String {
+        "sshwarma_list_profiles".to_string()
+    }
+
+    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
+        Box::pin(async move {
+            ToolDefinition {
+                name: "sshwarma_list_profiles".to_string(),
+                description: "List all profiles and role assignments in the current room".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            }
+        })
+    }
+
+    fn call(&self, _args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+        Box::pin(async move {
+            let profiles = self.ctx.state.db.get_profiles(&self.ctx.room)
+                .map_err(anyhow_to_tool_error)?;
+            let role_assignments = self.ctx.state.db.get_role_assignments(&self.ctx.room)
+                .map_err(anyhow_to_tool_error)?;
+
+            let result = json!({
+                "profiles": profiles.iter().map(|p| {
+                    json!({
+                        "name": p.name,
+                        "target": match &p.target {
+                            crate::world::ProfileTarget::Room => json!({"type": "room"}),
+                            crate::world::ProfileTarget::Model(m) => json!({"type": "model", "value": m}),
+                            crate::world::ProfileTarget::Role(r) => json!({"type": "role", "value": r}),
+                        },
+                        "priority": p.priority,
+                        "system_prompt": p.system_prompt,
+                        "context_prefix": p.context_prefix,
+                        "context_suffix": p.context_suffix,
+                    })
+                }).collect::<Vec<_>>(),
+                "role_assignments": role_assignments,
+            });
+
+            serde_json::to_string(&result).map_err(ToolError::JsonError)
+        })
+    }
+}
+
+/// Add or update a profile
+#[derive(Clone)]
+struct SshwarmaAddProfile {
+    ctx: ToolContext,
+}
+
+#[derive(Deserialize)]
+struct AddProfileArgs {
+    name: String,
+    target_type: String,
+    target_value: Option<String>,
+    system_prompt: Option<String>,
+    context_prefix: Option<String>,
+    context_suffix: Option<String>,
+    priority: Option<i32>,
+}
+
+impl ToolDyn for SshwarmaAddProfile {
+    fn name(&self) -> String {
+        "sshwarma_add_profile".to_string()
+    }
+
+    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
+        Box::pin(async move {
+            ToolDefinition {
+                name: "sshwarma_add_profile".to_string(),
+                description: "Add or update a profile that customizes model behavior in this room".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Profile name (unique within room)"
+                        },
+                        "target_type": {
+                            "type": "string",
+                            "enum": ["room", "model", "role"],
+                            "description": "What this profile targets: 'room' (all models), 'model' (specific model), 'role' (models with assigned role)"
+                        },
+                        "target_value": {
+                            "type": "string",
+                            "description": "For model: model handle (e.g., 'qwen-4b'). For role: role name. Not needed for room."
+                        },
+                        "system_prompt": {
+                            "type": "string",
+                            "description": "Additional system prompt text"
+                        },
+                        "context_prefix": {
+                            "type": "string",
+                            "description": "Text prepended to dynamic context"
+                        },
+                        "context_suffix": {
+                            "type": "string",
+                            "description": "Text appended to dynamic context"
+                        },
+                        "priority": {
+                            "type": "integer",
+                            "description": "Stacking priority (lower = applied first)"
+                        }
+                    },
+                    "required": ["name", "target_type"]
+                }),
+            }
+        })
+    }
+
+    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+        Box::pin(async move {
+            let parsed: AddProfileArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+
+            let target = match parsed.target_type.as_str() {
+                "room" => crate::world::ProfileTarget::Room,
+                "model" => {
+                    let value = parsed.target_value.ok_or_else(|| {
+                        ToolError::ToolCallError(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "target_value required for model target",
+                        )))
+                    })?;
+                    crate::world::ProfileTarget::Model(value)
+                }
+                "role" => {
+                    let value = parsed.target_value.ok_or_else(|| {
+                        ToolError::ToolCallError(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "target_value required for role target",
+                        )))
+                    })?;
+                    crate::world::ProfileTarget::Role(value)
+                }
+                _ => {
+                    return Err(ToolError::ToolCallError(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "target_type must be 'room', 'model', or 'role'",
+                    ))));
+                }
+            };
+
+            let profile = crate::world::Profile {
+                name: parsed.name.clone(),
+                target,
+                system_prompt: parsed.system_prompt,
+                context_prefix: parsed.context_prefix,
+                context_suffix: parsed.context_suffix,
+                priority: parsed.priority.unwrap_or(0),
+            };
+
+            // Save to DB
+            self.ctx.state.db.add_profile(&self.ctx.room, &profile)
+                .map_err(anyhow_to_tool_error)?;
+
+            // Update in-memory
+            {
+                let mut world = tokio::task::block_in_place(|| self.ctx.state.world.blocking_write());
+                if let Some(room) = world.rooms.get_mut(&self.ctx.room) {
+                    room.context.profiles.retain(|p| p.name != parsed.name);
+                    room.context.profiles.push(profile);
+                    room.context.profiles.sort_by_key(|p| p.priority);
+                }
+            }
+
+            Ok(json!({"status": "ok", "profile": parsed.name}).to_string())
+        })
+    }
+}
+
+/// Remove a profile
+#[derive(Clone)]
+struct SshwarmaRemoveProfile {
+    ctx: ToolContext,
+}
+
+#[derive(Deserialize)]
+struct RemoveProfileArgs {
+    name: String,
+}
+
+impl ToolDyn for SshwarmaRemoveProfile {
+    fn name(&self) -> String {
+        "sshwarma_remove_profile".to_string()
+    }
+
+    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
+        Box::pin(async move {
+            ToolDefinition {
+                name: "sshwarma_remove_profile".to_string(),
+                description: "Remove a profile from the room".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of profile to remove"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            }
+        })
+    }
+
+    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+        Box::pin(async move {
+            let parsed: RemoveProfileArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+
+            let removed = self.ctx.state.db.remove_profile(&self.ctx.room, &parsed.name)
+                .map_err(anyhow_to_tool_error)?;
+
+            if removed {
+                // Update in-memory
+                let mut world = tokio::task::block_in_place(|| self.ctx.state.world.blocking_write());
+                if let Some(room) = world.rooms.get_mut(&self.ctx.room) {
+                    room.context.profiles.retain(|p| p.name != parsed.name);
+                }
+            }
+
+            Ok(json!({"status": if removed { "ok" } else { "not_found" }}).to_string())
+        })
+    }
+}
+
+/// Assign a role to a model
+#[derive(Clone)]
+struct SshwarmaAssignRole {
+    ctx: ToolContext,
+}
+
+#[derive(Deserialize)]
+struct AssignRoleArgs {
+    model: String,
+    role: String,
+}
+
+impl ToolDyn for SshwarmaAssignRole {
+    fn name(&self) -> String {
+        "sshwarma_assign_role".to_string()
+    }
+
+    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
+        Box::pin(async move {
+            ToolDefinition {
+                name: "sshwarma_assign_role".to_string(),
+                description: "Assign a role to a model in this room".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "string",
+                            "description": "Model handle (e.g., 'qwen-4b')"
+                        },
+                        "role": {
+                            "type": "string",
+                            "description": "Role name to assign"
+                        }
+                    },
+                    "required": ["model", "role"]
+                }),
+            }
+        })
+    }
+
+    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+        Box::pin(async move {
+            let parsed: AssignRoleArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+
+            self.ctx.state.db.assign_role(&self.ctx.room, &parsed.model, &parsed.role)
+                .map_err(anyhow_to_tool_error)?;
+
+            // Update in-memory
+            {
+                let mut world = tokio::task::block_in_place(|| self.ctx.state.world.blocking_write());
+                if let Some(room) = world.rooms.get_mut(&self.ctx.room) {
+                    room.context.role_assignments
+                        .entry(parsed.model.clone())
+                        .or_default()
+                        .push(parsed.role.clone());
+                }
+            }
+
+            Ok(json!({"status": "ok", "model": parsed.model, "role": parsed.role}).to_string())
+        })
+    }
+}
+
+/// Unassign a role from a model
+#[derive(Clone)]
+struct SshwarmaUnassignRole {
+    ctx: ToolContext,
+}
+
+impl ToolDyn for SshwarmaUnassignRole {
+    fn name(&self) -> String {
+        "sshwarma_unassign_role".to_string()
+    }
+
+    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
+        Box::pin(async move {
+            ToolDefinition {
+                name: "sshwarma_unassign_role".to_string(),
+                description: "Unassign a role from a model in this room".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "string",
+                            "description": "Model handle (e.g., 'qwen-4b')"
+                        },
+                        "role": {
+                            "type": "string",
+                            "description": "Role name to unassign"
+                        }
+                    },
+                    "required": ["model", "role"]
+                }),
+            }
+        })
+    }
+
+    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+        Box::pin(async move {
+            let parsed: AssignRoleArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+
+            let removed = self.ctx.state.db.unassign_role(&self.ctx.room, &parsed.model, &parsed.role)
+                .map_err(anyhow_to_tool_error)?;
+
+            if removed {
+                // Update in-memory
+                let mut world = tokio::task::block_in_place(|| self.ctx.state.world.blocking_write());
+                if let Some(room) = world.rooms.get_mut(&self.ctx.room) {
+                    if let Some(roles) = room.context.role_assignments.get_mut(&parsed.model) {
+                        roles.retain(|r| r != &parsed.role);
+                    }
+                }
+            }
+
+            Ok(json!({"status": if removed { "ok" } else { "not_found" }}).to_string())
         })
     }
 }
