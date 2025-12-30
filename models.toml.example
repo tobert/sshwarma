@@ -1,0 +1,62 @@
+# sshwarma model configuration
+#
+# Copy this file to ~/.config/sshwarma/models.toml
+#
+# Models can be @mentioned in chat: @qwen-8b hello
+#
+# Supported backends:
+#   ollama    - Ollama (uses ollama_endpoint)
+#   llamacpp  - llama.cpp OpenAI-compatible API (uses ollama_endpoint)
+#   openai    - OpenAI (needs OPENAI_API_KEY)
+#   anthropic - Anthropic (needs ANTHROPIC_API_KEY)
+#   gemini    - Google Gemini (needs GEMINI_API_KEY)
+#   mock      - Mock backend for testing
+
+# Default endpoint for Ollama/llama.cpp models
+ollama_endpoint = "http://localhost:11434"
+
+# Example: Ollama model
+[[models]]
+name = "qwen-8b"
+display = "Qwen3-8B"
+model = "qwen3:8b"
+backend = "ollama"
+
+# Example: llama.cpp with OpenAI-compatible API
+# [[models]]
+# name = "local"
+# display = "Local Model"
+# model = "qwen3-vl-8b"
+# backend = "llamacpp"
+# endpoint = "http://localhost:2020"  # optional, overrides ollama_endpoint
+
+# Example: Anthropic (set ANTHROPIC_API_KEY env var)
+# [[models]]
+# name = "claude"
+# display = "Claude Sonnet"
+# model = "claude-sonnet-4-20250514"
+# backend = "anthropic"
+
+# Example: OpenAI (set OPENAI_API_KEY env var)
+# [[models]]
+# name = "gpt"
+# display = "GPT-4o"
+# model = "gpt-4o"
+# backend = "openai"
+
+# Example: Gemini (set GEMINI_API_KEY env var)
+# [[models]]
+# name = "gemini"
+# display = "Gemini 2.0 Flash"
+# model = "gemini-2.0-flash"
+# backend = "gemini"
+
+# Model fields:
+#   name            - Short name for @mentions (required)
+#   display         - Human-readable name (required)
+#   model           - Model identifier for backend (required)
+#   backend         - Backend type (required)
+#   endpoint        - Override default endpoint (optional)
+#   enabled         - Enable/disable model, default true (optional)
+#   system_prompt   - Custom system prompt (optional)
+#   context_window  - Context size in tokens for budgeting (optional)

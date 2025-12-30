@@ -187,22 +187,19 @@ There is some schema normalization in place to help tools work with llama.cpp.
 git clone https://github.com/atobey/sshwarma
 cd sshwarma
 
-# Configure models
-cat > models.toml << 'EOF'
-ollama_endpoint = "http://localhost:11434"
+# Create config directory and copy example models config
+mkdir -p ~/.config/sshwarma
+cp models.toml.example ~/.config/sshwarma/models.toml
+# Edit to match your LLM setup (Ollama, llama.cpp, API keys, etc.)
 
-[[models]]
-name = "qwen-8b"
-display = "Qwen3-8B"
-model = "qwen3:8b"
-backend = "ollama"
-EOF
+# Build
+cargo build --release
 
 # Add a user (sshwarma uses SSH pubkey auth)
-cargo run --bin sshwarma-admin -- add-user alice
+./target/release/sshwarma-admin add yourname ~/.ssh/id_ed25519.pub
 
 # Run the server
-RUST_LOG=sshwarma=info cargo run --bin sshwarma
+./target/release/sshwarma
 ```
 
 ### Connect
@@ -229,11 +226,42 @@ Now Claude Code can join rooms and interact with the same world as SSH users.
 
 ## Configuration
 
+### Paths (XDG)
+
+sshwarma follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/):
+
+| Directory | Default | Contents |
+|-----------|---------|----------|
+| Data | `~/.local/share/sshwarma/` | `sshwarma.db`, `host_key` |
+| Config | `~/.config/sshwarma/` | `models.toml`, Lua scripts |
+
+Respects `XDG_DATA_HOME` and `XDG_CONFIG_HOME` if set.
+
+### Environment Variables
+
+All server settings are configurable via environment variables (12-factor style):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSHWARMA_LISTEN_ADDR` | `0.0.0.0:2222` | SSH listen address |
+| `SSHWARMA_MCP_PORT` | `2223` | MCP server port (0 to disable) |
+| `SSHWARMA_MCP_ENDPOINTS` | `http://localhost:8080/mcp` | MCP servers to connect (comma-separated) |
+| `SSHWARMA_OPEN_REGISTRATION` | `true` | Allow any SSH key when no users exist |
+| `SSHWARMA_DB` | `~/.local/share/sshwarma/sshwarma.db` | Database path override |
+| `SSHWARMA_HOST_KEY` | `~/.local/share/sshwarma/host_key` | Host key path override |
+| `SSHWARMA_MODELS_CONFIG` | `~/.config/sshwarma/models.toml` | Models config path override |
+
+For cloud model backends, set API keys:
+- `OPENAI_API_KEY` — OpenAI
+- `ANTHROPIC_API_KEY` — Anthropic
+- `GEMINI_API_KEY` — Google Gemini
+
 ### models.toml
+
+The only required config file. See `models.toml.example` for a full template.
 
 ```toml
 ollama_endpoint = "http://localhost:11434"
-llamacpp_endpoint = "http://localhost:2020"
 
 [[models]]
 name = "qwen-8b"
@@ -247,12 +275,6 @@ display = "Claude Sonnet"
 model = "claude-sonnet-4-20250514"
 backend = "anthropic"
 # ANTHROPIC_API_KEY env var required
-
-[[models]]
-name = "local"
-display = "Local Model"
-model = "qwen3-vl-8b"
-backend = "llamacpp"
 ```
 
 Supported backends: `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini`, `mock`
