@@ -4,7 +4,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::{CompletionClient, Nothing, ProviderClient};
-use rig::completion::Prompt;
+use rig::completion::{Chat, Message, Prompt};
 use rig::providers::{anthropic, ollama, openai};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::server::ToolServerHandle;
@@ -12,6 +12,73 @@ use rmcp::service::ServerSink;
 use tokio::sync::mpsc;
 
 use crate::model::{ModelBackend, ModelHandle};
+
+use rmcp::model::Tool;
+
+/// Convert history pairs (user, assistant) to rig Message format
+fn history_to_messages(history: &[(String, String)]) -> Vec<Message> {
+    history
+        .iter()
+        .flat_map(|(user_msg, assistant_msg)| {
+            vec![
+                Message::user(user_msg.clone()),
+                Message::assistant(assistant_msg.clone()),
+            ]
+        })
+        .collect()
+}
+
+/// Normalize a tool's input_schema for llama.cpp compatibility:
+/// 1. Strip "default" keys (llama.cpp can't parse them)
+/// 2. Add "type": "object" to schemas with only "description" (invalid JSON Schema)
+///
+/// This is needed because llama.cpp's JSON Schema parser is more restrictive
+/// than the spec allows, and MCP tools often emit schemas with features it can't handle.
+pub fn normalize_schema_for_llamacpp(tool: &Tool) -> Tool {
+    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut cleaned: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "default")
+                    .map(|(k, v)| (k.clone(), normalize(v)))
+                    .collect();
+
+                // If this looks like a schema (has "description" but no "type"), add "type": "object"
+                // This fixes schemars output for serde_json::Value fields
+                if cleaned.contains_key("description") && !cleaned.contains_key("type") && !cleaned.contains_key("$ref") {
+                    cleaned.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+                }
+
+                serde_json::Value::Object(cleaned)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(normalize).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    let schema_value = serde_json::Value::Object(
+        tool.input_schema.as_ref().clone().into_iter().collect()
+    );
+    let cleaned = normalize(&schema_value);
+    let cleaned_map: serde_json::Map<String, serde_json::Value> = match cleaned {
+        serde_json::Value::Object(m) => m,
+        _ => tool.input_schema.as_ref().clone(),
+    };
+
+    Tool {
+        name: tool.name.clone(),
+        title: tool.title.clone(),
+        description: tool.description.clone(),
+        input_schema: std::sync::Arc::new(cleaned_map),
+        output_schema: tool.output_schema.clone(),
+        annotations: tool.annotations.clone(),
+        icons: tool.icons.clone(),
+        meta: tool.meta.clone(),
+    }
+}
 
 /// Streaming response chunk
 #[derive(Debug, Clone)]
@@ -31,6 +98,15 @@ pub enum StreamChunk {
 /// Client for talking to LLMs via rig
 ///
 /// Supports OpenAI, Anthropic, and Ollama with native tool calling.
+///
+/// ## Architecture Note
+///
+/// The methods in this client have repeated match blocks for each backend.
+/// This is intentional—rig's provider clients have different concrete types
+/// and don't implement a shared trait for agent building. LlamaCpp is
+/// particularly different as it creates an OpenAI-compatible client on
+/// each call. The duplication trades off against type safety and explicit
+/// error handling per backend.
 pub struct LlmClient {
     openai: Option<openai::Client>,
     anthropic: Option<anthropic::Client>,
@@ -108,17 +184,24 @@ impl LlmClient {
     }
 
     /// Send a message with system prompt and conversation history
+    ///
+    /// History is a slice of (user_message, assistant_response) pairs that will be
+    /// included as context for the model. The model will see these as prior conversation
+    /// turns before the current message.
     pub async fn chat_with_context(
         &self,
         model: &ModelHandle,
         system_prompt: &str,
-        _history: &[(String, String)], // TODO: integrate history
+        history: &[(String, String)],
         message: &str,
     ) -> Result<String> {
         // Handle mock backend for testing
         if let ModelBackend::Mock { prefix } = &model.backend {
             return Ok(format!("{}: {}", prefix, message));
         }
+
+        // Convert history pairs to rig Message format
+        let chat_history = history_to_messages(history);
 
         match &model.backend {
             ModelBackend::Ollama { model: model_id, .. } => {
@@ -130,7 +213,7 @@ impl LlmClient {
                     .preamble(system_prompt)
                     .build();
 
-                let response = agent.prompt(message).await
+                let response = agent.chat(message, chat_history).await
                     .map_err(|e| anyhow::anyhow!("ollama error: {}", e))?;
 
                 Ok(response)
@@ -149,7 +232,7 @@ impl LlmClient {
                     .preamble(system_prompt)
                     .build();
 
-                let response = agent.prompt(message).await
+                let response = agent.chat(message, chat_history).await
                     .map_err(|e| anyhow::anyhow!("llamacpp error: {}", e))?;
 
                 Ok(response)
@@ -164,7 +247,7 @@ impl LlmClient {
                     .preamble(system_prompt)
                     .build();
 
-                let response = agent.prompt(message).await
+                let response = agent.chat(message, chat_history).await
                     .map_err(|e| anyhow::anyhow!("openai error: {}", e))?;
 
                 Ok(response)
@@ -179,7 +262,7 @@ impl LlmClient {
                     .preamble(system_prompt)
                     .build();
 
-                let response = agent.prompt(message).await
+                let response = agent.chat(message, chat_history).await
                     .map_err(|e| anyhow::anyhow!("anthropic error: {}", e))?;
 
                 Ok(response)
@@ -573,15 +656,47 @@ impl LlmClient {
 
     /// Stream a chat response (no tools)
     ///
-    /// For tool-enabled streaming, use the agent directly with stream_prompt.
+    /// Sends text chunks as they arrive from the model.
+    /// For tool-enabled streaming, use `stream_with_tool_server` instead.
     pub async fn chat_stream(
         &self,
         model: &ModelHandle,
         system_prompt: &str,
-        _history: &[(String, String)],
+        history: &[(String, String)],
         message: &str,
         tx: mpsc::Sender<StreamChunk>,
     ) -> Result<()> {
+        // Macro to process streaming items - same pattern as stream_with_tool_server
+        macro_rules! process_simple_stream {
+            ($stream:expr, $tx:expr) => {{
+                while let Some(item) = $stream.next().await {
+                    match item {
+                        Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                            match content {
+                                StreamedAssistantContent::Text(Text { text }) => {
+                                    let _ = $tx.send(StreamChunk::Text(text)).await;
+                                }
+                                // No tool calls expected in simple streaming
+                                StreamedAssistantContent::ToolCall(_) => {}
+                                StreamedAssistantContent::ToolCallDelta { .. } => {}
+                                StreamedAssistantContent::Reasoning(_) => {}
+                                StreamedAssistantContent::ReasoningDelta { .. } => {}
+                                StreamedAssistantContent::Final(_) => {}
+                            }
+                        }
+                        Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
+                        Ok(_) => {} // Handle future non-exhaustive variants
+                        Err(e) => {
+                            let _ = $tx.send(StreamChunk::Error(e.to_string())).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                let _ = $tx.send(StreamChunk::Done).await;
+                Ok(())
+            }};
+        }
+
         // Handle mock backend for testing
         if let ModelBackend::Mock { prefix } = &model.backend {
             let response = format!("{}: {}", prefix, message);
@@ -590,19 +705,94 @@ impl LlmClient {
             return Ok(());
         }
 
-        // For now, fall back to non-streaming and send result all at once
-        // TODO: implement proper streaming with rig's stream_prompt
-        match self.chat_with_context(model, system_prompt, &[], message).await {
-            Ok(response) => {
+        // Convert history pairs to rig Message format
+        let chat_history = history_to_messages(history);
+
+        match &model.backend {
+            ModelBackend::Ollama { model: model_id, .. } => {
+                let client = self.ollama.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .with_history(chat_history)
+                    .await;
+
+                process_simple_stream!(stream, tx)
+            }
+
+            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+                // llama.cpp uses OpenAI-compatible API
+                let client: openai::Client = openai::Client::builder()
+                    .api_key("not-needed")
+                    .base_url(endpoint)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .with_history(chat_history)
+                    .await;
+
+                process_simple_stream!(stream, tx)
+            }
+
+            ModelBackend::OpenAI { model: model_id } => {
+                let client = self.openai.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .with_history(chat_history)
+                    .await;
+
+                process_simple_stream!(stream, tx)
+            }
+
+            ModelBackend::Anthropic { model: model_id } => {
+                let client = self.anthropic.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
+
+                let agent = client
+                    .agent(model_id)
+                    .preamble(system_prompt)
+                    .build();
+
+                let mut stream = agent
+                    .stream_prompt(message)
+                    .with_history(chat_history)
+                    .await;
+
+                process_simple_stream!(stream, tx)
+            }
+
+            ModelBackend::Gemini { .. } => {
+                let _ = tx.send(StreamChunk::Error("Gemini not yet supported".to_string())).await;
+                Ok(())
+            }
+
+            ModelBackend::Mock { prefix } => {
+                let response = format!("{}: {}", prefix, message);
                 let _ = tx.send(StreamChunk::Text(response)).await;
                 let _ = tx.send(StreamChunk::Done).await;
-            }
-            Err(e) => {
-                let _ = tx.send(StreamChunk::Error(e.to_string())).await;
+                Ok(())
             }
         }
-
-        Ok(())
     }
 
     /// Generate flavor text for room descriptions

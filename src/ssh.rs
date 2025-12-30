@@ -3,7 +3,6 @@
 use anyhow::Result;
 use chrono::Utc;
 use rig::tool::server::ToolServer;
-use rmcp::model::Tool;
 use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::net::SocketAddr;
@@ -19,60 +18,12 @@ use crate::display::{
     hud::{HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
     styles::ctrl,
 };
+use crate::llm::normalize_schema_for_llamacpp;
 use crate::lua::{mcp_request_handler, register_mcp_tools, LuaRuntime, McpBridge, WrapState};
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
-
-/// Normalize a tool's input_schema for llama.cpp compatibility:
-/// 1. Strip "default" keys (llama.cpp can't parse them)
-/// 2. Add "type": "object" to schemas with only "description" (invalid JSON Schema)
-fn normalize_schema_for_llamacpp(tool: &Tool) -> Tool {
-    fn normalize(value: &serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut cleaned: serde_json::Map<String, serde_json::Value> = map
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "default")
-                    .map(|(k, v)| (k.clone(), normalize(v)))
-                    .collect();
-
-                // If this looks like a schema (has "description" but no "type"), add "type": "object"
-                // This fixes schemars output for serde_json::Value fields
-                if cleaned.contains_key("description") && !cleaned.contains_key("type") && !cleaned.contains_key("$ref") {
-                    cleaned.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-                }
-
-                serde_json::Value::Object(cleaned)
-            }
-            serde_json::Value::Array(arr) => {
-                serde_json::Value::Array(arr.iter().map(normalize).collect())
-            }
-            other => other.clone(),
-        }
-    }
-
-    let schema_value = serde_json::Value::Object(
-        tool.input_schema.as_ref().clone().into_iter().collect()
-    );
-    let cleaned = normalize(&schema_value);
-    let cleaned_map: serde_json::Map<String, serde_json::Value> = match cleaned {
-        serde_json::Value::Object(m) => m,
-        _ => tool.input_schema.as_ref().clone(),
-    };
-
-    Tool {
-        name: tool.name.clone(),
-        title: tool.title.clone(),
-        description: tool.description.clone(),
-        input_schema: Arc::new(cleaned_map),
-        output_schema: tool.output_schema.clone(),
-        annotations: tool.annotations.clone(),
-        icons: tool.icons.clone(),
-        meta: tool.meta.clone(),
-    }
-}
 
 /// Update from background task for streaming responses
 #[derive(Debug)]
