@@ -275,9 +275,11 @@ Exit arrows:    ↑ north  → east  ↓ south  ← west
 
 ```
 src/
-├── main.rs               # Entry point, server setup, host key management
+├── main.rs               # Entry point, server setup
 ├── ssh.rs                # SSH handler, @mention processing, streaming, HUD refresh
 ├── state.rs              # SharedState: Arc-wrapped world, db, llm, models, mcp
+├── paths.rs              # XDG paths and env var resolution
+├── config.rs             # Config::from_env(), ModelsConfig
 │
 ├── world.rs              # Room, Message, User, Artifact types
 ├── player.rs             # Per-connection session state (username, room, inventory)
@@ -299,18 +301,20 @@ src/
 │       ├── renderer.rs   # Calls Lua to render HUD
 │       └── spinner.rs    # Spinner animation frames
 │
-├── lua/                  # Lua scripting for HUD
+├── lua/                  # Lua scripting for HUD and context
 │   ├── mod.rs            # LuaRuntime: state management, script loading, hot-reload
 │   ├── context.rs        # Build HudContext to pass to Lua
 │   ├── render.rs         # Parse Lua output into terminal segments
 │   ├── tools.rs          # Register Lua callbacks (hud_state, kv_*, mcp_*)
+│   ├── wrap.rs           # Context composition via wrap.lua
 │   ├── cache.rs          # ToolCache: KV store for background→render data sharing
 │   └── mcp_bridge.rs     # Async MCP bridge: sync Lua ↔ async MCP calls
 │
 ├── embedded/             # Compiled-in resources
-│   └── hud.lua           # Default HUD script
+│   ├── hud.lua           # Default HUD script
+│   └── wrap.lua          # Context composition (system prompt, history budgeting)
 │
-├── configs/              # Example user HUD scripts (symlink to ~/.config/sshwarma/)
+├── configs/              # Example user HUD scripts
 │   └── atobey.lua        # Example: holler integration with garden/job polling
 │
 ├── completion/           # Tab completion
@@ -322,33 +326,30 @@ src/
 │
 ├── model.rs              # ModelRegistry, ModelHandle, backend enum
 ├── llm.rs                # LLM client with rig (streaming, tool calling)
-├── prompt.rs             # 4-layer system prompt builder
 ├── internal_tools.rs     # rig-compatible tools for models (look, say, join, etc.)
 │
 ├── mcp.rs                # MCP client: connect to external servers, call tools
 ├── mcp_server.rs         # MCP server: expose sshwarma to Claude Code
 │
 ├── db.rs                 # SQLite: users, pubkeys, rooms, messages, artifacts
-├── config.rs             # Config/ModelsConfig: load from toml, env vars
-│
 ├── ansi.rs               # ANSI escape sequence parser
 ├── line_editor.rs        # Readline-style input with completion
 ├── comm.rs               # Broadcast utilities
 └── lib.rs                # Library exports
 
 src/bin/
-└── sshwarma-admin.rs     # CLI for user management (add-user, etc.)
+└── sshwarma-admin.rs     # CLI for user management
 ```
 
 ## Dependencies
 
-- **russh**: SSH server
-- **rmcp**: MCP client and server (official Rust SDK)
-- **rig**: LLM orchestration (agents, tools, streaming, multi-turn)
-- **mlua**: Lua scripting (Luau flavor, Send+Sync for async)
-- **rusqlite**: SQLite persistence
-- **tokio**: Async runtime
-- **tracing**: Structured logging
+- **russh** — SSH server
+- **rmcp** — MCP client and server (official Rust SDK)
+- **rig** — LLM orchestration (agents, tools, streaming, multi-turn)
+- **mlua** — Lua scripting (Luau flavor, Send+Sync for async)
+- **rusqlite** — SQLite persistence
+- **tokio** — Async runtime
+- **tracing** — Structured logging
 
 ## Development Guidelines
 
@@ -386,28 +387,109 @@ This applies to commands.rs, internal_tools.rs, and any async code that needs sy
 - Review with `git diff --staged` before committing
 - Use Co-Authored-By for model attributions
 
-## Model Configuration
+### Testing
 
-Models are configured in `models.toml`:
+```bash
+cargo test              # Run all tests
+cargo test paths::      # Run specific module tests
+cargo test --test e2e   # Run e2e tests only
+```
+
+Tests use in-memory SQLite databases. E2E tests are in `tests/e2e.rs` and test MCP server functionality.
+
+## Common Tasks
+
+### Adding a New Slash Command
+
+1. Add the command handler in `src/commands.rs`:
+   ```rust
+   pub async fn cmd_mycommand(state: &SharedState, player: &Player, args: &str) -> Result<String> {
+       // Implementation
+   }
+   ```
+
+2. Wire it up in `src/interp/commands.rs`:
+   ```rust
+   "mycommand" => commands::cmd_mycommand(state, player, args).await,
+   ```
+
+3. Add help text in the `help_text()` function in the same file.
+
+4. Optionally add tab completion in `src/completion/commands.rs`.
+
+### Adding an Internal Tool (for models)
+
+1. Add the tool struct in `src/internal_tools.rs`:
+   ```rust
+   #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+   pub struct MyTool {
+       /// Description shown to the model
+       pub arg: String,
+   }
+
+   impl rig::tool::Tool for MyTool {
+       // ...
+   }
+   ```
+
+2. Register it in `build_tools()` in the same file.
+
+### Adding a Lua API Function
+
+1. Add the function in `src/lua/tools.rs`:
+   ```rust
+   let my_func = scope.create_function(|_, ()| {
+       Ok("result")
+   })?;
+   tools_table.set("my_func", my_func)?;
+   ```
+
+2. Document it in the Lua API section of this file.
+
+## Configuration
+
+### Paths (XDG)
+
+sshwarma follows the XDG Base Directory Specification:
+
+| Directory | Default | Contents |
+|-----------|---------|----------|
+| Data | `~/.local/share/sshwarma/` | `sshwarma.db`, `host_key` |
+| Config | `~/.config/sshwarma/` | `models.toml`, Lua scripts |
+
+Respects `XDG_DATA_HOME` and `XDG_CONFIG_HOME` environment variables.
+
+### Environment Variables
+
+All server settings use 12-factor style env vars (no config file needed):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSHWARMA_LISTEN_ADDR` | `0.0.0.0:2222` | SSH listen address |
+| `SSHWARMA_MCP_PORT` | `2223` | MCP server port (0 = disabled) |
+| `SSHWARMA_MCP_ENDPOINTS` | `http://localhost:8080/mcp` | MCP servers to connect (comma-sep) |
+| `SSHWARMA_OPEN_REGISTRATION` | `true` | Allow any SSH key when no users exist |
+| `SSHWARMA_DB` | (XDG data)/sshwarma.db | Database path override |
+| `SSHWARMA_HOST_KEY` | (XDG data)/host_key | Host key path override |
+| `SSHWARMA_MODELS_CONFIG` | (XDG config)/models.toml | Models config path override |
+
+API keys for cloud backends: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
+
+### models.toml
+
+The only required config file. See `models.toml.example` for a full template.
 
 ```toml
 ollama_endpoint = "http://localhost:11434"
-llamacpp_endpoint = "http://localhost:2020"
 
 [[models]]
 name = "qwen-8b"
 display = "Qwen3-8B"
 model = "qwen3:8b"
 backend = "ollama"
-
-[[models]]
-name = "local"
-display = "Local Model"
-model = "qwen3-vl-8b"
-backend = "llamacpp"
 ```
 
-Supported backends: `llamacpp`, `ollama`, `openai`, `anthropic`, `gemini`, `mock`
+Supported backends: `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini`, `mock`
 
 ## Integration with Hootenanny
 
@@ -425,17 +507,13 @@ When running with holler connected, models can:
 
 Design decisions still being explored:
 
-1. **HUD height** — 4, 6, or 8 lines? More content vs more scroll buffer.
+1. **Agent following** — When you `/go north`, do agents follow? All of them? Just active ones? Just the one you're talking to?
 
-2. **Room event buffer** — Should `/look` include recent events? How many? How old? Feels right for agents to see "what just happened" not just "who's here."
+2. **Context in HUD** — Show per-agent context usage, or just aggregate total?
 
-3. **Agent following** — When you `/go north`, do agents follow? All of them? Just active ones? Just the one you're talking to?
+3. **Notification persistence** — Log all notifications to scroll buffer, or just show in HUD ephemerally?
 
-4. **Context in HUD** — Show per-agent context usage, or just aggregate total?
-
-5. **Notification persistence** — Log all notifications to scroll buffer, or just show in HUD ephemerally?
-
-6. **Room-specific tool scoping** — Should different rooms have different tools available? A "music studio" room that only has audio tools?
+4. **Room-specific tool scoping** — Should different rooms have different tools available? A "music studio" room that only has audio tools?
 
 ## Future Directions
 
