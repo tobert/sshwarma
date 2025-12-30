@@ -131,6 +131,13 @@ pub async fn get_vibe(state: &SharedState, room_name: &str) -> Result<Option<Str
 /// Set vibe for room
 pub async fn set_vibe(state: &SharedState, room_name: &str, vibe: &str) -> Result<()> {
     state.db.set_vibe(room_name, Some(vibe))?;
+
+    // Update in-memory state
+    let mut world = state.world.write().await;
+    if let Some(room) = world.get_room_mut(room_name) {
+        room.context.vibe = Some(vibe.to_string());
+    }
+
     Ok(())
 }
 

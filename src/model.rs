@@ -21,6 +21,21 @@ pub struct ModelHandle {
     pub context_window: Option<usize>,
 }
 
+impl Default for ModelHandle {
+    fn default() -> Self {
+        Self {
+            short_name: "none".to_string(),
+            display_name: "No Model".to_string(),
+            backend: ModelBackend::Mock {
+                prefix: "[none]".to_string(),
+            },
+            available: false,
+            system_prompt: None,
+            context_window: None,
+        }
+    }
+}
+
 /// How to reach this model
 #[derive(Debug, Clone)]
 pub enum ModelBackend {

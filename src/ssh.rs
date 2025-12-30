@@ -1140,6 +1140,7 @@ impl SshHandler {
             state: self.state.clone(),
             room: room_for_tools.clone(),
             username: username.clone(),
+            lua_runtime: self.lua_runtime.clone().expect("lua_runtime not initialized"),
         };
         // Use per-room config (navigation may be disabled for this room)
         let config = InternalToolConfig::for_room(&self.state, &room_for_tools).await;

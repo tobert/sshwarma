@@ -371,6 +371,136 @@ impl LuaRuntime {
         result
     }
 
+    /// Render room look with ANSI formatting (for TTY /look command)
+    ///
+    /// Calls Lua's `look_ansi()` function which returns segment tables,
+    /// then converts to ANSI string for terminal display.
+    pub fn render_look_ansi(&self, wrap_state: WrapState) -> Result<String> {
+        use crate::lua::tools::SessionContext;
+
+        // Set session context for tools to access
+        self.tool_state.set_session_context(Some(SessionContext {
+            username: wrap_state.username.clone(),
+            model: None, // Not needed for look
+            room_name: wrap_state.room_name.clone(),
+        }));
+
+        // Set shared state for extended data tools
+        self.tool_state
+            .set_shared_state(Some(wrap_state.shared_state.clone()));
+
+        // Populate HudState with room data from SharedState
+        {
+            let mut hud = self.tool_state.hud_state();
+            hud.room_name = wrap_state.room_name.clone();
+
+            // Fetch room data if we have a room name
+            if let Some(ref room_name) = wrap_state.room_name {
+                let world =
+                    tokio::task::block_in_place(|| wrap_state.shared_state.world.blocking_read());
+                if let Some(room) = world.get_room(room_name) {
+                    hud.vibe = room.context.vibe.clone();
+                    hud.description = room.description.clone();
+                    hud.exits = room.context.exits.clone();
+
+                    // Build participants list
+                    let users: Vec<String> = room.users.iter().cloned().collect();
+                    let models: Vec<String> = wrap_state
+                        .shared_state
+                        .models
+                        .available()
+                        .iter()
+                        .map(|m| m.short_name.clone())
+                        .collect();
+                    hud.set_participants(users, models);
+                }
+            }
+
+            self.tool_state.update_hud_state(hud);
+        }
+
+        // Call Lua's look_ansi() function
+        let globals = self.lua.globals();
+        let look_ansi_fn: mlua::Function = globals
+            .get("look_ansi")
+            .map_err(|e| anyhow::anyhow!("look_ansi function not found: {}", e))?;
+
+        let rows: Table = look_ansi_fn
+            .call(())
+            .map_err(|e| anyhow::anyhow!("look_ansi call failed: {}", e))?;
+
+        // Parse segments to ANSI string
+        let output = render::parse_lua_rows(rows)?;
+
+        // Cleanup
+        self.tool_state.clear_session_context();
+
+        Ok(output)
+    }
+
+    /// Render room look as markdown (for model sshwarma_look tool)
+    ///
+    /// Calls Lua's `look_markdown()` function which returns a markdown string.
+    pub fn render_look_markdown(&self, wrap_state: WrapState) -> Result<String> {
+        use crate::lua::tools::SessionContext;
+
+        // Set session context for tools to access
+        self.tool_state.set_session_context(Some(SessionContext {
+            username: wrap_state.username.clone(),
+            model: None,
+            room_name: wrap_state.room_name.clone(),
+        }));
+
+        // Set shared state for extended data tools
+        self.tool_state
+            .set_shared_state(Some(wrap_state.shared_state.clone()));
+
+        // Populate HudState with room data from SharedState
+        {
+            let mut hud = self.tool_state.hud_state();
+            hud.room_name = wrap_state.room_name.clone();
+
+            // Fetch room data if we have a room name
+            if let Some(ref room_name) = wrap_state.room_name {
+                let world =
+                    tokio::task::block_in_place(|| wrap_state.shared_state.world.blocking_read());
+                if let Some(room) = world.get_room(room_name) {
+                    hud.vibe = room.context.vibe.clone();
+                    hud.description = room.description.clone();
+                    hud.exits = room.context.exits.clone();
+
+                    // Build participants list
+                    let users: Vec<String> = room.users.iter().cloned().collect();
+                    let models: Vec<String> = wrap_state
+                        .shared_state
+                        .models
+                        .available()
+                        .iter()
+                        .map(|m| m.short_name.clone())
+                        .collect();
+                    hud.set_participants(users, models);
+                }
+            }
+
+            self.tool_state.update_hud_state(hud);
+        }
+
+        // Call Lua's look_markdown() function
+        let globals = self.lua.globals();
+        let look_markdown_fn: mlua::Function = globals
+            .get("look_markdown")
+            .map_err(|e| anyhow::anyhow!("look_markdown function not found: {}", e))?;
+
+        let result: String = look_markdown_fn
+            .call(())
+            .map_err(|e| anyhow::anyhow!("look_markdown call failed: {}", e))?;
+
+        // Cleanup
+        self.tool_state.clear_session_context();
+
+        Ok(result)
+    }
+
     /// Check if a user script is loaded (vs embedded default)
     pub fn has_user_script(&self) -> bool {
         self.loaded_script_path.is_some()
@@ -618,8 +748,8 @@ mod tests {
 
         // System prompt should contain model identity and sshwarma info
         assert!(
-            result.system_prompt.contains("Test Model"),
-            "system prompt should contain model name"
+            result.system_prompt.contains("@test"),
+            "system prompt should contain model handle"
         );
         assert!(
             result.system_prompt.contains("sshwarma"),

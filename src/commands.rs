@@ -1,11 +1,10 @@
 //! REPL command implementations
 
+use crate::display::{EntryContent, EntrySource};
 use crate::lua::WrapState;
 use crate::model::{ModelBackend, ModelHandle};
 use crate::ops;
 use crate::ssh::SshHandler;
-use crate::display::{EntryContent, EntrySource};
-use crate::world::{Profile, ProfileTarget};
 
 /// Result of a command execution
 pub struct CommandResult {
@@ -70,7 +69,7 @@ impl SshHandler {
                 "bring" => CommandResult::normal(self.cmd_bring(args).await),
                 "drop" => CommandResult::normal(self.cmd_drop(args).await),
                 "inspire" => CommandResult::normal(self.cmd_inspire(args).await),
-                "profile" => CommandResult::normal(self.cmd_profile(args).await),
+                "prompt" => CommandResult::normal(self.cmd_prompt(args).await),
                 "dig" => CommandResult::normal(self.cmd_dig(args).await),
                 "go" => CommandResult::normal(self.cmd_go(args).await),
                 "exits" => CommandResult::normal(self.cmd_exits().await),
@@ -117,12 +116,14 @@ Room Context:
   /inspire <text>     Add to mood board
   /nav [on|off]       Toggle model navigation
 
-Profiles:
-  /profile            List profiles and roles
-  /profile add <name> --model=X|--role=X|--room "prompt"
-  /profile remove <name>
-  /profile assign <model> <role>
-  /profile unassign <model> <role>
+Prompts:
+  /prompt                        List prompts and targets
+  /prompt <name> "<text>"        Create/update named prompt
+  /prompt show <name|target>     Show prompt or target slots
+  /prompt push <target> <name>   Add prompt to target
+  /prompt pop <target>           Remove last slot
+  /prompt rm <target> <slot>     Remove slot by index
+  /prompt delete <name>          Delete a prompt
 
 Communication:
   <text>              Say to room
@@ -195,13 +196,13 @@ MCP:
         let current = self.current_room();
 
         match ops::join(&self.state, &username, current.as_deref(), target).await {
-            Ok(summary) => {
+            Ok(_summary) => {
                 // Update player state (handler-specific)
                 if let Some(ref mut player) = self.player {
                     player.join_room(target.to_string());
                     let _ = self.state.db.update_session_room(&player.session_id, Some(target));
                 }
-                Self::format_room_summary(&summary)
+                self.render_room_ansi(target).await
             }
             Err(e) => e.to_string(),
         }
@@ -221,12 +222,13 @@ MCP:
         let current = self.current_room();
 
         match ops::create_room(&self.state, &username, room_name, current.as_deref()).await {
-            Ok(summary) => {
+            Ok(_summary) => {
                 if let Some(ref mut player) = self.player {
                     player.join_room(room_name.to_string());
                     let _ = self.state.db.update_session_room(&player.session_id, Some(room_name));
                 }
-                format!("Created room '{}'.\r\n\r\n{}", room_name, Self::format_room_summary(&summary))
+                let room_output = self.render_room_ansi(room_name).await;
+                format!("Created room '{}'.\r\n\r\n{}", room_name, room_output)
             }
             Err(e) => e.to_string(),
         }
@@ -271,45 +273,30 @@ MCP:
             }
         };
 
-        match ops::look(&self.state, &room_name).await {
-            Ok(summary) => Self::format_room_summary(&summary),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.render_room_ansi(&room_name).await
     }
 
-    /// Format a RoomSummary for TTY display
-    fn format_room_summary(s: &ops::RoomSummary) -> String {
-        let mut out = format!("═══ {} ═══\r\n", s.name);
+    /// Render room summary using Lua ANSI formatter
+    async fn render_room_ansi(&self, room_name: &str) -> String {
+        let username = self.username().unwrap_or_else(|| "anonymous".to_string());
 
-        if let Some(ref desc) = s.description {
-            out.push_str(&format!("{}\r\n", desc));
+        let lua_runtime = match &self.lua_runtime {
+            Some(rt) => rt,
+            None => return format!("Room: {} (Lua runtime not initialized)", room_name),
+        };
+
+        let wrap_state = WrapState {
+            room_name: Some(room_name.to_string()),
+            username,
+            model: ModelHandle::default(),
+            shared_state: self.state.clone(),
+        };
+
+        let lua = lua_runtime.lock().await;
+        match lua.render_look_ansi(wrap_state) {
+            Ok(output) => output,
+            Err(e) => format!("Room: {} (render error: {})", room_name, e),
         }
-        out.push_str("\r\n");
-
-        if s.users.is_empty() {
-            out.push_str("Nobody else is here.\r\n");
-        } else {
-            out.push_str(&format!("Users: {}\r\n", s.users.join(", ")));
-        }
-
-        if !s.models.is_empty() {
-            out.push_str(&format!("Models: {}\r\n", s.models.join(", ")));
-        }
-
-        if s.artifact_count > 0 {
-            out.push_str(&format!("Artifacts: {} items\r\n", s.artifact_count));
-        }
-
-        if let Some(ref vibe) = s.vibe {
-            out.push_str(&format!("Vibe: {}\r\n", vibe));
-        }
-
-        if !s.exits.is_empty() {
-            let exit_list: Vec<_> = s.exits.keys().collect();
-            out.push_str(&format!("Exits: {}\r\n", exit_list.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-        }
-
-        out
     }
 
     async fn cmd_history(&self, args: &str) -> String {
@@ -825,11 +812,12 @@ MCP:
 
         match ops::go(&self.state, &username, &room, direction).await {
             Ok(summary) => {
+                let new_room = summary.name.clone();
                 if let Some(ref mut player) = self.player {
-                    player.join_room(summary.name.clone());
-                    let _ = self.state.db.update_session_room(&player.session_id, Some(&summary.name));
+                    player.join_room(new_room.clone());
+                    let _ = self.state.db.update_session_room(&player.session_id, Some(&new_room));
                 }
-                Self::format_room_summary(&summary)
+                self.render_room_ansi(&new_room).await
             }
             Err(e) => e.to_string(),
         }
@@ -874,14 +862,15 @@ MCP:
         };
 
         match ops::fork_room(&self.state, &username, &source, new_name).await {
-            Ok(summary) => {
+            Ok(_summary) => {
                 if let Some(ref mut player) = self.player {
                     player.join_room(new_name.to_string());
                     let _ = self.state.db.update_session_room(&player.session_id, Some(new_name));
                 }
+                let room_output = self.render_room_ansi(new_name).await;
                 format!(
                     "Forked '{}' from '{}'. Inherited: vibe, tags, assets, inspirations.\r\n\r\n{}",
-                    new_name, source, Self::format_room_summary(&summary)
+                    new_name, source, room_output
                 )
             }
             Err(e) => e.to_string(),
@@ -1002,230 +991,274 @@ MCP:
         }
     }
 
-    async fn cmd_profile(&self, args: &str) -> String {
+    async fn cmd_prompt(&self, args: &str) -> String {
         let room = match self.current_room() {
             Some(r) => r,
-            None => return "You need to be in a room to manage profiles.".to_string(),
+            None => return "You need to be in a room to manage prompts.".to_string(),
         };
 
-        let parts: Vec<&str> = args.splitn(2, ' ').collect();
-        let subcmd = parts.first().copied().unwrap_or("");
-        let rest = parts.get(1).copied().unwrap_or("");
+        let username = self.username().unwrap_or_else(|| "unknown".to_string());
 
-        match subcmd {
-            "list" | "" => {
-                let mut output = String::new();
+        // Parse the command
+        let args = args.trim();
 
-                // Get profiles from DB
-                let profiles = match self.state.db.get_profiles(&room) {
-                    Ok(p) => p,
-                    Err(e) => return format!("Error loading profiles: {}", e),
-                };
-
-                if profiles.is_empty() {
-                    output.push_str("No profiles defined.\r\n");
-                } else {
-                    output.push_str("Profiles:\r\n");
-                    for p in &profiles {
-                        let target = match &p.target {
-                            ProfileTarget::Room => "room".to_string(),
-                            ProfileTarget::Model(m) => format!("model:{}", m),
-                            ProfileTarget::Role(r) => format!("role:{}", r),
-                        };
-                        output.push_str(&format!(
-                            "  {} [{}] (priority {})\r\n",
-                            p.name, target, p.priority
-                        ));
-                        if let Some(ref sp) = p.system_prompt {
-                            let preview = if sp.len() > 50 { &sp[..50] } else { sp };
-                            output.push_str(&format!("    system: {}...\r\n", preview));
-                        }
-                    }
-                }
-
-                // Get role assignments from DB
-                let assignments = match self.state.db.get_role_assignments(&room) {
-                    Ok(a) => a,
-                    Err(e) => return format!("Error loading role assignments: {}", e),
-                };
-
-                if !assignments.is_empty() {
-                    output.push_str("\r\nRole assignments:\r\n");
-                    for (model, roles) in &assignments {
-                        output.push_str(&format!("  @{}: {}\r\n", model, roles.join(", ")));
-                    }
-                }
-
-                if output.is_empty() {
-                    "No profiles or role assignments.\r\n\r\nUsage:\r\n  /profile add <name> --model=X|--role=X|--room \"prompt\"\r\n  /profile remove <name>\r\n  /profile assign <model> <role>\r\n  /profile unassign <model> <role>".to_string()
-                } else {
-                    output
-                }
-            }
-
-            "add" => {
-                // Parse: <name> --model=X|--role=X|--room [--priority=N] "prompt"
-                // Simplified parsing: look for flags and quoted content
-                let rest_parts: Vec<&str> = rest.splitn(2, ' ').collect();
-                let name = rest_parts.first().copied().unwrap_or("");
-                if name.is_empty() {
-                    return "Usage: /profile add <name> --model=X|--role=X|--room \"prompt\"".to_string();
-                }
-
-                let remaining = rest_parts.get(1).copied().unwrap_or("");
-
-                // Parse target and prompt from remaining
-                let mut target = ProfileTarget::Room;
-                let mut priority = 0i32;
-                let mut prompt = String::new();
-
-                // Simple flag parsing
-                let tokens: Vec<&str> = remaining.split_whitespace().collect();
-                let mut i = 0;
-                while i < tokens.len() {
-                    let tok = tokens[i];
-                    if tok.starts_with("--model=") {
-                        target = ProfileTarget::Model(tok.trim_start_matches("--model=").to_string());
-                    } else if tok.starts_with("--role=") {
-                        target = ProfileTarget::Role(tok.trim_start_matches("--role=").to_string());
-                    } else if tok == "--room" {
-                        target = ProfileTarget::Room;
-                    } else if tok.starts_with("--priority=") {
-                        priority = tok.trim_start_matches("--priority=").parse().unwrap_or(0);
-                    } else if tok.starts_with('"') {
-                        // Collect quoted content
-                        let mut quoted = tok.trim_start_matches('"').to_string();
-                        if quoted.ends_with('"') {
-                            quoted = quoted.trim_end_matches('"').to_string();
-                        } else {
-                            // Multi-word quote
-                            i += 1;
-                            while i < tokens.len() {
-                                let t = tokens[i];
-                                quoted.push(' ');
-                                if t.ends_with('"') {
-                                    quoted.push_str(t.trim_end_matches('"'));
-                                    break;
-                                } else {
-                                    quoted.push_str(t);
-                                }
-                                i += 1;
-                            }
-                        }
-                        prompt = quoted;
-                    }
-                    i += 1;
-                }
-
-                if prompt.is_empty() {
-                    return "Usage: /profile add <name> --model=X|--role=X|--room \"prompt\"".to_string();
-                }
-
-                let profile = Profile {
-                    name: name.to_string(),
-                    target,
-                    system_prompt: Some(prompt.clone()),
-                    context_prefix: None,
-                    context_suffix: None,
-                    priority,
-                };
-
-                // Save to DB
-                if let Err(e) = self.state.db.add_profile(&room, &profile) {
-                    return format!("Error saving profile: {}", e);
-                }
-
-                // Update in-memory world
-                {
-                    let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
-                    if let Some(r) = world.rooms.get_mut(&room) {
-                        r.context.profiles.retain(|p| p.name != name);
-                        r.context.profiles.push(profile);
-                        r.context.profiles.sort_by_key(|p| p.priority);
-                    }
-                }
-
-                format!("Added profile '{}'", name)
-            }
-
-            "remove" => {
-                let name = rest.trim();
-                if name.is_empty() {
-                    return "Usage: /profile remove <name>".to_string();
-                }
-
-                match self.state.db.remove_profile(&room, name) {
-                    Ok(true) => {
-                        // Update in-memory
-                        {
-                            let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
-                            if let Some(r) = world.rooms.get_mut(&room) {
-                                r.context.profiles.retain(|p| p.name != name);
-                            }
-                        }
-                        format!("Removed profile '{}'", name)
-                    }
-                    Ok(false) => format!("Profile '{}' not found", name),
-                    Err(e) => format!("Error removing profile: {}", e),
-                }
-            }
-
-            "assign" => {
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                if parts.len() != 2 {
-                    return "Usage: /profile assign <model> <role>".to_string();
-                }
-                let model = parts[0];
-                let role = parts[1];
-
-                if let Err(e) = self.state.db.assign_role(&room, model, role) {
-                    return format!("Error assigning role: {}", e);
-                }
-
-                // Update in-memory
-                {
-                    let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
-                    if let Some(r) = world.rooms.get_mut(&room) {
-                        r.context.role_assignments
-                            .entry(model.to_string())
-                            .or_default()
-                            .push(role.to_string());
-                    }
-                }
-
-                format!("Assigned role '{}' to @{}", role, model)
-            }
-
-            "unassign" => {
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                if parts.len() != 2 {
-                    return "Usage: /profile unassign <model> <role>".to_string();
-                }
-                let model = parts[0];
-                let role = parts[1];
-
-                match self.state.db.unassign_role(&room, model, role) {
-                    Ok(true) => {
-                        // Update in-memory
-                        {
-                            let mut world = tokio::task::block_in_place(|| self.state.world.blocking_write());
-                            if let Some(r) = world.rooms.get_mut(&room) {
-                                if let Some(roles) = r.context.role_assignments.get_mut(model) {
-                                    roles.retain(|r| r != role);
-                                }
-                            }
-                        }
-                        format!("Unassigned role '{}' from @{}", role, model)
-                    }
-                    Ok(false) => format!("@{} doesn't have role '{}'", model, role),
-                    Err(e) => format!("Error unassigning role: {}", e),
-                }
-            }
-
-            _ => format!(
-                "Unknown profile command: {}. Try: list, add, remove, assign, unassign",
-                subcmd
-            ),
+        // Check for subcommands first
+        if args.starts_with("list") {
+            return self.cmd_prompt_list(&room).await;
         }
+
+        if args.starts_with("delete ") {
+            let name = args.trim_start_matches("delete ").trim();
+            return self.cmd_prompt_delete(&room, name).await;
+        }
+
+        if args.starts_with("push ") {
+            let rest = args.trim_start_matches("push ").trim();
+            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+            if parts.len() < 2 {
+                return "Usage: /prompt push <target> <prompt_name>".to_string();
+            }
+            return self.cmd_prompt_push(&room, parts[0], parts[1]).await;
+        }
+
+        if args.starts_with("pop ") {
+            let target = args.trim_start_matches("pop ").trim();
+            return self.cmd_prompt_pop(&room, target).await;
+        }
+
+        if args.starts_with("rm ") {
+            let rest = args.trim_start_matches("rm ").trim();
+            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+            if parts.len() < 2 {
+                return "Usage: /prompt rm <target> <slot_index>".to_string();
+            }
+            let index: i64 = match parts[1].parse() {
+                Ok(i) => i,
+                Err(_) => return format!("Invalid slot index: {}", parts[1]),
+            };
+            return self.cmd_prompt_rm(&room, parts[0], index).await;
+        }
+
+        if args.starts_with("insert ") {
+            let rest = args.trim_start_matches("insert ").trim();
+            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            if parts.len() < 3 {
+                return "Usage: /prompt insert <target> <slot_index> <prompt_name>".to_string();
+            }
+            let index: i64 = match parts[1].parse() {
+                Ok(i) => i,
+                Err(_) => return format!("Invalid slot index: {}", parts[1]),
+            };
+            return self.cmd_prompt_insert(&room, parts[0], index, parts[2]).await;
+        }
+
+        if args.starts_with("show ") {
+            let name_or_target = args.trim_start_matches("show ").trim();
+            return self.cmd_prompt_show(&room, name_or_target).await;
+        }
+
+        // Default: create/update a prompt
+        // Format: /prompt <name> "<text>"
+        if args.is_empty() {
+            return self.cmd_prompt_list(&room).await;
+        }
+
+        // Parse: <name> "<text>" or <name> <text>
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        let name = parts[0];
+        let content = parts.get(1).copied().unwrap_or("");
+
+        if content.is_empty() {
+            // Could be just a name - show it
+            return self.cmd_prompt_show(&room, name).await;
+        }
+
+        // Strip surrounding quotes if present
+        let content = content.trim();
+        let content = if content.starts_with('"') && content.ends_with('"') && content.len() > 1 {
+            &content[1..content.len()-1]
+        } else {
+            content
+        };
+
+        self.cmd_prompt_set(&room, name, content, &username).await
+    }
+
+    async fn cmd_prompt_list(&self, room: &str) -> String {
+        let prompts = match self.state.db.list_prompts(room) {
+            Ok(p) => p,
+            Err(e) => return format!("Error loading prompts: {}", e),
+        };
+
+        let targets = match self.state.db.list_targets_with_slots(room) {
+            Ok(t) => t,
+            Err(e) => return format!("Error loading targets: {}", e),
+        };
+
+        if prompts.is_empty() && targets.is_empty() {
+            return "No prompts defined.\r\n\r\nUsage:\r\n  /prompt <name> \"<text>\"        Create a named prompt\r\n  /prompt push <target> <name>   Add prompt to target's slots\r\n  /prompt show <name|target>     Show prompt or target slots\r\n  /prompt delete <name>          Delete a prompt".to_string();
+        }
+
+        let mut output = String::new();
+
+        if !prompts.is_empty() {
+            output.push_str("Prompts:\r\n");
+            for p in &prompts {
+                let preview = if p.content.len() > 50 {
+                    format!("{}...", &p.content[..50])
+                } else {
+                    p.content.clone()
+                };
+                output.push_str(&format!("  {} → \"{}\"\r\n", p.name, preview));
+            }
+        }
+
+        if !targets.is_empty() {
+            if !output.is_empty() {
+                output.push_str("\r\n");
+            }
+            output.push_str("Targets:\r\n");
+            for (target, target_type) in &targets {
+                let slots = match self.state.db.get_target_slots(room, target) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let slot_names: Vec<_> = slots.iter().map(|s| s.prompt_name.as_str()).collect();
+                output.push_str(&format!(
+                    "  {} ({}): [{}]\r\n",
+                    target,
+                    target_type,
+                    slot_names.join(", ")
+                ));
+            }
+        }
+
+        output
+    }
+
+    async fn cmd_prompt_set(&self, room: &str, name: &str, content: &str, created_by: &str) -> String {
+        if let Err(e) = self.state.db.set_prompt(room, name, content, created_by) {
+            return format!("Error saving prompt: {}", e);
+        }
+
+        format!("Prompt '{}' set: \"{}\"", name, content)
+    }
+
+    async fn cmd_prompt_delete(&self, room: &str, name: &str) -> String {
+        match self.state.db.delete_prompt(room, name) {
+            Ok(true) => format!("Deleted prompt '{}' (and removed from all targets)", name),
+            Ok(false) => format!("Prompt '{}' not found", name),
+            Err(e) => format!("Error deleting prompt: {}", e),
+        }
+    }
+
+    async fn cmd_prompt_show(&self, room: &str, name_or_target: &str) -> String {
+        // First try to find as a prompt
+        if let Ok(Some(prompt)) = self.state.db.get_prompt(room, name_or_target) {
+            return format!(
+                "Prompt '{}':\r\n  \"{}\"\r\n  Created by: {}",
+                prompt.name,
+                prompt.content,
+                prompt.created_by.unwrap_or_else(|| "unknown".to_string())
+            );
+        }
+
+        // Try as a target
+        let slots = match self.state.db.get_target_slots(room, name_or_target) {
+            Ok(s) => s,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        if slots.is_empty() {
+            return format!("No prompt or target named '{}'", name_or_target);
+        }
+
+        let mut output = format!("Target '{}':\r\n", name_or_target);
+        for slot in &slots {
+            let content_preview = match &slot.content {
+                Some(c) if c.len() > 50 => format!("\"{}...\"", &c[..50]),
+                Some(c) => format!("\"{}\"", c),
+                None => "(prompt deleted)".to_string(),
+            };
+            output.push_str(&format!(
+                "  [{}] {} → {}\r\n",
+                slot.index, slot.prompt_name, content_preview
+            ));
+        }
+
+        output
+    }
+
+    async fn cmd_prompt_push(&self, room: &str, target: &str, prompt_name: &str) -> String {
+        // Verify prompt exists
+        match self.state.db.get_prompt(room, prompt_name) {
+            Ok(Some(_)) => {}
+            Ok(None) => return format!("Prompt '{}' not found. Create it first with: /prompt {} \"<text>\"", prompt_name, prompt_name),
+            Err(e) => return format!("Error: {}", e),
+        }
+
+        // Determine target type
+        let target_type = self.determine_target_type(target).await;
+
+        if let Err(e) = self.state.db.push_slot(room, target, &target_type, prompt_name) {
+            return format!("Error adding slot: {}", e);
+        }
+
+        // Get current slot count
+        let slots = self.state.db.get_target_slots(room, target).unwrap_or_default();
+        format!("Added '{}' to {} ({} total slots)", prompt_name, target, slots.len())
+    }
+
+    async fn cmd_prompt_pop(&self, room: &str, target: &str) -> String {
+        match self.state.db.pop_slot(room, target) {
+            Ok(true) => format!("Removed last slot from '{}'", target),
+            Ok(false) => format!("'{}' has no slots to remove", target),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    async fn cmd_prompt_rm(&self, room: &str, target: &str, index: i64) -> String {
+        match self.state.db.rm_slot(room, target, index) {
+            Ok(true) => format!("Removed slot {} from '{}'", index, target),
+            Ok(false) => format!("'{}' has no slot at index {}", target, index),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    async fn cmd_prompt_insert(&self, room: &str, target: &str, index: i64, prompt_name: &str) -> String {
+        // Verify prompt exists
+        match self.state.db.get_prompt(room, prompt_name) {
+            Ok(Some(_)) => {}
+            Ok(None) => return format!("Prompt '{}' not found", prompt_name),
+            Err(e) => return format!("Error: {}", e),
+        }
+
+        // Determine target type
+        let target_type = self.determine_target_type(target).await;
+
+        if let Err(e) = self.state.db.insert_slot(room, target, &target_type, index, prompt_name) {
+            return format!("Error inserting slot: {}", e);
+        }
+
+        format!("Inserted '{}' at slot {} for '{}'", prompt_name, index, target)
+    }
+
+    /// Determine if a target is a model or user
+    async fn determine_target_type(&self, target: &str) -> String {
+        // Check if it's a known model
+        if self.state.models.get(target).is_some() {
+            return "model".to_string();
+        }
+
+        // Check connected users in world
+        let world = self.state.world.read().await;
+        for room in world.rooms.values() {
+            if room.users.contains(&target.to_string()) {
+                return "user".to_string();
+            }
+        }
+
+        // Default to user (could also check DB users table)
+        "user".to_string()
     }
 }

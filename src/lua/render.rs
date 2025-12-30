@@ -27,6 +27,30 @@ use std::fmt::Write;
 /// Number of rows expected from Lua HUD renderer
 pub const HUD_ROWS: usize = 8;
 
+/// Parse Lua segment rows to ANSI string (variable row count).
+///
+/// Unlike `parse_lua_output` which expects exactly 8 rows for the HUD,
+/// this function handles any number of rows. Used for /look command output.
+///
+/// Returns lines joined by CRLF.
+pub fn parse_lua_rows(lua_result: Table) -> Result<String, anyhow::Error> {
+    let mut rows = Vec::new();
+
+    // Iterate until we hit a nil/missing row
+    for i in 1i32.. {
+        let row_result: Result<Table, _> = lua_result.get(i);
+        match row_result {
+            Ok(row) => {
+                let line = parse_row(row)?;
+                rows.push(line);
+            }
+            Err(_) => break,
+        }
+    }
+
+    Ok(rows.join("\r\n"))
+}
+
 /// Parse Lua render output to ANSI string.
 ///
 /// Returns 8 lines joined by CRLF (no trailing CRLF on the last line).

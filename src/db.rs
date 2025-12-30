@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction};
-use crate::world::{AssetBinding, Inspiration, JournalEntry, JournalKind, Profile, ProfileTarget};
+use crate::world::{AssetBinding, Inspiration, JournalEntry, JournalKind};
 
 /// Database handle (thread-safe via Mutex)
 pub struct Database {
@@ -152,28 +152,29 @@ impl Database {
                 FOREIGN KEY (room) REFERENCES rooms(name)
             );
 
-            -- Profiles for customizing model behavior
-            CREATE TABLE IF NOT EXISTS room_profiles (
+            -- Named prompts (simple name → text mapping)
+            CREATE TABLE IF NOT EXISTS room_prompts (
                 room TEXT NOT NULL,
                 name TEXT NOT NULL,
-                target_type TEXT NOT NULL,
-                target_value TEXT,
-                system_prompt TEXT,
-                context_prefix TEXT,
-                context_suffix TEXT,
-                priority INTEGER NOT NULL DEFAULT 0,
+                content TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT,
                 PRIMARY KEY (room, name),
                 FOREIGN KEY (room) REFERENCES rooms(name)
             );
 
-            -- Role assignments: which models have which roles
-            CREATE TABLE IF NOT EXISTS room_role_assignments (
+            -- Target slots (ordered references to prompts)
+            CREATE TABLE IF NOT EXISTS room_target_slots (
                 room TEXT NOT NULL,
-                model_handle TEXT NOT NULL,
-                role_name TEXT NOT NULL,
-                PRIMARY KEY (room, model_handle, role_name),
-                FOREIGN KEY (room) REFERENCES rooms(name)
+                target TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                slot_index INTEGER NOT NULL,
+                prompt_name TEXT NOT NULL,
+                PRIMARY KEY (room, target, slot_index),
+                FOREIGN KEY (room) REFERENCES rooms(name),
+                FOREIGN KEY (room, prompt_name) REFERENCES room_prompts(room, name)
             );
+            CREATE INDEX IF NOT EXISTS idx_target_slots_room ON room_target_slots(room);
 
             -- Ledger entries (replaces messages table)
             CREATE TABLE IF NOT EXISTS ledger_entries (
@@ -1073,134 +1074,206 @@ impl Database {
     }
 
     // =========================================================================
-    // Profiles
+    // Prompts
     // =========================================================================
 
-    /// Add or update a profile in a room
-    pub fn add_profile(&self, room: &str, profile: &Profile) -> Result<()> {
-        let (target_type, target_value) = match &profile.target {
-            ProfileTarget::Model(m) => ("model", Some(m.as_str())),
-            ProfileTarget::Role(r) => ("role", Some(r.as_str())),
-            ProfileTarget::Room => ("room", None),
-        };
-
+    /// Create or update a named prompt
+    pub fn set_prompt(&self, room: &str, name: &str, content: &str, created_by: &str) -> Result<()> {
+        let timestamp = Utc::now().to_rfc3339();
         self.conn.lock().unwrap().execute(
-            "INSERT INTO room_profiles (room, name, target_type, target_value, system_prompt, context_prefix, context_suffix, priority)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(room, name) DO UPDATE SET
-                target_type = ?3, target_value = ?4, system_prompt = ?5,
-                context_prefix = ?6, context_suffix = ?7, priority = ?8",
-            params![
-                room,
-                profile.name,
-                target_type,
-                target_value,
-                profile.system_prompt,
-                profile.context_prefix,
-                profile.context_suffix,
-                profile.priority,
-            ],
+            "INSERT INTO room_prompts (room, name, content, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(room, name) DO UPDATE SET content = ?3, created_by = ?4, created_at = ?5",
+            params![room, name, content, created_by, timestamp],
         )?;
         Ok(())
     }
 
-    /// Remove a profile from a room
-    pub fn remove_profile(&self, room: &str, name: &str) -> Result<bool> {
-        let count = self.conn.lock().unwrap().execute(
-            "DELETE FROM room_profiles WHERE room = ?1 AND name = ?2",
+    /// Delete a named prompt (also removes all slot references)
+    pub fn delete_prompt(&self, room: &str, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+
+        // First remove all slot references to this prompt
+        conn.execute(
+            "DELETE FROM room_target_slots WHERE room = ?1 AND prompt_name = ?2",
             params![room, name],
         )?;
+
+        // Then delete the prompt
+        let count = conn.execute(
+            "DELETE FROM room_prompts WHERE room = ?1 AND name = ?2",
+            params![room, name],
+        )?;
+
         Ok(count > 0)
     }
 
-    /// Get all profiles for a room
-    pub fn get_profiles(&self, room: &str) -> Result<Vec<Profile>> {
+    /// Get a single prompt's content
+    pub fn get_prompt(&self, room: &str, name: &str) -> Result<Option<PromptInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT name, target_type, target_value, system_prompt, context_prefix, context_suffix, priority
-             FROM room_profiles WHERE room = ?1 ORDER BY priority",
+            "SELECT name, content, created_by, created_at FROM room_prompts WHERE room = ?1 AND name = ?2",
+        )?;
+        let mut rows = stmt.query(params![room, name])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(PromptInfo {
+                name: row.get(0)?,
+                content: row.get(1)?,
+                created_by: row.get(2)?,
+                created_at: row.get(3)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List all prompts in a room
+    pub fn list_prompts(&self, room: &str) -> Result<Vec<PromptInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, content, created_by, created_at FROM room_prompts WHERE room = ?1 ORDER BY name",
         )?;
 
-        let mut profiles = Vec::new();
+        let mut prompts = Vec::new();
         let mut rows = stmt.query(params![room])?;
 
         while let Some(row) = rows.next()? {
-            let target_type: String = row.get(1)?;
-            let target_value: Option<String> = row.get(2)?;
-
-            let target = match target_type.as_str() {
-                "model" => ProfileTarget::Model(target_value.unwrap_or_default()),
-                "role" => ProfileTarget::Role(target_value.unwrap_or_default()),
-                "room" => ProfileTarget::Room,
-                _ => continue, // Skip invalid entries
-            };
-
-            profiles.push(Profile {
+            prompts.push(PromptInfo {
                 name: row.get(0)?,
-                target,
-                system_prompt: row.get(3)?,
-                context_prefix: row.get(4)?,
-                context_suffix: row.get(5)?,
-                priority: row.get(6)?,
+                content: row.get(1)?,
+                created_by: row.get(2)?,
+                created_at: row.get(3)?,
             });
         }
 
-        Ok(profiles)
+        Ok(prompts)
     }
 
-    /// Assign a role to a model in a room
-    pub fn assign_role(&self, room: &str, model_handle: &str, role_name: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "INSERT OR IGNORE INTO room_role_assignments (room, model_handle, role_name)
-             VALUES (?1, ?2, ?3)",
-            params![room, model_handle, role_name],
+    /// Push a prompt reference to a target's slot list
+    pub fn push_slot(&self, room: &str, target: &str, target_type: &str, prompt_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Get current max slot_index for this target
+        let max_index: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(slot_index), -1) FROM room_target_slots WHERE room = ?1 AND target = ?2",
+                params![room, target],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+
+        conn.execute(
+            "INSERT INTO room_target_slots (room, target, target_type, slot_index, prompt_name)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![room, target, target_type, max_index + 1, prompt_name],
         )?;
+
         Ok(())
     }
 
-    /// Unassign a role from a model in a room
-    pub fn unassign_role(&self, room: &str, model_handle: &str, role_name: &str) -> Result<bool> {
-        let count = self.conn.lock().unwrap().execute(
-            "DELETE FROM room_role_assignments WHERE room = ?1 AND model_handle = ?2 AND role_name = ?3",
-            params![room, model_handle, role_name],
+    /// Pop the last slot from a target
+    pub fn pop_slot(&self, room: &str, target: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+
+        // Find and delete the slot with max index
+        let count = conn.execute(
+            "DELETE FROM room_target_slots
+             WHERE room = ?1 AND target = ?2 AND slot_index = (
+                 SELECT MAX(slot_index) FROM room_target_slots WHERE room = ?1 AND target = ?2
+             )",
+            params![room, target],
         )?;
+
         Ok(count > 0)
     }
 
-    /// Get all role assignments for a room (model_handle -> [role_names])
-    pub fn get_role_assignments(&self, room: &str) -> Result<HashMap<String, Vec<String>>> {
+    /// Remove a specific slot by index (reindexes remaining slots)
+    pub fn rm_slot(&self, room: &str, target: &str, index: i64) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT model_handle, role_name FROM room_role_assignments WHERE room = ?1",
+
+        // Delete the slot
+        let count = conn.execute(
+            "DELETE FROM room_target_slots WHERE room = ?1 AND target = ?2 AND slot_index = ?3",
+            params![room, target, index],
         )?;
 
-        let mut assignments: HashMap<String, Vec<String>> = HashMap::new();
+        if count == 0 {
+            return Ok(false);
+        }
+
+        // Reindex remaining slots (shift down)
+        conn.execute(
+            "UPDATE room_target_slots SET slot_index = slot_index - 1
+             WHERE room = ?1 AND target = ?2 AND slot_index > ?3",
+            params![room, target, index],
+        )?;
+
+        Ok(true)
+    }
+
+    /// Insert a slot at a specific index (shifts existing slots up)
+    pub fn insert_slot(&self, room: &str, target: &str, target_type: &str, index: i64, prompt_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Shift existing slots up
+        conn.execute(
+            "UPDATE room_target_slots SET slot_index = slot_index + 1
+             WHERE room = ?1 AND target = ?2 AND slot_index >= ?3",
+            params![room, target, index],
+        )?;
+
+        // Insert new slot
+        conn.execute(
+            "INSERT INTO room_target_slots (room, target, target_type, slot_index, prompt_name)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![room, target, target_type, index, prompt_name],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get all slots for a target with resolved prompt content
+    pub fn get_target_slots(&self, room: &str, target: &str) -> Result<Vec<TargetSlot>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts.slot_index, ts.prompt_name, ts.target_type, p.content
+             FROM room_target_slots ts
+             LEFT JOIN room_prompts p ON ts.room = p.room AND ts.prompt_name = p.name
+             WHERE ts.room = ?1 AND ts.target = ?2
+             ORDER BY ts.slot_index",
+        )?;
+
+        let mut slots = Vec::new();
+        let mut rows = stmt.query(params![room, target])?;
+
+        while let Some(row) = rows.next()? {
+            slots.push(TargetSlot {
+                index: row.get(0)?,
+                prompt_name: row.get(1)?,
+                target_type: row.get(2)?,
+                content: row.get(3)?, // May be None if prompt was deleted
+            });
+        }
+
+        Ok(slots)
+    }
+
+    /// Get all targets that have slots assigned in a room
+    pub fn list_targets_with_slots(&self, room: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT target, target_type FROM room_target_slots WHERE room = ?1 ORDER BY target",
+        )?;
+
+        let mut targets = Vec::new();
         let mut rows = stmt.query(params![room])?;
 
         while let Some(row) = rows.next()? {
-            let model: String = row.get(0)?;
-            let role: String = row.get(1)?;
-            assignments.entry(model).or_default().push(role);
+            targets.push((row.get(0)?, row.get(1)?));
         }
 
-        Ok(assignments)
-    }
-
-    /// Get roles assigned to a specific model in a room
-    pub fn get_model_roles(&self, room: &str, model_handle: &str) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT role_name FROM room_role_assignments WHERE room = ?1 AND model_handle = ?2",
-        )?;
-
-        let mut roles = Vec::new();
-        let mut rows = stmt.query(params![room, model_handle])?;
-
-        while let Some(row) = rows.next()? {
-            roles.push(row.get(0)?);
-        }
-
-        Ok(roles)
+        Ok(targets)
     }
 }
 
@@ -1240,6 +1313,24 @@ pub struct RoomInfo {
     pub name: String,
     pub description: Option<String>,
     pub created_at: String,
+}
+
+/// Prompt info from the database
+#[derive(Debug, Clone)]
+pub struct PromptInfo {
+    pub name: String,
+    pub content: String,
+    pub created_by: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Target slot with resolved prompt content
+#[derive(Debug, Clone)]
+pub struct TargetSlot {
+    pub index: i64,
+    pub prompt_name: String,
+    pub target_type: String,
+    pub content: Option<String>, // None if prompt was deleted
 }
 
 #[cfg(test)]
