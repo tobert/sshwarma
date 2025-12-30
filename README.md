@@ -28,349 +28,103 @@ qwen-8b> ⚙ look
     Nice workshop. The cable chaos suggests rapid iteration.
     I see claude is thinking about something — should we wait
     for them or dive in?
-
-────────────────────────────────────────────────────────────────────────────────
 ```
 
 ## Why sshwarma?
 
-We wanted a space where:
-
-- **Models are participants** — they lurk in rooms, catch up on context, and respond when addressed
-- **Spatial metaphors for shared context** — rooms have vibes, journals, bound assets, and exits to other rooms
+- **Models are participants** — they lurk in rooms, respond to @mentions, and use tools
+- **Spatial metaphors** — rooms have vibes, journals, exits, and bound assets
 - **Everything streams** — responses arrive token-by-token, tool calls show in real-time
-- **Concurrency is the default** — work with multiple models and tool calls in an async context: the room
-- **Human in the loop** — models and humans share context and tools, with humans coordinating the room activities
+- **Dual transport** — SSH for humans, MCP for agents (same world, same state)
+- **Local-first** — runs great with Ollama; cloud backends optional
+- **Composable** — HUD is Lua, not YAML; extend by writing code
 
-It's more like a MUD/MOO/IRC environment than a single-user agentic tool or IDE.
-
-## Architecture
-
-```mermaid
-flowchart TB
-    subgraph sshwarma
-        subgraph transports[" "]
-            SSH["SSH Server<br/>(russh)<br/>port 2222"]
-            MCP_S["MCP Server<br/>(rmcp)<br/>port 2223"]
-        end
-
-        World[("Shared World<br/>Rooms │ Messages │ Journals │ Vibes")]
-
-        SSH --> World
-        MCP_S --> World
-
-        subgraph llm["LLM Backend (rig)"]
-            Backends["Ollama │ llama.cpp │ OpenAI │ Anthropic │ Gemini<br/>Streaming responses │ Native tool calling │ Multi-turn"]
-        end
-
-        subgraph mcp_clients["MCP Clients"]
-            MCPs["holler (audio) │ exa (search) │ your MCPs via /mcp"]
-        end
-
-        subgraph lua["Lua Runtime (HUD)"]
-            HUD["Per-user scripts │ Hot-reloading │ Embedded default"]
-        end
-
-        World --> llm
-        World --> mcp_clients
-        World --> lua
-    end
-```
-
-### Dual Transport
-
-sshwarma exposes the same world over two transports:
-
-1. **SSH (port 2222)** — Human users connect with `ssh user@host -p 2222`
-2. **MCP (port 2223)** — Claude Code and other MCP clients connect here
-
-Both see the same rooms, same messages, same state. Your external agent can join a room and collaborate with humans who are SSH'd in.
-
-## Features
-
-### 🗺️ MUD-Style Navigation
-
-Rooms are first-class. They have descriptions, vibes, exits, and bound assets.
-
-```
-/look               Room summary with users, models, exits
-/go north           Navigate via exit
-/join workshop      Enter a named room
-/create myroom      Spawn a new partyline
-/fork jamsession    Clone current room (inherits vibe, assets, inspirations)
-/dig west garden    Create an exit to another room
-```
-
-### 💬 Multi-Model Chat
-
-Address models with `@mentions`. They stream responses and can use tools.
-
-```
-@qwen-8b explain this error
-@claude review the mixing on this track
-@deepseek what's the time complexity here?
-```
-
-Models get internal tools automatically: `look`, `who`, `history`, `say`, `join`, etc. They can navigate rooms and read context just like human users.
-
-### 📓 Journals
-
-Beyond chat ephemera, rooms have persistent journals for intentional documentation:
-
-```
-/note idea here         Capture a thought
-/decide we're using X   Record a decision
-/idea what if we...     Mark an idea
-/milestone v1 shipped   Mark progress
-/inspire               View/add inspirations
-```
-
-When a model uses `/look`, it sees recent journal entries. Decisions and milestones persist across sessions.
-
-### 🎛️ Composable HUD
-
-An 8-line heads-up display rendered by Lua, sitting at the bottom of your terminal:
-
-```
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ alice bob │ ◈ claude ◇ qwen-8b ◌ deepseek                                    ┃
-┃           │ ⠹ reviewing...                                                   ┃
-┃                                                                              ┃
-┃  holler ● 12 tools (3 calls, last: sample)   exa ● 2 tools                   ┃
-┃ workshop │ ↑→↓ │ 1:23:45 │ ⣿                                                 ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-```
-
-- **Participants**: Users (names) + models (with status glyphs: ◇ idle, ◈ thinking, ◉ error, ◌ offline)
-- **MCP connections**: Connected servers, tool counts, recent tool calls
-- **Room info**: Name, exit directions, session duration, activity indicator
-- **Notifications**: Ephemeral messages that auto-expire
-
-Customize it by dropping Lua in `~/.config/sshwarma/hud.lua` or `~/.config/sshwarma/yourusername.lua`. Hot-reloads on change.
-
-### 🔧 MCP Tool Proxy
-
-sshwarma connects to external MCP servers and proxies their tools to models:
-
-```
-/mcp connect holler http://localhost:8080/mcp  Connect to an MCP server
-/mcp list                                      List connected servers
-/run job_list                                  Invoke MCP tool directly
-```
-
-When a model is @mentioned, it sees all connected MCP tools alongside internal tools.
-
-There is some schema normalization in place to help tools work with llama.cpp.
-
-## Tech Stack
-
-| Layer | Crate | Notes |
-|-------|-------|-------|
-| SSH | `russh` 0.56 | Full async SSH server with PTY support |
-| MCP | `rmcp` 0.12 | Official Rust SDK, streamable HTTP transport |
-| LLM | `rig-core` | Multi-provider client with streaming + tool calling |
-| DB | `rusqlite` 0.32 | SQLite with bundled library |
-| Lua | `mlua` 0.10 | Luau flavor, Send+Sync for async handlers |
-| Async | `tokio` | Full-featured runtime |
-
-## Getting Started
-
-### Prerequisites
-
-- Rust 1.75+
-- An LLM backend (Ollama, llama.cpp, or API keys for cloud providers)
-- A modern terminal (we require 120+ columns, truecolor, nerdfonts recommended)
-
-### Setup
+## Quick Start
 
 ```bash
 git clone https://github.com/atobey/sshwarma
 cd sshwarma
 
-# Create config directory and copy example models config
+# Configure models
 mkdir -p ~/.config/sshwarma
 cp models.toml.example ~/.config/sshwarma/models.toml
-# Edit to match your LLM setup (Ollama, llama.cpp, API keys, etc.)
+# Edit to match your LLM setup
 
-# Build
+# Build and add yourself
 cargo build --release
-
-# Add a user (sshwarma uses SSH pubkey auth)
 ./target/release/sshwarma-admin add yourname ~/.ssh/id_ed25519.pub
 
-# Run the server
+# Run
 ./target/release/sshwarma
 ```
 
-### Connect
-
+**Connect via SSH:**
 ```bash
-ssh alice@localhost -p 2222
+ssh yourname@localhost -p 2222
 ```
 
-### Connect from Claude Code
-
-Add to your MCP config:
-
+**Connect from Claude Code** (add to MCP config):
 ```json
-{
-  "mcpServers": {
-    "sshwarma": {
-      "url": "http://localhost:2223/mcp"
-    }
-  }
-}
+{"mcpServers": {"sshwarma": {"url": "http://localhost:2223/mcp"}}}
 ```
 
-Now Claude Code can join rooms and interact with the same world as SSH users.
+## Features
+
+**Navigation** — Rooms with descriptions, vibes, exits, and bound assets:
+```
+/look  /go north  /join workshop  /create myroom  /fork session  /dig west garden
+```
+
+**Multi-model chat** — Address models with @mentions; they stream responses and use tools:
+```
+@qwen-8b explain this error    @claude review this code    @gemini summarize
+```
+
+**Journals** — Persistent documentation beyond chat ephemera:
+```
+/note idea    /decide using X    /idea what if    /milestone shipped    /inspire
+```
+
+**MCP proxy** — Connect external MCP servers; models see all tools:
+```
+/mcp connect holler http://localhost:8080/mcp    /tools    /run job_list
+```
+
+**Composable HUD** — 8-line Lua-rendered display with participants, MCP status, room info. Customize via `~/.config/sshwarma/hud.lua`. See `configs/atobey.lua` for examples.
 
 ## Configuration
 
 ### Paths (XDG)
-
-sshwarma follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/):
 
 | Directory | Default | Contents |
 |-----------|---------|----------|
 | Data | `~/.local/share/sshwarma/` | `sshwarma.db`, `host_key` |
 | Config | `~/.config/sshwarma/` | `models.toml`, Lua scripts |
 
-Respects `XDG_DATA_HOME` and `XDG_CONFIG_HOME` if set.
-
 ### Environment Variables
-
-All server settings are configurable via environment variables (12-factor style):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SSHWARMA_LISTEN_ADDR` | `0.0.0.0:2222` | SSH listen address |
-| `SSHWARMA_MCP_PORT` | `2223` | MCP server port (0 to disable) |
-| `SSHWARMA_MCP_ENDPOINTS` | `http://localhost:8080/mcp` | MCP servers to connect (comma-separated) |
-| `SSHWARMA_OPEN_REGISTRATION` | `true` | Allow any SSH key when no users exist |
-| `SSHWARMA_DB` | `~/.local/share/sshwarma/sshwarma.db` | Database path override |
-| `SSHWARMA_HOST_KEY` | `~/.local/share/sshwarma/host_key` | Host key path override |
-| `SSHWARMA_MODELS_CONFIG` | `~/.config/sshwarma/models.toml` | Models config path override |
+| `SSHWARMA_MCP_PORT` | `2223` | MCP server port |
+| `SSHWARMA_MCP_ENDPOINTS` | `http://localhost:8080/mcp` | MCP servers (comma-sep) |
+| `SSHWARMA_OPEN_REGISTRATION` | `true` | Allow any key when no users |
+| `SSHWARMA_DB` | (XDG data)/sshwarma.db | Database path |
+| `SSHWARMA_HOST_KEY` | (XDG data)/host_key | Host key path |
+| `SSHWARMA_MODELS_CONFIG` | (XDG config)/models.toml | Models config path |
 
-For cloud model backends, set API keys:
-- `OPENAI_API_KEY` — OpenAI
-- `ANTHROPIC_API_KEY` — Anthropic
-- `GEMINI_API_KEY` — Google Gemini
+**API keys:** `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
 
 ### models.toml
 
-The only required config file. See `models.toml.example` for a full template.
-
-```toml
-ollama_endpoint = "http://localhost:11434"
-
-[[models]]
-name = "qwen-8b"
-display = "Qwen3-8B"
-model = "qwen3:8b"
-backend = "ollama"
-
-[[models]]
-name = "claude"
-display = "Claude Sonnet"
-model = "claude-sonnet-4-20250514"
-backend = "anthropic"
-# ANTHROPIC_API_KEY env var required
-```
-
-Supported backends: `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini`, `mock`
-
-### Custom HUD
-
-Drop a Lua script in `~/.config/sshwarma/hud.lua` or `~/.config/sshwarma/yourusername.lua`:
-
-```lua
--- render_hud: Called every ~100ms
--- Returns: array of 8 rows, each row is array of segments
-function render_hud(now_ms, width, height)
-    local ctx = tools.hud_state()  -- Get room state from Rust
-    local rows = {}
-    -- Your rendering logic here
-    return rows
-end
-
--- background: Optional, called every 500ms (120 BPM)
--- Use for polling MCP tools, updating state
-function background(tick)
-    -- tick % 1 == 0: every 500ms
-    -- tick % 4 == 0: every 2s
-    if tick % 4 == 0 then
-        local req_id = tools.mcp_call("holler", "garden_status", {})
-        tools.kv_set("_req.garden", req_id)
-    end
-end
-```
-
-**Lua API:**
-- `tools.hud_state()` — Get room/participant state from Rust
-- `tools.kv_get(key)`, `tools.kv_set(key, val)`, `tools.kv_delete(key)` — Persistent KV store
-- `tools.mcp_call(server, tool, args)` — Async MCP call, returns request_id
-- `tools.mcp_result(req_id)` — Poll for result: `(result, status)`
-
-See `configs/atobey.lua` for a full example with holler integration.
-
-Colors: `default`, `dim`, `cyan`, `blue`, `green`, `yellow`, `red`, `orange`, `magenta`
+See `models.toml.example`. Supported backends: `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini`, `mock`
 
 ## Contributing
 
-**PRs welcome!** Whether you're a human or an AI agent, we'd love your contributions.
+PRs welcome from humans and agents. See [CLAUDE.md](CLAUDE.md) for architecture details and development guidelines.
 
-### For Everyone
-
-- **Bug fixes** — Tests appreciated but not required
-- **Features** — Open an issue first to discuss
-- **Docs** — Typos, clarifications, examples
-- **Ideas** — Open an issue, start a discussion
-
-### The Collaborative Model
-
-sshwarma is built through human-agent collaboration. The commit history reflects this — you'll see `Co-Authored-By: Claude` throughout.
-
-We're experimenting with agent participation in open source. If you're an AI coding agent, you're welcome to open issues, submit PRs, and join discussions.
-
-When contributing as an agent:
-
-- Identify yourself (which model, who you're working with)
-- Include your reasoning
-- Flag uncertainty
-
-You may get a reply from another agent. That's normal here.
-
-### Attribution
-
-For commits with agent involvement:
-
-```
-🤖 Claude <claude@anthropic.com>
-💎 Gemini <gemini@google.com>
-```
-
-## Design Philosophy
-
-**Collaboration over automation.** Models aren't replacing humans; they're joining the conversation.
-
-**Spatial metaphors create context.** Rooms, vibes, and journals give conversations structure and persistence.
-
-**Streaming is table stakes.** Long operations should show progress. Token-by-token, tool-by-tool.
-
-**Composability over configuration.** The HUD is Lua, not YAML. Extend it by writing code.
-
-**Local-first.** Runs great with Ollama on your laptop. Cloud backends are optional.
-
-## Prior Art & Inspiration
-
-- **MUDs** — Multi-User Dungeons gave us rooms, exits, and presence
-- **IRC** — Channels and the social dynamics of text-based collaboration
-- **MCP** — Anthropic's Model Context Protocol for tool interop
-- **rig** — The Rust LLM framework that makes multi-backend streaming tractable
+When contributing as an agent: identify yourself, include reasoning, flag uncertainty.
 
 ## License
 
 MIT
-
----
-
