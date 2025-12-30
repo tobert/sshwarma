@@ -399,9 +399,19 @@ impl LuaRuntime {
                 let world =
                     tokio::task::block_in_place(|| wrap_state.shared_state.world.blocking_read());
                 if let Some(room) = world.get_room(room_name) {
-                    hud.vibe = room.context.vibe.clone();
+                    // Vibe and exits are stored in DB, not always in memory
+                    hud.vibe = wrap_state
+                        .shared_state
+                        .db
+                        .get_vibe(room_name)
+                        .ok()
+                        .flatten();
+                    hud.exits = wrap_state
+                        .shared_state
+                        .db
+                        .get_exits(room_name)
+                        .unwrap_or_default();
                     hud.description = room.description.clone();
-                    hud.exits = room.context.exits.clone();
 
                     // Build participants list
                     let users: Vec<String> = room.users.iter().cloned().collect();
@@ -465,9 +475,19 @@ impl LuaRuntime {
                 let world =
                     tokio::task::block_in_place(|| wrap_state.shared_state.world.blocking_read());
                 if let Some(room) = world.get_room(room_name) {
-                    hud.vibe = room.context.vibe.clone();
+                    // Vibe and exits are stored in DB, not always in memory
+                    hud.vibe = wrap_state
+                        .shared_state
+                        .db
+                        .get_vibe(room_name)
+                        .ok()
+                        .flatten();
+                    hud.exits = wrap_state
+                        .shared_state
+                        .db
+                        .get_exits(room_name)
+                        .unwrap_or_default();
                     hud.description = room.description.clone();
-                    hud.exits = room.context.exits.clone();
 
                     // Build participants list
                     let users: Vec<String> = room.users.iter().cloned().collect();

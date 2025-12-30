@@ -302,21 +302,18 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("who", who_fn)?;
 
-    // tools.exits() -> exit list
+    // tools.exits() -> direction to destination map
     let exits_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
             let hud = state.hud_state();
-            let list = lua.create_table()?;
+            let map = lua.create_table()?;
 
-            for (i, (dir, dest)) in hud.exits.iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.set("direction", dir.clone())?;
-                entry.set("destination", dest.clone())?;
-                list.set(i + 1, entry)?;
+            for (dir, dest) in hud.exits.iter() {
+                map.set(dir.clone(), dest.clone())?;
             }
 
-            Ok(list)
+            Ok(map)
         })?
     };
     tools.set("exits", exits_fn)?;
