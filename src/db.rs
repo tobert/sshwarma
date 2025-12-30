@@ -5,7 +5,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction};
@@ -17,6 +17,14 @@ pub struct Database {
 }
 
 impl Database {
+    /// Acquire the database connection, converting PoisonError to anyhow::Error.
+    /// This prevents panics if another thread panicked while holding the lock.
+    fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("database lock poisoned: {}", e))
+    }
+
     /// Open or create database at path
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -34,7 +42,7 @@ impl Database {
     }
 
     fn init_schema(&self) -> Result<()> {
-        self.conn.lock().unwrap().execute_batch(
+        self.conn()?.execute_batch(
             r#"
             -- Users and their SSH public keys
             CREATE TABLE IF NOT EXISTS users (
@@ -205,15 +213,47 @@ impl Database {
         Ok(())
     }
 
-    fn run_migrations(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+    /// Get current schema version from user_version pragma
+    fn get_schema_version(&self) -> Result<i32> {
+        let conn = self.conn()?;
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok(version)
+    }
 
-        // Add enable_navigation column to room_context (default enabled)
-        // This is idempotent - fails silently if column already exists
-        let _ = conn.execute(
-            "ALTER TABLE room_context ADD COLUMN enable_navigation INTEGER DEFAULT 1",
-            [],
-        );
+    /// Set schema version using user_version pragma
+    fn set_schema_version(&self, version: i32) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(&format!("PRAGMA user_version = {}", version), [])?;
+        Ok(())
+    }
+
+    /// Run migrations to update schema to latest version.
+    ///
+    /// Uses SQLite's user_version pragma to track which migrations have been applied.
+    /// Each migration is run only once, and the version is incremented after success.
+    fn run_migrations(&self) -> Result<()> {
+        let current_version = self.get_schema_version()?;
+
+        // Migration 1: Add enable_navigation column to room_context
+        if current_version < 1 {
+            let conn = self.conn()?;
+            // Check if column already exists (for databases created before versioning)
+            let has_column: bool = conn
+                .prepare("SELECT enable_navigation FROM room_context LIMIT 0")
+                .is_ok();
+
+            if !has_column {
+                conn.execute(
+                    "ALTER TABLE room_context ADD COLUMN enable_navigation INTEGER DEFAULT 1",
+                    [],
+                )?;
+                tracing::info!("migration 1: added enable_navigation column to room_context");
+            }
+            self.set_schema_version(1)?;
+        }
+
+        // Future migrations go here:
+        // if current_version < 2 { ... self.set_schema_version(2)?; }
 
         Ok(())
     }
@@ -224,7 +264,7 @@ impl Database {
 
     /// Add a user (creates if not exists)
     pub fn add_user(&self, handle: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT OR IGNORE INTO users (handle, created_at) VALUES (?1, datetime('now'))",
             params![handle],
         )?;
@@ -242,7 +282,7 @@ impl Database {
         // Ensure user exists
         self.add_user(handle)?;
 
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO pubkeys (handle, pubkey, key_type, comment, added_at) \
              VALUES (?1, ?2, ?3, ?4, datetime('now'))",
             params![handle, pubkey, key_type, comment],
@@ -252,13 +292,13 @@ impl Database {
 
     /// Remove a public key
     pub fn remove_pubkey(&self, pubkey: &str) -> Result<bool> {
-        let count = self.conn.lock().unwrap().execute("DELETE FROM pubkeys WHERE pubkey = ?1", params![pubkey])?;
+        let count = self.conn()?.execute("DELETE FROM pubkeys WHERE pubkey = ?1", params![pubkey])?;
         Ok(count > 0)
     }
 
     /// Remove all keys for a user
     pub fn remove_user(&self, handle: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute("DELETE FROM pubkeys WHERE handle = ?1", params![handle])?;
         let count = conn.execute("DELETE FROM users WHERE handle = ?1", params![handle])?;
         Ok(count > 0)
@@ -266,7 +306,7 @@ impl Database {
 
     /// Look up handle by public key (for auth)
     pub fn lookup_handle_by_pubkey(&self, pubkey: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT handle FROM pubkeys WHERE pubkey = ?1")?;
         let mut rows = stmt.query(params![pubkey])?;
         if let Some(row) = rows.next()? {
@@ -278,7 +318,7 @@ impl Database {
 
     /// Update last_seen for a user
     pub fn touch_user(&self, handle: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "UPDATE users SET last_seen = datetime('now') WHERE handle = ?1",
             params![handle],
         )?;
@@ -287,7 +327,7 @@ impl Database {
 
     /// List all users
     pub fn list_users(&self) -> Result<Vec<UserInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT u.handle, u.created_at, u.last_seen, COUNT(p.id) as key_count \
              FROM users u LEFT JOIN pubkeys p ON u.handle = p.handle \
@@ -310,7 +350,7 @@ impl Database {
 
     /// List keys for a user
     pub fn list_keys_for_user(&self, handle: &str) -> Result<Vec<PubkeyInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, pubkey, key_type, comment, added_at \
              FROM pubkeys WHERE handle = ?1 ORDER BY added_at",
@@ -337,7 +377,7 @@ impl Database {
 
     /// Create a room
     pub fn create_room(&self, name: &str, description: Option<&str>) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO rooms (name, description, created_at) VALUES (?1, ?2, datetime('now'))",
             params![name, description],
         )?;
@@ -346,7 +386,7 @@ impl Database {
 
     /// Get room names
     pub fn list_rooms(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name FROM rooms ORDER BY name")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         let mut names = Vec::new();
@@ -365,7 +405,7 @@ impl Database {
         content_type: &str,
         content: &str,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO messages (room, timestamp, sender_type, sender_name, content_type, content) \
              VALUES (?1, datetime('now'), ?2, ?3, ?4, ?5)",
@@ -376,7 +416,7 @@ impl Database {
 
     /// Get recent messages for a room (legacy - use recent_entries instead)
     pub fn recent_messages(&self, room: &str, limit: usize) -> Result<Vec<MessageRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, sender_type, sender_name, content_type, content \
              FROM messages WHERE room = ?1 ORDER BY id DESC LIMIT ?2",
@@ -407,7 +447,7 @@ impl Database {
 
     /// Add a ledger entry to the database
     pub fn add_ledger_entry(&self, room: &str, entry: &LedgerEntry) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let timestamp = entry.timestamp.to_rfc3339();
 
         // Convert EntrySource to DB fields
@@ -468,7 +508,7 @@ impl Database {
 
     /// Get recent ledger entries for a room
     pub fn recent_entries(&self, room: &str, limit: usize) -> Result<Vec<LedgerEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, source_type, source_name, source_streaming, \
              content_type, content, content_meta, ephemeral \
@@ -567,7 +607,7 @@ impl Database {
         created_by: &str,
         cas_hash: Option<&str>,
     ) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO artifacts (id, room, artifact_type, name, created_by, created_at, cas_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)",
             params![id, room, artifact_type, name, created_by, cas_hash],
@@ -581,7 +621,7 @@ impl Database {
 
     /// Start a new session
     pub fn start_session(&self, session_id: &str, username: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO sessions (id, username, connected_at) VALUES (?1, ?2, datetime('now'))",
             params![session_id, username],
         )?;
@@ -590,7 +630,7 @@ impl Database {
 
     /// End a session
     pub fn end_session(&self, session_id: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "UPDATE sessions SET disconnected_at = datetime('now') WHERE id = ?1",
             params![session_id],
         )?;
@@ -599,7 +639,7 @@ impl Database {
 
     /// Update session's current room
     pub fn update_session_room(&self, session_id: &str, room: Option<&str>) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "UPDATE sessions SET current_room = ?1 WHERE id = ?2",
             params![room, session_id],
         )?;
@@ -612,7 +652,7 @@ impl Database {
 
     /// Get all rooms with their info
     pub fn get_all_rooms(&self) -> Result<Vec<RoomInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, description, created_at FROM rooms ORDER BY name",
         )?;
@@ -632,7 +672,7 @@ impl Database {
 
     /// Get room info by name
     pub fn get_room(&self, name: &str) -> Result<Option<RoomInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, description, created_at FROM rooms WHERE name = ?1",
         )?;
@@ -650,7 +690,7 @@ impl Database {
 
     /// Check if a room exists
     pub fn room_exists(&self, name: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM rooms WHERE name = ?1",
             params![name],
@@ -665,7 +705,7 @@ impl Database {
 
     /// Set the vibe for a room
     pub fn set_vibe(&self, room: &str, vibe: Option<&str>) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO room_context (room, vibe) VALUES (?1, ?2) \
              ON CONFLICT(room) DO UPDATE SET vibe = ?2",
             params![room, vibe],
@@ -675,7 +715,7 @@ impl Database {
 
     /// Get the vibe for a room
     pub fn get_vibe(&self, room: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT vibe FROM room_context WHERE room = ?1")?;
         let mut rows = stmt.query(params![room])?;
         if let Some(row) = rows.next()? {
@@ -687,7 +727,7 @@ impl Database {
 
     /// Get the parent room (for fork DAG)
     pub fn get_parent(&self, room: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT parent FROM room_context WHERE room = ?1")?;
         let mut rows = stmt.query(params![room])?;
         if let Some(row) = rows.next()? {
@@ -699,7 +739,7 @@ impl Database {
 
     /// Set the parent room (for fork DAG)
     pub fn set_parent(&self, room: &str, parent: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO room_context (room, parent) VALUES (?1, ?2) \
              ON CONFLICT(room) DO UPDATE SET parent = ?2",
             params![room, parent],
@@ -709,7 +749,7 @@ impl Database {
 
     /// Get navigation enabled for a room (defaults to true)
     pub fn get_room_navigation(&self, room: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT enable_navigation FROM room_context WHERE room = ?1")?;
         let mut rows = stmt.query(params![room])?;
         if let Some(row) = rows.next()? {
@@ -722,7 +762,7 @@ impl Database {
 
     /// Set navigation enabled for a room
     pub fn set_room_navigation(&self, room: &str, enabled: bool) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO room_context (room, enable_navigation) VALUES (?1, ?2) \
              ON CONFLICT(room) DO UPDATE SET enable_navigation = ?2",
             params![room, if enabled { 1 } else { 0 }],
@@ -744,7 +784,7 @@ impl Database {
     ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let timestamp = Utc::now().to_rfc3339();
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO journal_entries (id, room, author, timestamp, content, kind) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, room, author, timestamp, content, kind.as_str()],
@@ -759,7 +799,7 @@ impl Database {
         kind: Option<JournalKind>,
         limit: usize,
     ) -> Result<Vec<JournalEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut entries = Vec::new();
 
         if let Some(k) = kind {
@@ -822,7 +862,7 @@ impl Database {
         bound_by: &str,
     ) -> Result<()> {
         let timestamp = Utc::now().to_rfc3339();
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO asset_bindings (room, role, artifact_id, notes, bound_by, bound_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT(room, role) DO UPDATE SET artifact_id = ?3, notes = ?4, bound_by = ?5, bound_at = ?6",
@@ -833,7 +873,7 @@ impl Database {
 
     /// Unbind an asset from a room
     pub fn unbind_asset(&self, room: &str, role: &str) -> Result<bool> {
-        let count = self.conn.lock().unwrap().execute(
+        let count = self.conn()?.execute(
             "DELETE FROM asset_bindings WHERE room = ?1 AND role = ?2",
             params![room, role],
         )?;
@@ -842,7 +882,7 @@ impl Database {
 
     /// Get a specific asset binding
     pub fn get_asset_binding(&self, room: &str, role: &str) -> Result<Option<AssetBinding>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT artifact_id, role, notes, bound_by, bound_at FROM asset_bindings \
              WHERE room = ?1 AND role = ?2",
@@ -865,7 +905,7 @@ impl Database {
 
     /// List all asset bindings for a room
     pub fn list_asset_bindings(&self, room: &str) -> Result<Vec<AssetBinding>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT artifact_id, role, notes, bound_by, bound_at FROM asset_bindings \
              WHERE room = ?1 ORDER BY role",
@@ -894,7 +934,7 @@ impl Database {
 
     /// Add an exit from one room to another
     pub fn add_exit(&self, from_room: &str, direction: &str, to_room: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO room_exits (from_room, direction, to_room) VALUES (?1, ?2, ?3) \
              ON CONFLICT(from_room, direction) DO UPDATE SET to_room = ?3",
             params![from_room, direction, to_room],
@@ -904,7 +944,7 @@ impl Database {
 
     /// Remove an exit
     pub fn remove_exit(&self, from_room: &str, direction: &str) -> Result<bool> {
-        let count = self.conn.lock().unwrap().execute(
+        let count = self.conn()?.execute(
             "DELETE FROM room_exits WHERE from_room = ?1 AND direction = ?2",
             params![from_room, direction],
         )?;
@@ -913,7 +953,7 @@ impl Database {
 
     /// Get all exits from a room
     pub fn get_exits(&self, room: &str) -> Result<HashMap<String, String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT direction, to_room FROM room_exits WHERE from_room = ?1",
         )?;
@@ -934,7 +974,7 @@ impl Database {
 
     /// Add a tag to a room
     pub fn add_tag(&self, room: &str, tag: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT OR IGNORE INTO room_tags (room, tag) VALUES (?1, ?2)",
             params![room, tag],
         )?;
@@ -943,7 +983,7 @@ impl Database {
 
     /// Remove a tag from a room
     pub fn remove_tag(&self, room: &str, tag: &str) -> Result<bool> {
-        let count = self.conn.lock().unwrap().execute(
+        let count = self.conn()?.execute(
             "DELETE FROM room_tags WHERE room = ?1 AND tag = ?2",
             params![room, tag],
         )?;
@@ -952,7 +992,7 @@ impl Database {
 
     /// Get all tags for a room
     pub fn get_tags(&self, room: &str) -> Result<HashSet<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT tag FROM room_tags WHERE room = ?1")?;
         let rows = stmt.query_map(params![room], |row| row.get(0))?;
         let mut tags = HashSet::new();
@@ -970,7 +1010,7 @@ impl Database {
     pub fn add_inspiration(&self, room: &str, content: &str, added_by: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let timestamp = Utc::now().to_rfc3339();
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO room_inspirations (id, room, content, added_by, added_at) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, room, content, added_by, timestamp],
@@ -980,7 +1020,7 @@ impl Database {
 
     /// Get all inspirations for a room
     pub fn get_inspirations(&self, room: &str) -> Result<Vec<Inspiration>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, content, added_by, added_at FROM room_inspirations \
              WHERE room = ?1 ORDER BY added_at",
@@ -1008,7 +1048,7 @@ impl Database {
 
     /// Fork a room, creating a child with inherited context
     pub fn fork_room(&self, source: &str, new_name: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
 
         // Create the new room
@@ -1080,7 +1120,7 @@ impl Database {
     /// Create or update a named prompt
     pub fn set_prompt(&self, room: &str, name: &str, content: &str, created_by: &str) -> Result<()> {
         let timestamp = Utc::now().to_rfc3339();
-        self.conn.lock().unwrap().execute(
+        self.conn()?.execute(
             "INSERT INTO room_prompts (room, name, content, created_by, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(room, name) DO UPDATE SET content = ?3, created_by = ?4, created_at = ?5",
@@ -1091,7 +1131,7 @@ impl Database {
 
     /// Delete a named prompt (also removes all slot references)
     pub fn delete_prompt(&self, room: &str, name: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // First remove all slot references to this prompt
         conn.execute(
@@ -1110,7 +1150,7 @@ impl Database {
 
     /// Get a single prompt's content
     pub fn get_prompt(&self, room: &str, name: &str) -> Result<Option<PromptInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, content, created_by, created_at FROM room_prompts WHERE room = ?1 AND name = ?2",
         )?;
@@ -1130,7 +1170,7 @@ impl Database {
 
     /// List all prompts in a room
     pub fn list_prompts(&self, room: &str) -> Result<Vec<PromptInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, content, created_by, created_at FROM room_prompts WHERE room = ?1 ORDER BY name",
         )?;
@@ -1152,7 +1192,7 @@ impl Database {
 
     /// Push a prompt reference to a target's slot list
     pub fn push_slot(&self, room: &str, target: &str, target_type: &str, prompt_name: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // Get current max slot_index for this target
         let max_index: i64 = conn
@@ -1174,7 +1214,7 @@ impl Database {
 
     /// Pop the last slot from a target
     pub fn pop_slot(&self, room: &str, target: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // Find and delete the slot with max index
         let count = conn.execute(
@@ -1190,7 +1230,7 @@ impl Database {
 
     /// Remove a specific slot by index (reindexes remaining slots)
     pub fn rm_slot(&self, room: &str, target: &str, index: i64) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // Delete the slot
         let count = conn.execute(
@@ -1214,7 +1254,7 @@ impl Database {
 
     /// Insert a slot at a specific index (shifts existing slots up)
     pub fn insert_slot(&self, room: &str, target: &str, target_type: &str, index: i64, prompt_name: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // Shift existing slots up
         conn.execute(
@@ -1235,7 +1275,7 @@ impl Database {
 
     /// Get all slots for a target with resolved prompt content
     pub fn get_target_slots(&self, room: &str, target: &str) -> Result<Vec<TargetSlot>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT ts.slot_index, ts.prompt_name, ts.target_type, p.content
              FROM room_target_slots ts
@@ -1261,7 +1301,7 @@ impl Database {
 
     /// Get all targets that have slots assigned in a room
     pub fn list_targets_with_slots(&self, room: &str) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT DISTINCT target, target_type FROM room_target_slots WHERE room = ?1 ORDER BY target",
         )?;
