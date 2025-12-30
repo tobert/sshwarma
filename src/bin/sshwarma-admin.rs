@@ -13,8 +13,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-// Import from lib
 use sshwarma::db::Database;
+use sshwarma::paths;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -24,7 +24,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let db_path = env::var("SSHWARMA_DB").unwrap_or_else(|_| "sshwarma.db".to_string());
+    let db_path = paths::db_path();
     let db = Database::open(&db_path).context("failed to open database")?;
 
     match args[1].as_str() {
@@ -57,14 +57,22 @@ Usage:
   sshwarma-admin keys <handle>
 
 Environment:
-  SSHWARMA_DB    Path to database (default: sshwarma.db)
+  SSHWARMA_DB    Override database path
+
+Paths:
+  Data:   {data}
+  Config: {config}
+  DB:     {db}
 
 Examples:
   sshwarma-admin add amy ~/.ssh/id_ed25519.pub
   sshwarma-admin add bob --key "ssh-ed25519 AAAAC3... bob@laptop"
   sshwarma-admin list
   sshwarma-admin keys amy
-"#
+"#,
+        data = paths::data_dir().display(),
+        config = paths::config_dir().display(),
+        db = paths::db_path().display(),
     );
 }
 

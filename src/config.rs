@@ -39,6 +39,53 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Create config from environment variables with XDG defaults
+    ///
+    /// ## Environment Variables
+    ///
+    /// | Variable | Description | Default |
+    /// |----------|-------------|---------|
+    /// | `SSHWARMA_DB` | Database path | `~/.local/share/sshwarma/sshwarma.db` |
+    /// | `SSHWARMA_HOST_KEY` | Host key path | `~/.local/share/sshwarma/host_key` |
+    /// | `SSHWARMA_MODELS_CONFIG` | Models config | `~/.config/sshwarma/models.toml` |
+    /// | `SSHWARMA_LISTEN_ADDR` | SSH listen addr | `0.0.0.0:2222` |
+    /// | `SSHWARMA_MCP_PORT` | MCP server port | `2223` |
+    /// | `SSHWARMA_MCP_ENDPOINTS` | MCP endpoints (comma-separated) | `http://localhost:8080/mcp` |
+    /// | `SSHWARMA_OPEN_REGISTRATION` | Allow registration | `true` |
+    pub fn from_env() -> Self {
+        use crate::paths;
+
+        let listen_addr = std::env::var("SSHWARMA_LISTEN_ADDR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| "0.0.0.0:2222".parse().unwrap());
+
+        let mcp_endpoints = std::env::var("SSHWARMA_MCP_ENDPOINTS")
+            .map(|s| s.split(',').map(|e| e.trim().to_string()).collect())
+            .unwrap_or_else(|_| vec!["http://localhost:8080/mcp".to_string()]);
+
+        let allow_open_registration = std::env::var("SSHWARMA_OPEN_REGISTRATION")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(true);
+
+        let mcp_server_port = std::env::var("SSHWARMA_MCP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2223);
+
+        Self {
+            listen_addr,
+            host_key_path: paths::host_key_path().to_string_lossy().into_owned(),
+            db_path: paths::db_path().to_string_lossy().into_owned(),
+            mcp_endpoints,
+            allow_open_registration,
+            mcp_server_port,
+            models_config_path: paths::models_config_path().to_string_lossy().into_owned(),
+        }
+    }
+}
+
 /// Models configuration file structure
 #[derive(Debug, Deserialize)]
 pub struct ModelsConfig {

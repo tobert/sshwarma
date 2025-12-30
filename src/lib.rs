@@ -18,6 +18,7 @@ pub mod lua;
 pub mod mcp;
 pub mod mcp_server;
 pub mod model;
+pub mod paths;
 pub mod ops;
 pub mod player;
 pub mod ssh;

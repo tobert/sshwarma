@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use sshwarma::config::{Config, ModelsConfig};
 use sshwarma::db::Database;
+use sshwarma::paths;
 use sshwarma::llm::LlmClient;
 use sshwarma::mcp::McpClients;
 use sshwarma::mcp_server::{self, McpServerState};
@@ -29,8 +30,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = Config::default();
+    // Ensure XDG directories exist
+    paths::ensure_dirs().context("failed to create directories")?;
+
+    let config = Config::from_env();
     info!(addr = %config.listen_addr, "starting sshwarma");
+    paths::log_paths();
 
     // Load or generate host key
     let key = load_or_generate_host_key(&config)?;

@@ -19,6 +19,7 @@ pub use wrap::{compose_context, WrapResult, WrapState};
 
 use crate::display::hud::HudState;
 use crate::lua::tools::register_tools;
+use crate::paths;
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
 use std::fs;
@@ -32,34 +33,14 @@ const DEFAULT_HUD_SCRIPT: &str = include_str!("../embedded/hud.lua");
 /// Embedded wrap script for context composition
 const DEFAULT_WRAP_SCRIPT: &str = include_str!("../embedded/wrap.lua");
 
-/// Get the XDG config path for sshwarma
-fn config_path() -> Option<PathBuf> {
-    // Try XDG_CONFIG_HOME first
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("sshwarma"));
-    }
-
-    // Fall back to ~/.config
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home).join(".config/sshwarma"));
-    }
-
-    None
-}
-
-/// User config directory for custom scripts
-fn user_config_dir() -> PathBuf {
-    config_path().unwrap_or_else(|| PathBuf::from(".config/sshwarma"))
-}
-
 /// Path to user's custom HUD script
 pub fn user_hud_script_path() -> PathBuf {
-    user_config_dir().join("hud.lua")
+    paths::config_dir().join("hud.lua")
 }
 
 /// Path to a specific user's HUD script (e.g., atobey.lua, claude.lua)
 pub fn user_named_script_path(username: &str) -> PathBuf {
-    user_config_dir().join(format!("{}.lua", username))
+    paths::config_dir().join(format!("{}.lua", username))
 }
 
 /// Lua runtime for HUD rendering

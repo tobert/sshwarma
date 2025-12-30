@@ -4,12 +4,15 @@ Documentation=https://github.com/tobert/sshwarma
 
 [Service]
 Type=simple
-WorkingDirectory=%h/src/sshwarma
 ExecStart=%h/src/sshwarma/target/release/sshwarma
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
 
+# Paths are now XDG-based:
+#   Data:   ~/.local/share/sshwarma/ (db, host_key)
+#   Config: ~/.config/sshwarma/ (models.toml, lua scripts)
+# Override with: SSHWARMA_DB, SSHWARMA_HOST_KEY, SSHWARMA_MODELS_CONFIG
 Environment=RUST_LOG=info
 
 [Install]
