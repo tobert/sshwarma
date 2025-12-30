@@ -35,8 +35,8 @@ struct McpConnection {
 
 /// Tools and peer for use with rig agents
 pub struct RigToolContext {
-    pub tools: Vec<Tool>,
-    pub peer: rmcp::service::ServerSink,
+    /// List of tools paired with the connection peer that handles them
+    pub tools: Vec<(Tool, rmcp::service::ServerSink)>,
 }
 
 impl McpClients {
@@ -186,26 +186,26 @@ impl McpClients {
 
     /// Get tools and peer for rig agent integration
     ///
-    /// Returns all tools from all connected MCPs, plus a peer for making calls.
-    /// Note: Currently uses the first connection's peer. Tools from multiple
-    /// MCPs will all be routed through that peer, which may not work correctly
-    /// if tools are spread across multiple servers.
+    /// Returns all tools from all connected MCPs, each paired with its correct peer.
     ///
     /// Returns None if no MCPs are connected.
     pub async fn rig_tools(&self) -> Option<RigToolContext> {
         let clients = self.clients.read().await;
 
-        // Get first connection to use as the peer
-        let first_conn = clients.values().next()?;
-        let peer = first_conn.service.peer().to_owned();
+        if clients.is_empty() {
+            return None;
+        }
 
-        // Aggregate all tools from all connections
-        let tools: Vec<Tool> = clients
-            .values()
-            .flat_map(|conn| conn.tools.clone())
-            .collect();
+        let mut tools_with_peers = Vec::new();
 
-        Some(RigToolContext { tools, peer })
+        for conn in clients.values() {
+            let peer = conn.service.peer().to_owned();
+            for tool in &conn.tools {
+                tools_with_peers.push((tool.clone(), peer.clone()));
+            }
+        }
+
+        Some(RigToolContext { tools: tools_with_peers })
     }
 
     /// Get tools and peer for a specific MCP connection
@@ -213,9 +213,13 @@ impl McpClients {
         let clients = self.clients.read().await;
         let conn = clients.get(name)?;
 
+        let peer = conn.service.peer().to_owned();
+        let tools_with_peers = conn.tools.iter()
+            .map(|t| (t.clone(), peer.clone()))
+            .collect();
+
         Some(RigToolContext {
-            tools: conn.tools.clone(),
-            peer: conn.service.peer().to_owned(),
+            tools: tools_with_peers,
         })
     }
 }

@@ -1112,7 +1112,7 @@ impl SshHandler {
 
             // Add MCP tools if available
             if let Some(ctx) = &mcp_context {
-                for tool in ctx.tools.iter() {
+                for (tool, peer) in ctx.tools.iter() {
                     // Normalize schemas for llama.cpp (limited schema support)
                     let tool = if needs_schema_strip {
                         let original_schema = serde_json::to_string(&tool.input_schema).unwrap_or_default();
@@ -1125,7 +1125,7 @@ impl SshHandler {
                     } else {
                         tool.clone()
                     };
-                    server = server.rmcp_tool(tool, ctx.peer.clone());
+                    server = server.rmcp_tool(tool, peer.clone());
                 }
             }
 
