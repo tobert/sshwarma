@@ -70,27 +70,15 @@ ssh yourname@localhost -p 2222
 
 ## Features
 
-**Navigation** — Rooms with descriptions, vibes, exits, and bound assets:
-```
-/look  /go north  /join workshop  /create myroom  /fork session  /dig west garden
-```
+**Rooms** — Navigate a MUD-style world with `/look`, `/go north`, `/join`, `/create`. Rooms have descriptions, vibes, exits to other rooms, and bound assets.
 
-**Multi-model chat** — Address models with @mentions; they stream responses and use tools:
-```
-@qwen-8b explain this error    @claude review this code    @gemini summarize
-```
+**@mentions** — Address models directly: `@qwen-8b explain this error`. Responses stream token-by-token; models can call tools and navigate rooms.
 
-**Journals** — Persistent documentation beyond chat ephemera:
-```
-/note idea    /decide using X    /idea what if    /milestone shipped    /inspire
-```
+**Journals** — Capture decisions and ideas that outlast chat: `/note`, `/decide`, `/idea`, `/milestone`. Models see recent journal entries when they `/look`.
 
-**MCP proxy** — Connect external MCP servers; models see all tools:
-```
-/mcp connect holler http://localhost:8080/mcp    /tools    /run job_list
-```
+**Tools** — Connect MCP servers with `/mcp connect`. Both humans (`/run tool`) and models can invoke tools. Schema normalization for llama.cpp compatibility.
 
-**Composable HUD** — 8-line Lua-rendered display with participants, MCP status, room info. Customize via `~/.config/sshwarma/hud.lua`. See `configs/atobey.lua` for examples.
+**HUD** — Lua-rendered status bar showing participants, model states, MCP connections, and room info. Customize via `~/.config/sshwarma/hud.lua`.
 
 ## Configuration
 
