@@ -625,6 +625,102 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     })?;
     tools.set("truncate", truncate_fn)?;
 
+    // MCP management tools (non-blocking, control plane)
+
+    // tools.mcp_add(name, url) -> nil
+    // Add connection (non-blocking, idempotent). Connection happens in background.
+    let mcp_add_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, (name, url): (String, String)| {
+            if let Some(shared) = state.shared_state() {
+                shared.mcp.add(&name, &url); // Non-blocking, spawns task
+            }
+            Ok(())
+        })?
+    };
+    tools.set("mcp_add", mcp_add_fn)?;
+
+    // tools.mcp_remove(name) -> bool
+    // Remove connection (graceful disconnect). Returns true if was present.
+    let mcp_remove_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, name: String| {
+            match state.shared_state() {
+                Some(shared) => Ok(shared.mcp.remove(&name)), // Non-blocking
+                None => Ok(false),
+            }
+        })?
+    };
+    tools.set("mcp_remove", mcp_remove_fn)?;
+
+    // tools.mcp_status(name) -> table or nil
+    // Get status of one connection.
+    // Returns: { name, state, tools, error, attempt } or nil if not found
+    let mcp_status_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, name: String| {
+            let Some(shared) = state.shared_state() else {
+                return Ok(Value::Nil);
+            };
+            match shared.mcp.status(&name) {
+                Some(status) => {
+                    let table = lua.create_table()?;
+                    table.set("name", status.name)?;
+                    table.set("state", status.state)?;
+                    table.set("tools", status.tool_count)?;
+                    table.set("endpoint", status.endpoint)?;
+                    table.set("calls", status.call_count)?;
+                    if let Some(err) = status.error {
+                        table.set("error", err)?;
+                    }
+                    if let Some(attempt) = status.attempt {
+                        table.set("attempt", attempt)?;
+                    }
+                    if let Some(last_tool) = status.last_tool {
+                        table.set("last_tool", last_tool)?;
+                    }
+                    Ok(Value::Table(table))
+                }
+                None => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("mcp_status", mcp_status_fn)?;
+
+    // tools.mcp_list() -> array of status tables
+    // List all connections with their status.
+    let mcp_list_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let Some(shared) = state.shared_state() else {
+                return Ok(lua.create_table()?); // Empty table
+            };
+            let list = shared.mcp.list(); // Non-blocking
+
+            let table = lua.create_table()?;
+            for (i, status) in list.into_iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", status.name)?;
+                entry.set("state", status.state)?;
+                entry.set("tools", status.tool_count)?;
+                entry.set("endpoint", status.endpoint)?;
+                entry.set("calls", status.call_count)?;
+                if let Some(err) = status.error {
+                    entry.set("error", err)?;
+                }
+                if let Some(attempt) = status.attempt {
+                    entry.set("attempt", attempt)?;
+                }
+                if let Some(last_tool) = status.last_tool {
+                    entry.set("last_tool", last_tool)?;
+                }
+                table.set(i + 1, entry)?;
+            }
+            Ok(table)
+        })?
+    };
+    tools.set("mcp_list", mcp_list_fn)?;
+
     // Set as global
     lua.globals().set("tools", tools)?;
 
@@ -792,7 +888,7 @@ mod tests {
     use crate::display::hud::HudState;
     use crate::display::{EntryContent, EntrySource};
     use crate::llm::LlmClient;
-    use crate::mcp::McpClients;
+    use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelRegistry};
     use crate::state::SharedState;
     use crate::world::{Inspiration, JournalEntry, JournalKind, World};
@@ -835,7 +931,7 @@ mod tests {
                 config: Config::default(),
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
-                mcp: Arc::new(McpClients::new()),
+                mcp: Arc::new(McpManager::new()),
             });
 
             Ok(Self {

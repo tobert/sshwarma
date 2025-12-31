@@ -544,28 +544,26 @@ MCP:
                     output
                 }
             }
-            "connect" => {
+            "connect" | "add" => {
                 let name = parts.get(1).copied().unwrap_or("");
                 let url = parts.get(2).copied().unwrap_or("");
                 if name.is_empty() || url.is_empty() {
                     return "Usage: /mcp connect <name> <url>".to_string();
                 }
 
-                match self.state.mcp.connect(name, url).await {
-                    Ok(()) => format!("Connected to MCP server '{}' at {}", name, url),
-                    Err(e) => format!("Failed to connect: {}", e),
-                }
+                self.state.mcp.add(name, url); // Non-blocking
+                format!("Connecting to MCP server '{}' at {} (background)", name, url)
             }
-            "disconnect" => {
+            "disconnect" | "remove" => {
                 let name = parts.get(1).copied().unwrap_or("");
                 if name.is_empty() {
                     return "Usage: /mcp disconnect <name>".to_string();
                 }
 
-                match self.state.mcp.disconnect(name).await {
-                    Ok(true) => format!("Disconnected from '{}'", name),
-                    Ok(false) => format!("Not connected to '{}'", name),
-                    Err(e) => format!("Error: {}", e),
+                if self.state.mcp.remove(name) {
+                    format!("Removed MCP server '{}'", name)
+                } else {
+                    format!("MCP server '{}' not found", name)
                 }
             }
             "refresh" => {

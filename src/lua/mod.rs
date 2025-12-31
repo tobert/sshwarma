@@ -17,6 +17,9 @@ pub use render::{parse_lua_output, HUD_ROWS};
 pub use tools::{register_mcp_tools, LuaToolState};
 pub use wrap::{compose_context, WrapResult, WrapState};
 
+// Re-export startup script path for main.rs
+pub use self::startup_script_path as get_startup_script_path;
+
 use crate::display::hud::HudState;
 use crate::lua::tools::register_tools;
 use crate::paths;
@@ -41,6 +44,11 @@ pub fn user_hud_script_path() -> PathBuf {
 /// Path to a specific user's HUD script (e.g., atobey.lua, claude.lua)
 pub fn user_named_script_path(username: &str) -> PathBuf {
     paths::config_dir().join(format!("{}.lua", username))
+}
+
+/// Path to server startup script
+pub fn startup_script_path() -> PathBuf {
+    paths::config_dir().join("startup.lua")
 }
 
 /// Lua runtime for HUD rendering
@@ -147,6 +155,54 @@ impl LuaRuntime {
         }
 
         Ok(runtime)
+    }
+
+    /// Run the startup script if it exists
+    ///
+    /// Looks for `~/.config/sshwarma/startup.lua` and executes it.
+    /// The script can call `tools.mcp_connect()`, `tools.mcp_disconnect()`, etc.
+    ///
+    /// Returns Ok(true) if script was run, Ok(false) if no script exists.
+    pub fn run_startup_script(&self) -> Result<bool> {
+        let script_path = startup_script_path();
+
+        if !script_path.exists() {
+            debug!("No startup script at {:?}", script_path);
+            return Ok(false);
+        }
+
+        let script = fs::read_to_string(&script_path)
+            .with_context(|| format!("failed to read startup script {:?}", script_path))?;
+
+        info!("Running startup script from {:?}", script_path);
+
+        self.lua
+            .load(&script)
+            .set_name(script_path.to_string_lossy())
+            .exec()
+            .map_err(|e| anyhow::anyhow!("startup script failed: {}", e))?;
+
+        // Check if there's a startup() function and call it
+        let globals = self.lua.globals();
+        let startup_fn: Value = globals
+            .get("startup")
+            .map_err(|e| anyhow::anyhow!("failed to get startup: {}", e))?;
+
+        if startup_fn != Value::Nil {
+            let func: mlua::Function = startup_fn
+                .as_function()
+                .ok_or_else(|| anyhow::anyhow!("startup is not a function"))?
+                .clone();
+
+            func.call::<()>(())
+                .map_err(|e| anyhow::anyhow!("startup() call failed: {}", e))?;
+
+            info!("Startup script completed successfully");
+        } else {
+            info!("Startup script executed (no startup() function defined)");
+        }
+
+        Ok(true)
     }
 
     /// Load a Lua script from file
@@ -567,7 +623,7 @@ mod tests {
     use crate::display::EntryContent;
     use crate::display::EntrySource;
     use crate::llm::LlmClient;
-    use crate::mcp::McpClients;
+    use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
     use crate::state::SharedState;
     use crate::world::World;
@@ -606,7 +662,7 @@ mod tests {
                 config: Config::default(),
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
-                mcp: Arc::new(McpClients::new()),
+                mcp: Arc::new(McpManager::new()),
             });
 
             Ok(Self {

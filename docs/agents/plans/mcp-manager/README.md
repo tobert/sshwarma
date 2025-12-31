@@ -23,8 +23,8 @@ This enables reliable MCP connections that don't block startup and gracefully ha
 | 01-backoff | ✅ done | A | No dependencies |
 | 02-events | ✅ done | A | No dependencies |
 | 03-manager | ✅ done | B | Depends on 01, 02 |
-| 04-lua-api | pending | C | Depends on 03 |
-| 05-integration | pending | D | Depends on 03, 04 |
+| 04-lua-api | ✅ done | C | Depends on 03 |
+| 05-integration | ✅ done | D | Depends on 03, 04 |
 
 ## Success Metrics
 

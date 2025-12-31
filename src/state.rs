@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use crate::config::Config;
 use crate::db::Database;
 use crate::llm::LlmClient;
-use crate::mcp::McpClients;
+use crate::mcp::McpManager;
 use crate::model::ModelRegistry;
 use crate::world::World;
 
@@ -17,5 +17,5 @@ pub struct SharedState {
     pub config: Config,
     pub llm: Arc<LlmClient>,
     pub models: Arc<ModelRegistry>,
-    pub mcp: Arc<McpClients>,
+    pub mcp: Arc<McpManager>,
 }

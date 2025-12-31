@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
 
-use crate::mcp::McpClients;
+use crate::mcp::McpManager;
 
 /// Request status for async MCP calls
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,14 +180,14 @@ impl McpBridge {
 /// from the bridge's channel.
 pub async fn mcp_request_handler(
     mut rx: mpsc::Receiver<McpRequest>,
-    mcp_clients: Arc<McpClients>,
+    mcp_manager: Arc<McpManager>,
     requests: Arc<RwLock<HashMap<String, RequestState>>>,
     timeout: Duration,
 ) {
     debug!("MCP request handler started");
 
     while let Some(req) = rx.recv().await {
-        let mcp = mcp_clients.clone();
+        let mcp = mcp_manager.clone();
         let reqs = requests.clone();
         let request_id = req.request_id.clone();
 

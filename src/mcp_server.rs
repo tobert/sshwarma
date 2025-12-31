@@ -752,7 +752,7 @@ impl SshwarmaMcpServer {
             config: Config::default(),
             llm: self.state.llm.clone(),
             models: self.state.models.clone(),
-            mcp: Arc::new(crate::mcp::McpClients::new()),
+            mcp: Arc::new(crate::mcp::McpManager::new()),
         });
 
         let wrap_state = WrapState {

@@ -14,7 +14,7 @@ use sshwarma::config::{Config, ModelsConfig};
 use sshwarma::db::Database;
 use sshwarma::paths;
 use sshwarma::llm::LlmClient;
-use sshwarma::mcp::McpClients;
+use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::ModelRegistry;
 use sshwarma::ssh::SshServer;
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     let db = Arc::new(db);
     let llm = Arc::new(llm);
     let models = Arc::new(models);
-    let mcp = Arc::new(McpClients::new());
+    let mcp = Arc::new(McpManager::new());
 
     let state = Arc::new(SharedState {
         world: world.clone(),
@@ -101,6 +101,24 @@ async fn main() -> Result<()> {
         models: models.clone(),
         mcp,
     });
+
+    // Run Lua startup script (can configure MCP connections, etc.)
+    {
+        use sshwarma::lua::LuaRuntime;
+
+        info!("creating Lua runtime for startup script");
+        let lua = LuaRuntime::new().context("failed to create Lua runtime for startup")?;
+        info!("setting shared state for startup script");
+        lua.tool_state().set_shared_state(Some(state.clone()));
+
+        info!("running startup script...");
+        match lua.run_startup_script() {
+            Ok(true) => info!("startup script executed successfully"),
+            Ok(false) => info!("no startup script found (create ~/.config/sshwarma/startup.lua)"),
+            Err(e) => warn!("startup script failed: {}", e),
+        }
+        info!("startup script phase complete");
+    }
 
     // Start MCP server for Claude Code
     if config.mcp_server_port > 0 {
