@@ -21,7 +21,7 @@ This enables reliable MCP connections that don't block startup and gracefully ha
 | Task | Status | Parallel Group | Notes |
 |------|--------|----------------|-------|
 | 01-backoff | ✅ done | A | No dependencies |
-| 02-events | pending | A | No dependencies |
+| 02-events | ✅ done | A | No dependencies |
 | 03-manager | pending | B | Depends on 01, 02 |
 | 04-lua-api | pending | C | Depends on 03 |
 | 05-integration | pending | D | Depends on 03, 04 |

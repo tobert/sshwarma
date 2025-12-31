@@ -4,11 +4,13 @@
 
 mod backoff;
 mod client;
+mod events;
 
 // Re-export backoff types
 pub use backoff::Backoff;
 
+// Re-export event types
+pub use events::{McpEvent, McpEventReceiver, McpEventSender};
+
 // Re-export client types for backwards compatibility
-pub use client::{
-    ConnectionInfo, McpClients, RigToolContext, ToolInfo, ToolResult,
-};
+pub use client::{ConnectionInfo, McpClients, RigToolContext, ToolInfo, ToolResult};
