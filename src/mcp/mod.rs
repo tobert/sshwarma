@@ -5,6 +5,7 @@
 mod backoff;
 mod client;
 mod events;
+mod manager;
 
 // Re-export backoff types
 pub use backoff::Backoff;
@@ -12,5 +13,11 @@ pub use backoff::Backoff;
 // Re-export event types
 pub use events::{McpEvent, McpEventReceiver, McpEventSender};
 
-// Re-export client types for backwards compatibility
-pub use client::{ConnectionInfo, McpClients, RigToolContext, ToolInfo, ToolResult};
+// Re-export manager types (new managed approach)
+pub use manager::{ConnectionState, ConnectionStatus, McpManager};
+
+// Re-export common types from manager (these replace client types going forward)
+pub use manager::{RigToolContext, ToolInfo, ToolResult};
+
+// Re-export legacy client types for backwards compatibility during migration
+pub use client::{ConnectionInfo, McpClients};

@@ -67,6 +67,7 @@ crossterm = "0.28"
 # Lua scripting for HUD customization
 # send feature enables Send+Sync for Lua state (needed for async handlers)
 mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
+tokio-util = { version = "0.7.17", features = ["rt"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
