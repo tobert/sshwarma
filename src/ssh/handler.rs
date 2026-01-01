@@ -404,33 +404,17 @@ impl server::Handler for SshHandler {
             }
         }
 
-        // Draw initial HUD
-        {
-            let hud = self.hud_state.lock().await;
-            if let Some(ref lua) = self.lua_runtime {
-                let lua = lua.lock().await;
-                lua.update_state(hud.clone());
-                let now_ms = Utc::now().timestamp_millis();
-                if let Ok(hud_str) = lua.render_hud_string(now_ms, width, height) {
-                    let hud_row = height.saturating_sub(HUD_HEIGHT);
-                    let output = format!("{}{}", ctrl::move_to(hud_row, 1), hud_str);
-                    let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
-                }
-            }
-        }
-
         // Spawn background tasks
         if let Some(update_rx) = self.update_rx.take() {
             let handle = session.handle();
             let db = self.state.db.clone();
             let buffer_id = self.current_buffer_id().await.unwrap_or_default();
             let hud_state = self.hud_state.clone();
-            let lua_runtime = self.lua_runtime.clone().expect("lua_runtime");
 
             tokio::spawn(async move {
                 push_updates_task(
                     handle, channel, update_rx, db, buffer_id,
-                    hud_state, lua_runtime, width, height,
+                    hud_state, width, height,
                 ).await;
             });
         }

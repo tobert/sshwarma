@@ -5,9 +5,7 @@
 use crate::db::Database;
 use crate::display::hud::{HudState, ParticipantStatus, HUD_HEIGHT};
 use crate::display::styles::ctrl;
-use crate::lua::LuaRuntime;
 use crate::ui::render::render_rows;
-use chrono::Utc;
 use russh::server::Handle;
 use russh::{ChannelId, CryptoVec};
 use std::sync::Arc;
@@ -46,7 +44,6 @@ pub async fn push_updates_task(
     db: Arc<Database>,
     buffer_id: String,
     hud_state: Arc<Mutex<HudState>>,
-    lua_runtime: Arc<Mutex<LuaRuntime>>,
     term_width: u16,
     term_height: u16,
 ) {
@@ -122,20 +119,7 @@ pub async fn push_updates_task(
                         .await;
                 }
 
-                // Redraw HUD
-                {
-                    let hud = hud_state.lock().await;
-                    let lua = lua_runtime.lock().await;
-                    lua.update_state(hud.clone());
-                    let now_ms = Utc::now().timestamp_millis();
-                    if let Ok(hud_str) = lua.render_hud_string(now_ms, term_width, term_height) {
-                        let hud_row = term_height.saturating_sub(HUD_HEIGHT);
-                        let hud_output = format!("{}{}", ctrl::move_to(hud_row, 1), hud_str);
-                        let _ = handle
-                            .data(channel, CryptoVec::from(hud_output.as_bytes()))
-                            .await;
-                    }
-                }
+                // HUD is redrawn by the refresh task - no need to redraw here
 
                 _accumulated_text.clear();
                 _current_row_id = None;

@@ -130,29 +130,30 @@ end
 local border_style = { fg = colors.cyan }
 local dim_style = { fg = colors.dim }
 
---- Draw the HUD box frame
+--- Draw the HUD box frame (7 lines: 0-6, leaving row 7 for input)
 local function draw_frame(ctx)
-    local w, h = ctx.w, ctx.h
+    local w = ctx.w
+    -- Frame is 7 lines (0-6), row 7 is for input prompt
 
-    -- Top border
+    -- Top border (row 0)
     ctx:print(0, 0, box.tl, border_style)
     for x = 1, w - 2 do
         ctx:print(x, 0, box.h, border_style)
     end
     ctx:print(w - 1, 0, box.tr, border_style)
 
-    -- Side borders
-    for y = 1, h - 2 do
+    -- Side borders (rows 1-5)
+    for y = 1, 5 do
         ctx:print(0, y, box.v, border_style)
         ctx:print(w - 1, y, box.v, border_style)
     end
 
-    -- Bottom border
-    ctx:print(0, h - 1, box.bl, border_style)
+    -- Bottom border (row 6)
+    ctx:print(0, 6, box.bl, border_style)
     for x = 1, w - 2 do
-        ctx:print(x, h - 1, box.h, border_style)
+        ctx:print(x, 6, box.h, border_style)
     end
-    ctx:print(w - 1, h - 1, box.br, border_style)
+    ctx:print(w - 1, 6, box.br, border_style)
 end
 
 --- Draw participants on row 1 (inside frame, y=1)
@@ -352,16 +353,16 @@ function on_tick(tick, ctx)
     local session = status.session or {}
     local exits = status.exits or {}
 
-    -- Draw frame (row 0 and row 6 are borders)
+    -- Draw frame (rows 0-6, leaving row 7 for input prompt)
     draw_frame(ctx)
 
-    -- Draw content rows (inside frame)
+    -- Draw content rows (inside frame, rows 1-5)
     draw_participants(ctx, participants, tick)      -- y=1
     draw_status(ctx, participants)                   -- y=2
     draw_room_details(ctx, room, participants)       -- y=3
     draw_mcp(ctx, nil)                               -- y=4
     draw_room_info(ctx, room, session, exits, tick)  -- y=5
-    -- y=6 is bottom border
-    -- y=7 is input area (not drawn by HUD)
+    -- y=6 = bottom border (drawn by draw_frame)
+    -- y=7 = input prompt (not drawn by HUD, handled by line editor)
 end
 
