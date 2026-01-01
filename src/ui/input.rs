@@ -221,7 +221,11 @@ impl InputBuffer {
         let trimmed = before.trim_end();
         let word_start = trimmed
             .rfind(char::is_whitespace)
-            .map(|i| i + 1)
+            .map(|i| {
+                // Skip past the whitespace char (which may be multi-byte)
+                let ws_char = trimmed[i..].chars().next().unwrap();
+                i + ws_char.len_utf8()
+            })
             .unwrap_or(0);
 
         let killed = self.text[word_start..self.cursor].to_string();
@@ -249,13 +253,12 @@ impl InputBuffer {
         self.history_pos = None;
 
         // Add to history if non-empty and different from last
-        if !text.trim().is_empty()
-            && self.history.last().map(|s| s.as_str()) != Some(&text) {
-                self.history.push(text.clone());
-                if self.history.len() > self.max_history {
-                    self.history.remove(0);
-                }
+        if !text.trim().is_empty() && self.history.last().map(|s| s.as_str()) != Some(&text) {
+            self.history.push(text.clone());
+            if self.history.len() > self.max_history {
+                self.history.remove(0);
             }
+        }
 
         text
     }
@@ -313,11 +316,13 @@ impl InputBuffer {
         let start = before
             .rfind(|c: char| c.is_whitespace() || c == '/' || c == '@')
             .map(|i| {
+                let found_char = before[i..].chars().next().unwrap();
                 // Include the trigger character (/ or @) but not whitespace
-                if before.as_bytes().get(i).map(|&b| b == b'/' || b == b'@') == Some(true) {
+                if found_char == '/' || found_char == '@' {
                     i
                 } else {
-                    i + 1
+                    // Skip past the whitespace (which may be multi-byte)
+                    i + found_char.len_utf8()
                 }
             })
             .unwrap_or(0);
@@ -911,5 +916,158 @@ mod tests {
         .exec()?;
 
         Ok(())
+    }
+
+    // ==========================================================================
+    // Unicode edge case tests
+    // ==========================================================================
+
+    #[test]
+    fn test_unicode_navigation_emoji() {
+        let mut buf = InputBuffer::new();
+        // 🎵 is 4 bytes (U+1F3B5)
+        buf.set("a🎵b");
+        assert_eq!(buf.text.len(), 6); // 1 + 4 + 1 bytes
+        assert_eq!(buf.cursor, 6); // at end
+
+        // Move left through 'b'
+        buf.move_left();
+        assert_eq!(buf.cursor, 5); // before 'b', after emoji
+
+        // Move left through emoji (should skip all 4 bytes)
+        buf.move_left();
+        assert_eq!(buf.cursor, 1); // before emoji, after 'a'
+
+        // Move left through 'a'
+        buf.move_left();
+        assert_eq!(buf.cursor, 0);
+
+        // Move right through 'a'
+        buf.move_right();
+        assert_eq!(buf.cursor, 1);
+
+        // Move right through emoji
+        buf.move_right();
+        assert_eq!(buf.cursor, 5); // after emoji
+    }
+
+    #[test]
+    fn test_unicode_navigation_cjk() {
+        let mut buf = InputBuffer::new();
+        // 日本語 - each CJK char is 3 bytes
+        buf.set("日本語");
+        assert_eq!(buf.text.len(), 9); // 3 * 3 bytes
+        assert_eq!(buf.cursor, 9);
+
+        buf.move_left();
+        assert_eq!(buf.cursor, 6); // before 語
+
+        buf.move_left();
+        assert_eq!(buf.cursor, 3); // before 本
+
+        buf.move_left();
+        assert_eq!(buf.cursor, 0); // before 日
+    }
+
+    #[test]
+    fn test_unicode_backspace_emoji() {
+        let mut buf = InputBuffer::new();
+        buf.set("hello🎵world");
+
+        // Position after emoji
+        buf.cursor = 9; // "hello" (5) + emoji (4)
+
+        // Backspace should delete entire emoji
+        buf.backspace();
+        assert_eq!(buf.text, "helloworld");
+        assert_eq!(buf.cursor, 5);
+    }
+
+    #[test]
+    fn test_unicode_insert_at_boundary() {
+        let mut buf = InputBuffer::new();
+        buf.set("日本");
+        buf.cursor = 3; // between 日 and 本
+
+        buf.insert('X');
+        assert_eq!(buf.text, "日X本");
+        assert_eq!(buf.cursor, 4); // after 'X'
+    }
+
+    #[test]
+    fn test_unicode_delete_multibyte() {
+        let mut buf = InputBuffer::new();
+        buf.set("a🎵b");
+        buf.cursor = 1; // before emoji
+
+        // Delete should remove entire emoji
+        buf.delete();
+        assert_eq!(buf.text, "ab");
+    }
+
+    #[test]
+    fn test_kill_word_with_multibyte_whitespace() {
+        let mut buf = InputBuffer::new();
+        // U+00A0 is non-breaking space (2 bytes in UTF-8: 0xC2 0xA0)
+        buf.set("hello\u{00A0}world");
+        buf.cursor = buf.text.len(); // at end
+
+        // This should kill "world" and leave "hello\u{00A0}"
+        let killed = buf.kill_word();
+        assert_eq!(killed, "world");
+        assert_eq!(buf.text, "hello\u{00A0}");
+    }
+
+    #[test]
+    fn test_kill_word_with_ideographic_space() {
+        let mut buf = InputBuffer::new();
+        // U+3000 is ideographic space (3 bytes in UTF-8)
+        buf.set("hello\u{3000}world");
+        buf.cursor = buf.text.len();
+
+        let killed = buf.kill_word();
+        assert_eq!(killed, "world");
+        assert_eq!(buf.text, "hello\u{3000}");
+    }
+
+    #[test]
+    fn test_word_at_cursor_multibyte_whitespace() {
+        let mut buf = InputBuffer::new();
+        // U+00A0 non-breaking space between words
+        buf.set("hello\u{00A0}world");
+        buf.cursor = buf.text.len(); // at end, in "world"
+
+        let (word, start, end) = buf.word_at_cursor();
+        assert_eq!(word, "world");
+        // start should be after the NBSP (byte 7, not 6)
+        assert_eq!(start, 7); // "hello" (5) + NBSP (2)
+        assert_eq!(end, 12);
+    }
+
+    #[test]
+    fn test_word_at_cursor_ideographic_space() {
+        let mut buf = InputBuffer::new();
+        // U+3000 ideographic space (3 bytes)
+        buf.set("日本\u{3000}語");
+        buf.cursor = buf.text.len(); // at end, in "語"
+
+        let (word, start, end) = buf.word_at_cursor();
+        assert_eq!(word, "語");
+        // start should be after ideographic space
+        assert_eq!(start, 9); // "日本" (6) + space (3)
+        assert_eq!(end, 12);
+    }
+
+    #[test]
+    fn test_mixed_ascii_unicode_navigation() {
+        let mut buf = InputBuffer::new();
+        buf.set("café"); // 'é' is 2 bytes (U+00E9)
+        assert_eq!(buf.text.len(), 5); // c(1) + a(1) + f(1) + é(2)
+
+        buf.move_left(); // from end
+        assert_eq!(buf.cursor, 3); // before 'é'
+
+        buf.move_left();
+        assert_eq!(buf.cursor, 2); // before 'f'
     }
 }

@@ -690,4 +690,257 @@ mod tests {
 
         Ok(())
     }
+
+    // ==========================================================================
+    // Scroll state edge case tests
+    // ==========================================================================
+
+    #[test]
+    fn test_content_shorter_than_viewport() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(20);
+        state.set_content_height(10); // Less than viewport
+
+        // max_offset should be 0 (can't scroll)
+        assert_eq!(state.max_offset(), 0);
+        assert_eq!(state.offset, 0);
+        assert!(state.at_top());
+        assert!(state.at_bottom()); // Both true when no scrolling possible
+
+        // Scroll operations should be no-ops
+        state.scroll_down(5);
+        assert_eq!(state.offset, 0);
+
+        state.scroll_up(5);
+        assert_eq!(state.offset, 0);
+    }
+
+    #[test]
+    fn test_content_equals_viewport() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(20);
+        state.set_content_height(20);
+
+        assert_eq!(state.max_offset(), 0);
+        assert!(state.at_top());
+        assert!(state.at_bottom());
+    }
+
+    #[test]
+    fn test_content_grows_while_pinned() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+
+        // Pin at position 20
+        state.offset = 20;
+        state.mode = ScrollMode::Pinned;
+
+        // Content grows to 100 lines
+        state.set_content_height(100);
+
+        // Offset should stay at 20 (pinned doesn't follow)
+        assert_eq!(state.offset, 20);
+        assert_eq!(state.mode, ScrollMode::Pinned);
+        assert_eq!(state.max_offset(), 90);
+    }
+
+    #[test]
+    fn test_content_grows_while_tail() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+
+        // Should be at bottom in tail mode
+        assert_eq!(state.offset, 40);
+        assert_eq!(state.mode, ScrollMode::Tail);
+
+        // Content grows
+        state.set_content_height(100);
+
+        // Offset should follow (tail mode)
+        assert_eq!(state.offset, 90);
+        assert_eq!(state.mode, ScrollMode::Tail);
+    }
+
+    #[test]
+    fn test_content_shrinks_clamps_offset() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(100);
+
+        // Pin at high offset
+        state.offset = 80;
+        state.mode = ScrollMode::Pinned;
+
+        // Content shrinks - offset must be clamped
+        state.set_content_height(50);
+
+        // max_offset is now 40, so offset should clamp to 40
+        assert_eq!(state.max_offset(), 40);
+        assert_eq!(state.offset, 40);
+    }
+
+    #[test]
+    fn test_half_page_navigation() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(100);
+        state.scroll_to_top();
+
+        state.half_page_down();
+        assert_eq!(state.offset, 5); // 10 / 2
+
+        state.half_page_down();
+        assert_eq!(state.offset, 10);
+
+        state.half_page_up();
+        assert_eq!(state.offset, 5);
+    }
+
+    #[test]
+    fn test_scroll_up_from_top() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.scroll_to_top();
+
+        // Scrolling up from top should stay at 0
+        state.scroll_up(10);
+        assert_eq!(state.offset, 0);
+    }
+
+    #[test]
+    fn test_scroll_down_from_bottom() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.scroll_to_bottom();
+
+        let max = state.max_offset();
+        state.scroll_down(10);
+        assert_eq!(state.offset, max); // Should stay at max
+    }
+
+    #[test]
+    fn test_mode_transitions() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+
+        // Start in tail mode at bottom
+        assert_eq!(state.mode, ScrollMode::Tail);
+        assert!(state.at_bottom());
+
+        // Any scroll up -> pinned
+        state.scroll_up(1);
+        assert_eq!(state.mode, ScrollMode::Pinned);
+
+        // Scroll back to bottom -> tail
+        state.scroll_to_bottom();
+        assert_eq!(state.mode, ScrollMode::Tail);
+
+        // Manual pin
+        state.mode = ScrollMode::Pinned;
+        state.offset = 20;
+
+        // Scrolling down to exactly bottom -> tail
+        state.scroll_down(20); // 20 + 20 = 40 = max_offset
+        assert_eq!(state.mode, ScrollMode::Tail);
+    }
+
+    #[test]
+    fn test_visible_range_at_boundaries() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+
+        // At top
+        state.scroll_to_top();
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 0);
+        assert_eq!(end, 10);
+
+        // At bottom
+        state.scroll_to_bottom();
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 40);
+        assert_eq!(end, 50);
+    }
+
+    #[test]
+    fn test_scroll_percent_edge_cases() {
+        let mut state = ScrollState::new();
+
+        // No content - should be 100%
+        state.set_viewport_height(10);
+        state.set_content_height(0);
+        assert!((state.scroll_percent() - 1.0).abs() < 0.01);
+
+        // Content smaller than viewport - should be 100%
+        state.set_content_height(5);
+        assert!((state.scroll_percent() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_empty_view_stack_operations() {
+        let mut stack = ViewStack::new();
+
+        // Pop from empty
+        assert!(stack.pop().is_none());
+
+        // Top of empty
+        assert!(stack.top().is_none());
+        assert!(stack.top_mut().is_none());
+
+        // Focused index of empty
+        assert!(stack.focused_index().is_none());
+    }
+
+    #[test]
+    fn test_view_stack_focused_index() {
+        let mut stack = ViewStack::new();
+
+        // Add focusable layer
+        let mut layer1 = ViewLayer::new("buffer");
+        layer1.focusable = true;
+        stack.push(layer1);
+
+        assert_eq!(stack.focused_index(), Some(0));
+
+        // Add non-focusable layer
+        let mut layer2 = ViewLayer::new("overlay");
+        layer2.focusable = false;
+        stack.push(layer2);
+
+        // Focused should still be index 0 (first focusable from top)
+        assert_eq!(stack.focused_index(), Some(0));
+
+        // Add another focusable layer
+        let layer3 = ViewLayer::new("modal");
+        stack.push(layer3);
+
+        // Now focused should be index 2 (topmost focusable)
+        assert_eq!(stack.focused_index(), Some(2));
+    }
+
+    #[test]
+    fn test_viewport_resize() {
+        let mut state = ScrollState::new();
+        state.set_content_height(100);
+        state.set_viewport_height(20);
+
+        // At bottom in tail mode
+        assert_eq!(state.offset, 80);
+
+        // Viewport grows
+        state.set_viewport_height(30);
+        assert_eq!(state.max_offset(), 70);
+        assert_eq!(state.offset, 70); // Tail mode follows
+
+        // Viewport shrinks
+        state.set_viewport_height(10);
+        assert_eq!(state.max_offset(), 90);
+        assert_eq!(state.offset, 90); // Tail mode follows
+    }
 }

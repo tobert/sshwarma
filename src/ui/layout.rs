@@ -22,6 +22,7 @@
 
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::collections::HashMap;
+use tracing::debug;
 
 /// A resolved rectangular region with pixel coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +231,22 @@ impl RegionDef {
         }
     }
 
+    /// Clamp a dimension, logging if clamping occurs
+    fn clamp_dimension(&self, requested: u16, available: u16, axis: &str) -> u16 {
+        if requested > available {
+            debug!(
+                region = %self.name,
+                axis,
+                requested,
+                available,
+                "layout constraint clamped"
+            );
+            available
+        } else {
+            requested
+        }
+    }
+
     fn resolve_horizontal(&self, parent_width: u16) -> (u16, u16) {
         match (&self.left, &self.right, &self.width) {
             // Both anchors: compute width
@@ -243,14 +260,16 @@ impl RegionDef {
             (Some(l), None, Some(w)) => {
                 let left = l.resolve_position(parent_width);
                 let width = w.resolve(parent_width).max(0) as u16;
-                (left, width.min(parent_width.saturating_sub(left)))
+                let available = parent_width.saturating_sub(left);
+                (left, self.clamp_dimension(width, available, "width"))
             }
             // Right anchor + width
             (None, Some(r), Some(w)) => {
                 let right = r.resolve_position(parent_width);
                 let width = w.resolve(parent_width).max(0) as u16;
-                let left = right.saturating_sub(width);
-                (left, width)
+                let clamped = self.clamp_dimension(width, right, "width");
+                let left = right.saturating_sub(clamped);
+                (left, clamped)
             }
             // Just left anchor: extend to right edge
             (Some(l), None, None) => {
@@ -262,11 +281,12 @@ impl RegionDef {
                 let right = r.resolve_position(parent_width);
                 (0, right)
             }
-            // Just width: center
+            // Just width: center, clamp to parent
             (None, None, Some(w)) => {
                 let width = w.resolve(parent_width).max(0) as u16;
-                let left = (parent_width.saturating_sub(width)) / 2;
-                (left, width)
+                let clamped = self.clamp_dimension(width, parent_width, "width");
+                let left = (parent_width.saturating_sub(clamped)) / 2;
+                (left, clamped)
             }
             // Nothing specified: fill parent
             (None, None, None) => (0, parent_width),
@@ -290,14 +310,16 @@ impl RegionDef {
             (Some(t), None, Some(h)) => {
                 let top = t.resolve_position(parent_height);
                 let height = h.resolve(parent_height).max(0) as u16;
-                (top, height.min(parent_height.saturating_sub(top)))
+                let available = parent_height.saturating_sub(top);
+                (top, self.clamp_dimension(height, available, "height"))
             }
             // Bottom anchor + height: position above bottom edge
             (None, Some(b), Some(h)) => {
                 let bottom_y = (parent_height as i32 + b.resolve(parent_height)).max(0) as u16;
                 let height = h.resolve(parent_height).max(0) as u16;
-                let top = bottom_y.saturating_sub(height);
-                (top, height)
+                let clamped = self.clamp_dimension(height, bottom_y, "height");
+                let top = bottom_y.saturating_sub(clamped);
+                (top, clamped)
             }
             // Just top anchor: extend to bottom edge
             (Some(t), None, None) => {
@@ -309,10 +331,10 @@ impl RegionDef {
                 let bottom_y = (parent_height as i32 + b.resolve(parent_height)).max(0) as u16;
                 (0, bottom_y)
             }
-            // Just height: position at top
+            // Just height: position at top, clamp to parent
             (None, None, Some(h)) => {
                 let height = h.resolve(parent_height).max(0) as u16;
-                (0, height)
+                (0, self.clamp_dimension(height, parent_height, "height"))
             }
             // Nothing specified: fill parent
             (None, None, None) => (0, parent_height),
@@ -738,5 +760,263 @@ mod tests {
         .exec()?;
 
         Ok(())
+    }
+
+    // ==========================================================================
+    // Layout constraint edge case tests
+    // ==========================================================================
+
+    #[test]
+    fn test_tiny_terminal_2x2() {
+        // Minimum usable terminal
+        let bounds = Rect::full(2, 2);
+
+        // Region requesting more space than available
+        let mut def = RegionDef::new("hud");
+        def.bottom = Some(Constraint::Absolute(0));
+        def.height = Some(Constraint::Absolute(8)); // Wants 8, only 2 available
+
+        let rect = def.resolve(bounds);
+        // Should clamp to available space
+        assert!(rect.height <= 2, "height {} should be <= 2", rect.height);
+        // rect.y is u16, so always >= 0
+    }
+
+    #[test]
+    fn test_zero_dimension_terminal() {
+        // Degenerate case - should not panic
+        let bounds = Rect::full(0, 0);
+        let def = RegionDef::new("test");
+        let rect = def.resolve(bounds);
+
+        assert_eq!(rect.width, 0);
+        assert_eq!(rect.height, 0);
+    }
+
+    #[test]
+    fn test_height_larger_than_terminal() {
+        let bounds = Rect::full(80, 24);
+
+        let mut def = RegionDef::new("oversized");
+        def.top = Some(Constraint::Absolute(0));
+        def.height = Some(Constraint::Absolute(100)); // Way bigger than 24
+
+        let rect = def.resolve(bounds);
+        // Should be clamped to terminal height
+        assert!(
+            rect.bottom() <= 24,
+            "bottom {} should not exceed terminal",
+            rect.bottom()
+        );
+    }
+
+    #[test]
+    fn test_negative_anchor_past_boundary() {
+        let bounds = Rect::full(80, 24);
+
+        // bottom = -100 means "100 lines from bottom", but terminal is only 24 lines
+        let mut def = RegionDef::new("weird");
+        def.bottom = Some(Constraint::Absolute(-100));
+        def.height = Some(Constraint::Absolute(5));
+
+        let rect = def.resolve(bounds);
+        // The bottom_y calculation: 24 + (-100) = -76, clamped to 0
+        // So rect should be positioned reasonably (not negative)
+        assert!(rect.y < 24, "y {} should be within bounds", rect.y);
+    }
+
+    #[test]
+    fn test_percentage_constraints() {
+        let bounds = Rect::full(100, 100);
+
+        let mut def = RegionDef::new("half");
+        def.width = Some(Constraint::Percent(0.5));
+        def.height = Some(Constraint::Percent(0.5));
+
+        let rect = def.resolve(bounds);
+        assert_eq!(rect.width, 50);
+        assert_eq!(rect.height, 50);
+        // Just width specified = centered horizontally
+        assert_eq!(rect.x, 25);
+    }
+
+    #[test]
+    fn test_percentage_rounding() {
+        // 50% of 3 = 1.5, should truncate to 1
+        let bounds = Rect::full(3, 3);
+
+        let mut def = RegionDef::new("half");
+        def.width = Some(Constraint::Percent(0.5));
+        def.height = Some(Constraint::Percent(0.5));
+
+        let rect = def.resolve(bounds);
+        assert_eq!(rect.width, 1); // floor(1.5)
+        assert_eq!(rect.height, 1);
+    }
+
+    #[test]
+    fn test_percentage_over_100() {
+        let bounds = Rect::full(100, 100);
+
+        let mut def = RegionDef::new("oversized");
+        def.width = Some(Constraint::Percent(1.5)); // 150%
+
+        let rect = def.resolve(bounds);
+        // 150% of 100 = 150, clamped to parent width of 100
+        assert_eq!(rect.width, 100);
+        assert_eq!(rect.x, 0); // Centered: (100 - 100) / 2 = 0
+    }
+
+    #[test]
+    fn test_both_anchors_ignore_explicit_size() {
+        let bounds = Rect::full(80, 24);
+
+        // When both anchors given, size is computed from them (explicit size ignored)
+        let mut def = RegionDef::new("test");
+        def.top = Some(Constraint::Absolute(5));
+        def.bottom = Some(Constraint::Absolute(-5)); // y=19
+        def.height = Some(Constraint::Absolute(100)); // Should be ignored
+
+        let rect = def.resolve(bounds);
+        // Height should be computed: 19 - 5 = 14, NOT 100
+        assert_eq!(rect.y, 5);
+        assert_eq!(rect.height, 14);
+    }
+
+    #[test]
+    fn test_left_anchor_extends_to_right() {
+        let bounds = Rect::full(80, 24);
+
+        let mut def = RegionDef::new("sidebar");
+        def.left = Some(Constraint::Absolute(60));
+        // No right anchor, no width -> should extend to right edge
+
+        let rect = def.resolve(bounds);
+        assert_eq!(rect.x, 60);
+        assert_eq!(rect.width, 20); // 80 - 60
+        assert_eq!(rect.right(), 80);
+    }
+
+    #[test]
+    fn test_right_anchor_extends_from_left() {
+        let bounds = Rect::full(80, 24);
+
+        let mut def = RegionDef::new("sidebar");
+        def.right = Some(Constraint::Absolute(20)); // 20 from left edge
+                                                    // No left anchor, no width -> should extend from x=0 to x=20
+
+        let rect = def.resolve(bounds);
+        assert_eq!(rect.x, 0);
+        assert_eq!(rect.width, 20);
+    }
+
+    #[test]
+    fn test_width_only_centers_horizontally() {
+        let bounds = Rect::full(80, 24);
+
+        let mut def = RegionDef::new("centered");
+        def.width = Some(Constraint::Absolute(40));
+
+        let rect = def.resolve(bounds);
+        assert_eq!(rect.width, 40);
+        assert_eq!(rect.x, 20); // (80 - 40) / 2
+    }
+
+    #[test]
+    fn test_height_only_positions_at_top() {
+        let bounds = Rect::full(80, 24);
+
+        let mut def = RegionDef::new("header");
+        def.height = Some(Constraint::Absolute(5));
+
+        let rect = def.resolve(bounds);
+        assert_eq!(rect.height, 5);
+        assert_eq!(rect.y, 0); // Positioned at top (different from horizontal centering)
+    }
+
+    #[test]
+    fn test_rect_sub_clipping() {
+        let r = Rect::new(10, 10, 20, 20);
+
+        // Sub-rect that would extend past bounds
+        let sub = r.sub(15, 15, 100, 100);
+
+        // Should be clipped to parent bounds
+        assert_eq!(sub.x, 25);
+        assert_eq!(sub.y, 25);
+        assert_eq!(sub.width, 5); // 20 - 15
+        assert_eq!(sub.height, 5);
+    }
+
+    #[test]
+    fn test_rect_shrink_larger_than_rect() {
+        let r = Rect::new(0, 0, 10, 10);
+
+        // Shrink by more than the rect size
+        let shrunk = r.shrink(20, 20, 20, 20);
+
+        // Should saturate to 0, not underflow
+        assert_eq!(shrunk.width, 0);
+        assert_eq!(shrunk.height, 0);
+    }
+
+    #[test]
+    fn test_split_at_zero() {
+        let lua = Lua::new();
+        register_layout_functions(&lua).unwrap();
+
+        lua.load(
+            r#"
+            local area = sshwarma.area(0, 0, 80, 24)
+
+            -- Split at 0 should give empty top, full bottom
+            local top, bottom = area:split_vertical(0)
+            assert(top.h == 0, "top height should be 0")
+            assert(bottom.h == 24, "bottom height should be 24")
+            assert(bottom.y == 0, "bottom y should be 0")
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn test_split_past_bounds() {
+        let lua = Lua::new();
+        register_layout_functions(&lua).unwrap();
+
+        lua.load(
+            r#"
+            local area = sshwarma.area(0, 0, 80, 24)
+
+            -- Split at value larger than height
+            local top, bottom = area:split_vertical(100)
+            assert(top.h == 24, "top should be clamped to full height")
+            assert(bottom.h == 0, "bottom should be empty")
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn test_nested_sub_areas() {
+        let lua = Lua::new();
+        register_layout_functions(&lua).unwrap();
+
+        lua.load(
+            r#"
+            local outer = sshwarma.area(10, 10, 100, 100)
+            local inner = outer:sub(5, 5, 50, 50)
+            local nested = inner:sub(10, 10, 20, 20)
+
+            -- Coordinates should accumulate
+            assert(outer.x == 10)
+            assert(inner.x == 15, "inner x should be 10 + 5 = 15")
+            assert(nested.x == 25, "nested x should be 15 + 10 = 25")
+        "#,
+        )
+        .exec()
+        .unwrap();
     }
 }
