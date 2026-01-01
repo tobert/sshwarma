@@ -175,7 +175,10 @@ MCP:
                 } else {
                     let mut out = "Rooms:\r\n".to_string();
                     for room in rooms {
-                        out.push_str(&format!("  {} ... {} users\r\n", room.name, room.user_count));
+                        out.push_str(&format!(
+                            "  {} ... {} users\r\n",
+                            room.name, room.user_count
+                        ));
                     }
                     out
                 }
@@ -221,7 +224,10 @@ MCP:
                 // Update player state (handler-specific)
                 if let Some(ref mut player) = self.player {
                     player.join_room(target.to_string());
-                    let _ = self.state.db.update_session_room(&player.session_id, Some(target));
+                    let _ = self
+                        .state
+                        .db
+                        .update_session_room(&player.session_id, Some(target));
                 }
                 self.render_room_ansi(target).await
             }
@@ -246,7 +252,10 @@ MCP:
             Ok(_summary) => {
                 if let Some(ref mut player) = self.player {
                     player.join_room(room_name.to_string());
-                    let _ = self.state.db.update_session_room(&player.session_id, Some(room_name));
+                    let _ = self
+                        .state
+                        .db
+                        .update_session_room(&player.session_id, Some(room_name));
                 }
                 let room_output = self.render_room_ansi(room_name).await;
                 format!("Created room '{}'.\r\n\r\n{}", room_name, room_output)
@@ -334,8 +343,11 @@ MCP:
                 if entries.is_empty() {
                     "No messages in this room yet.".to_string()
                 } else {
-                    let mut output =
-                        format!("─── Last {} messages in {} ───\r\n", entries.len(), room_name);
+                    let mut output = format!(
+                        "─── Last {} messages in {} ───\r\n",
+                        entries.len(),
+                        room_name
+                    );
                     for entry in entries {
                         output.push_str(&format!(
                             "[{}] {}: {}\r\n",
@@ -579,7 +591,10 @@ MCP:
                 }
 
                 self.state.mcp.add(name, url); // Non-blocking
-                format!("Connecting to MCP server '{}' at {} (background)", name, url)
+                format!(
+                    "Connecting to MCP server '{}' at {} (background)",
+                    name, url
+                )
             }
             "disconnect" | "remove" => {
                 let name = parts.get(1).copied().unwrap_or("");
@@ -758,7 +773,10 @@ MCP:
                 if let Some(notes) = &binding.notes {
                     output.push_str(&format!("Notes: {}\r\n", notes));
                 }
-                output.push_str(&format!("Bound by {} at {}\r\n", binding.bound_by, binding.bound_at));
+                output.push_str(&format!(
+                    "Bound by {} at {}\r\n",
+                    binding.bound_by, binding.bound_at
+                ));
                 output
             }
             Ok(None) => format!("No asset bound as '{}'", role),
@@ -840,7 +858,10 @@ MCP:
                 let new_room = summary.name.clone();
                 if let Some(ref mut player) = self.player {
                     player.join_room(new_room.clone());
-                    let _ = self.state.db.update_session_room(&player.session_id, Some(&new_room));
+                    let _ = self
+                        .state
+                        .db
+                        .update_session_room(&player.session_id, Some(&new_room));
                 }
                 self.render_room_ansi(&new_room).await
             }
@@ -890,7 +911,10 @@ MCP:
             Ok(_summary) => {
                 if let Some(ref mut player) = self.player {
                     player.join_room(new_name.to_string());
-                    let _ = self.state.db.update_session_room(&player.session_id, Some(new_name));
+                    let _ = self
+                        .state
+                        .db
+                        .update_session_room(&player.session_id, Some(new_name));
                 }
                 let room_output = self.render_room_ansi(new_name).await;
                 format!(
@@ -964,7 +988,10 @@ MCP:
             match self.state.models.get(args.trim()) {
                 Some(m) => m.clone(),
                 None => {
-                    let available: Vec<_> = self.state.models.available()
+                    let available: Vec<_> = self
+                        .state
+                        .models
+                        .available()
                         .iter()
                         .map(|m| m.short_name.as_str())
                         .collect();
@@ -1007,7 +1034,11 @@ MCP:
                     system_tokens,
                     result.system_prompt,
                     context_tokens,
-                    if result.context.is_empty() { "(empty)" } else { &result.context },
+                    if result.context.is_empty() {
+                        "(empty)"
+                    } else {
+                        &result.context
+                    },
                     system_tokens + context_tokens,
                     target_tokens
                 )
@@ -1074,7 +1105,9 @@ MCP:
                 Ok(i) => i,
                 Err(_) => return format!("Invalid slot index: {}", parts[1]),
             };
-            return self.cmd_prompt_insert(&room, parts[0], index, parts[2]).await;
+            return self
+                .cmd_prompt_insert(&room, parts[0], index, parts[2])
+                .await;
         }
 
         if args.starts_with("show ") {
@@ -1101,7 +1134,7 @@ MCP:
         // Strip surrounding quotes if present
         let content = content.trim();
         let content = if content.starts_with('"') && content.ends_with('"') && content.len() > 1 {
-            &content[1..content.len()-1]
+            &content[1..content.len() - 1]
         } else {
             content
         };
@@ -1161,7 +1194,13 @@ MCP:
         output
     }
 
-    async fn cmd_prompt_set(&self, room: &str, name: &str, content: &str, created_by: &str) -> String {
+    async fn cmd_prompt_set(
+        &self,
+        room: &str,
+        name: &str,
+        content: &str,
+        created_by: &str,
+    ) -> String {
         if let Err(e) = self.state.db.set_prompt(room, name, content, created_by) {
             return format!("Error saving prompt: {}", e);
         }
@@ -1218,20 +1257,38 @@ MCP:
         // Verify prompt exists
         match self.state.db.get_prompt(room, prompt_name) {
             Ok(Some(_)) => {}
-            Ok(None) => return format!("Prompt '{}' not found. Create it first with: /prompt {} \"<text>\"", prompt_name, prompt_name),
+            Ok(None) => {
+                return format!(
+                    "Prompt '{}' not found. Create it first with: /prompt {} \"<text>\"",
+                    prompt_name, prompt_name
+                )
+            }
             Err(e) => return format!("Error: {}", e),
         }
 
         // Determine target type
         let target_type = self.determine_target_type(target).await;
 
-        if let Err(e) = self.state.db.push_slot(room, target, &target_type, prompt_name) {
+        if let Err(e) = self
+            .state
+            .db
+            .push_slot(room, target, &target_type, prompt_name)
+        {
             return format!("Error adding slot: {}", e);
         }
 
         // Get current slot count
-        let slots = self.state.db.get_target_slots(room, target).unwrap_or_default();
-        format!("Added '{}' to {} ({} total slots)", prompt_name, target, slots.len())
+        let slots = self
+            .state
+            .db
+            .get_target_slots(room, target)
+            .unwrap_or_default();
+        format!(
+            "Added '{}' to {} ({} total slots)",
+            prompt_name,
+            target,
+            slots.len()
+        )
     }
 
     async fn cmd_prompt_pop(&self, room: &str, target: &str) -> String {
@@ -1250,7 +1307,13 @@ MCP:
         }
     }
 
-    async fn cmd_prompt_insert(&self, room: &str, target: &str, index: i64, prompt_name: &str) -> String {
+    async fn cmd_prompt_insert(
+        &self,
+        room: &str,
+        target: &str,
+        index: i64,
+        prompt_name: &str,
+    ) -> String {
         // Verify prompt exists
         match self.state.db.get_prompt(room, prompt_name) {
             Ok(Some(_)) => {}
@@ -1261,11 +1324,18 @@ MCP:
         // Determine target type
         let target_type = self.determine_target_type(target).await;
 
-        if let Err(e) = self.state.db.insert_slot(room, target, &target_type, index, prompt_name) {
+        if let Err(e) = self
+            .state
+            .db
+            .insert_slot(room, target, &target_type, index, prompt_name)
+        {
             return format!("Error inserting slot: {}", e);
         }
 
-        format!("Inserted '{}' at slot {} for '{}'", prompt_name, index, target)
+        format!(
+            "Inserted '{}' at slot {} for '{}'",
+            prompt_name, index, target
+        )
     }
 
     /// Determine if a target is a model or user

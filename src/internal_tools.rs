@@ -70,9 +70,13 @@ pub async fn register_tools(
     handle.add_tool(SshwarmaLook { ctx: ctx.clone() }).await?;
     handle.add_tool(SshwarmaWho { ctx: ctx.clone() }).await?;
     handle.add_tool(SshwarmaRooms { ctx: ctx.clone() }).await?;
-    handle.add_tool(SshwarmaHistory { ctx: ctx.clone() }).await?;
+    handle
+        .add_tool(SshwarmaHistory { ctx: ctx.clone() })
+        .await?;
     handle.add_tool(SshwarmaExits { ctx: ctx.clone() }).await?;
-    handle.add_tool(SshwarmaJournal { ctx: ctx.clone() }).await?;
+    handle
+        .add_tool(SshwarmaJournal { ctx: ctx.clone() })
+        .await?;
     handle.add_tool(SshwarmaTools { ctx: ctx.clone() }).await?;
     count += 7;
 
@@ -83,8 +87,12 @@ pub async fn register_tools(
         handle.add_tool(SshwarmaNote { ctx: ctx.clone() }).await?;
         handle.add_tool(SshwarmaDecide { ctx: ctx.clone() }).await?;
         handle.add_tool(SshwarmaIdea { ctx: ctx.clone() }).await?;
-        handle.add_tool(SshwarmaMilestone { ctx: ctx.clone() }).await?;
-        handle.add_tool(SshwarmaInspire { ctx: ctx.clone() }).await?;
+        handle
+            .add_tool(SshwarmaMilestone { ctx: ctx.clone() })
+            .await?;
+        handle
+            .add_tool(SshwarmaInspire { ctx: ctx.clone() })
+            .await?;
         count += 7;
 
         // Navigation tools (toggleable per-room)
@@ -338,7 +346,8 @@ impl ToolDyn for SshwarmaJournal {
         Box::pin(async move {
             ToolDefinition {
                 name: "sshwarma_journal".to_string(),
-                description: "Get journal entries (notes, decisions, ideas, milestones)".to_string(),
+                description: "Get journal entries (notes, decisions, ideas, milestones)"
+                    .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -457,12 +466,16 @@ impl ToolDyn for SshwarmaSay {
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             debug!(tool = "sshwarma_say", room = %self.ctx.room, "tool call");
-            let parsed: SayArgs =
-                serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+            let parsed: SayArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
 
-            ops::say(&self.ctx.state, &self.ctx.room, &self.ctx.username, &parsed.message)
-                .await
-                .map_err(anyhow_to_tool_error)?;
+            ops::say(
+                &self.ctx.state,
+                &self.ctx.room,
+                &self.ctx.username,
+                &parsed.message,
+            )
+            .await
+            .map_err(anyhow_to_tool_error)?;
 
             Ok(r#"{"status": "ok"}"#.to_string())
         })
@@ -653,9 +666,14 @@ impl ToolDyn for SshwarmaInspire {
                 serde_json::from_str(&args).unwrap_or(InspireArgs { content: None });
 
             if let Some(content) = parsed.content {
-                ops::add_inspiration(&self.ctx.state, &self.ctx.room, &content, &self.ctx.username)
-                    .await
-                    .map_err(anyhow_to_tool_error)?;
+                ops::add_inspiration(
+                    &self.ctx.state,
+                    &self.ctx.room,
+                    &content,
+                    &self.ctx.username,
+                )
+                .await
+                .map_err(anyhow_to_tool_error)?;
                 Ok(r#"{"status": "ok"}"#.to_string())
             } else {
                 let inspirations = ops::get_inspirations(&self.ctx.state, &self.ctx.room)
@@ -891,8 +909,9 @@ impl ToolDyn for SshwarmaFork {
         Box::pin(async move {
             ToolDefinition {
                 name: "sshwarma_fork".to_string(),
-                description: "Fork the current room (copies vibe, assets, inspirations) and join it"
-                    .to_string(),
+                description:
+                    "Fork the current room (copies vibe, assets, inspirations) and join it"
+                        .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

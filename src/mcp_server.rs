@@ -5,14 +5,13 @@
 
 use anyhow::Result;
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        StreamableHttpService,
-        session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpService,
     },
+    ServerHandler,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -128,7 +127,9 @@ pub struct AssetBindParams {
     pub room: String,
     #[schemars(description = "Artifact ID to bind (e.g. CAS hash or external ID)")]
     pub artifact_id: String,
-    #[schemars(description = "Semantic role for the asset (e.g. 'drums', 'main_theme', 'reference')")]
+    #[schemars(
+        description = "Semantic role for the asset (e.g. 'drums', 'main_theme', 'reference')"
+    )]
     pub role: String,
     #[schemars(description = "Optional notes about this binding")]
     pub notes: Option<String>,
@@ -188,7 +189,9 @@ pub struct ForkRoomParams {
 /// Parameters for preview_wrap
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PreviewWrapParams {
-    #[schemars(description = "Model short name (e.g. 'qwen-8b'). If not specified, uses a preview model.")]
+    #[schemars(
+        description = "Model short name (e.g. 'qwen-8b'). If not specified, uses a preview model."
+    )]
     pub model: Option<String>,
     #[schemars(description = "Room to preview context for (optional)")]
     pub room: Option<String>,
@@ -216,10 +219,7 @@ impl SshwarmaMcpServer {
 
         let mut output = String::new();
         for room in rooms {
-            output.push_str(&format!(
-                "- {} ({} users)\n",
-                room.name, room.user_count
-            ));
+            output.push_str(&format!("- {} ({} users)\n", room.name, room.user_count));
         }
         output
     }
@@ -256,7 +256,11 @@ impl SshwarmaMcpServer {
                     return format!("No messages in room '{}'.", params.room);
                 }
 
-                let mut output = format!("--- History for {} ({} messages) ---\n", params.room, messages.len());
+                let mut output = format!(
+                    "--- History for {} ({} messages) ---\n",
+                    params.room,
+                    messages.len()
+                );
                 for (ts, sender, content) in messages {
                     output.push_str(&format!("[{}] {}: {}\n", ts, sender, content));
                 }
@@ -279,7 +283,7 @@ impl SshwarmaMcpServer {
         }
 
         // Add message to in-memory room
-        use crate::display::{EntryContent, EntrySource, LedgerEntry, EntryId};
+        use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry};
         use chrono::Utc;
 
         let entry = LedgerEntry {
@@ -312,7 +316,10 @@ impl SshwarmaMcpServer {
         let model = match self.state.models.get(&params.model) {
             Some(m) => m.clone(),
             None => {
-                let available: Vec<_> = self.state.models.available()
+                let available: Vec<_> = self
+                    .state
+                    .models
+                    .available()
                     .iter()
                     .map(|m| m.short_name.as_str())
                     .collect();
@@ -325,7 +332,7 @@ impl SshwarmaMcpServer {
         };
 
         // Build context from room ledger if provided
-        use crate::display::{EntryContent, EntrySource, LedgerEntry, EntryId};
+        use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry};
         use chrono::Utc;
 
         let history = if let Some(ref room_name) = params.room {
@@ -335,18 +342,16 @@ impl SshwarmaMcpServer {
                     .recent(10)
                     .iter()
                     .filter(|e| !e.ephemeral)
-                    .filter_map(|entry| {
-                        match &entry.content {
-                            EntryContent::Chat(text) => {
-                                let role = match &entry.source {
-                                    EntrySource::User(_) => "user",
-                                    EntrySource::Model { .. } => "assistant",
-                                    EntrySource::System | EntrySource::Command { .. } => return None,
-                                };
-                                Some((role.to_string(), text.clone()))
-                            }
-                            _ => None,
+                    .filter_map(|entry| match &entry.content {
+                        EntryContent::Chat(text) => {
+                            let role = match &entry.source {
+                                EntrySource::User(_) => "user",
+                                EntrySource::Model { .. } => "assistant",
+                                EntrySource::System | EntrySource::Command { .. } => return None,
+                            };
+                            Some((role.to_string(), text.clone()))
                         }
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
             } else {
@@ -361,7 +366,12 @@ impl SshwarmaMcpServer {
             model.display_name
         );
 
-        match self.state.llm.chat_with_context(&model, &system_prompt, &history, &params.message).await {
+        match self
+            .state
+            .llm
+            .chat_with_context(&model, &system_prompt, &history, &params.message)
+            .await
+        {
             Ok(response) => {
                 // Record in room if specified
                 if let Some(ref room_name) = params.room {
@@ -414,8 +424,13 @@ impl SshwarmaMcpServer {
     #[tool(description = "Create a new room")]
     async fn create_room(&self, Parameters(params): Parameters<CreateRoomParams>) -> String {
         // Validate room name
-        if !params.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return "Room name can only contain letters, numbers, dashes, and underscores.".to_string();
+        if !params
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return "Room name can only contain letters, numbers, dashes, and underscores."
+                .to_string();
         }
 
         // Check if room exists
@@ -436,13 +451,19 @@ impl SshwarmaMcpServer {
         }
 
         // Persist
-        match self.state.db.create_room(&params.name, params.description.as_deref()) {
+        match self
+            .state
+            .db
+            .create_room(&params.name, params.description.as_deref())
+        {
             Ok(_) => format!("Created room '{}'.", params.name),
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(description = "Get full room context for agent onboarding - vibe, assets, journal, exits")]
+    #[tool(
+        description = "Get full room context for agent onboarding - vibe, assets, journal, exits"
+    )]
     async fn room_context(&self, Parameters(params): Parameters<RoomContextParams>) -> String {
         let mut output = String::new();
 
@@ -535,15 +556,16 @@ impl SshwarmaMcpServer {
                     return format!("No journal entries in room '{}'.", params.room);
                 }
 
-                let mut output = format!("## Journal for {} ({} entries)\n\n", params.room, entries.len());
+                let mut output = format!(
+                    "## Journal for {} ({} entries)\n\n",
+                    params.room,
+                    entries.len()
+                );
                 for entry in entries {
                     let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M");
                     output.push_str(&format!(
                         "[{}] **{}** ({})\n{}\n\n",
-                        timestamp,
-                        entry.kind,
-                        entry.author,
-                        entry.content
+                        timestamp, entry.kind, entry.author, entry.content
                     ));
                 }
                 output
@@ -556,15 +578,21 @@ impl SshwarmaMcpServer {
     async fn journal_write(&self, Parameters(params): Parameters<JournalWriteParams>) -> String {
         let kind = match JournalKind::parse(&params.kind) {
             Some(k) => k,
-            None => return format!(
-                "Invalid kind '{}'. Use: note, decision, milestone, idea, question",
-                params.kind
-            ),
+            None => {
+                return format!(
+                    "Invalid kind '{}'. Use: note, decision, milestone, idea, question",
+                    params.kind
+                )
+            }
         };
 
         let author = params.author.unwrap_or_else(|| "claude".to_string());
 
-        match self.state.db.add_journal_entry(&params.room, &author, &params.content, kind) {
+        match self
+            .state
+            .db
+            .add_journal_entry(&params.room, &author, &params.content, kind)
+        {
             Ok(_) => format!("Added {} to journal: {}", params.kind, params.content),
             Err(e) => format!("Error: {}", e),
         }
@@ -605,10 +633,16 @@ impl SshwarmaMcpServer {
                 if let Some(notes) = &binding.notes {
                     output.push_str(&format!("Notes: {}\n", notes));
                 }
-                output.push_str(&format!("Bound by {} at {}", binding.bound_by, binding.bound_at));
+                output.push_str(&format!(
+                    "Bound by {} at {}",
+                    binding.bound_by, binding.bound_at
+                ));
                 output
             }
-            Ok(None) => format!("No asset bound as '{}' in room '{}'.", params.role, params.room),
+            Ok(None) => format!(
+                "No asset bound as '{}' in room '{}'.",
+                params.role, params.room
+            ),
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -626,7 +660,11 @@ impl SshwarmaMcpServer {
         let bidirectional = params.bidirectional.unwrap_or(true);
 
         // Add forward exit
-        if let Err(e) = self.state.db.add_exit(&params.room, &params.direction, &params.target) {
+        if let Err(e) = self
+            .state
+            .db
+            .add_exit(&params.room, &params.direction, &params.target)
+        {
             return format!("Error: {}", e);
         }
 
@@ -644,7 +682,11 @@ impl SshwarmaMcpServer {
                 _ => "back",
             };
 
-            if let Err(e) = self.state.db.add_exit(&params.target, reverse_dir, &params.room) {
+            if let Err(e) = self
+                .state
+                .db
+                .add_exit(&params.target, reverse_dir, &params.room)
+            {
                 return format!(
                     "Created exit {} → {} but failed to create reverse: {}",
                     params.direction, params.target, e
@@ -653,8 +695,12 @@ impl SshwarmaMcpServer {
 
             format!(
                 "Created exits: {} ({} → {}) and {} ({} → {})",
-                params.direction, params.room, params.target,
-                reverse_dir, params.target, params.room
+                params.direction,
+                params.room,
+                params.target,
+                reverse_dir,
+                params.target,
+                params.room
             )
         } else {
             format!(
@@ -667,8 +713,13 @@ impl SshwarmaMcpServer {
     #[tool(description = "Fork a room, inheriting its context")]
     async fn fork_room(&self, Parameters(params): Parameters<ForkRoomParams>) -> String {
         // Validate new room name
-        if !params.new_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return "Room name can only contain letters, numbers, dashes, and underscores.".to_string();
+        if !params
+            .new_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return "Room name can only contain letters, numbers, dashes, and underscores."
+                .to_string();
         }
 
         // Check source exists
@@ -711,7 +762,10 @@ impl SshwarmaMcpServer {
             match self.state.models.get(model_name) {
                 Some(m) => m.clone(),
                 None => {
-                    let available: Vec<_> = self.state.models.available()
+                    let available: Vec<_> = self
+                        .state
+                        .models
+                        .available()
                         .iter()
                         .map(|m| m.short_name.as_str())
                         .collect();
@@ -776,7 +830,11 @@ impl SshwarmaMcpServer {
                     system_tokens,
                     result.system_prompt,
                     context_tokens,
-                    if result.context.is_empty() { "(empty)" } else { &result.context },
+                    if result.context.is_empty() {
+                        "(empty)"
+                    } else {
+                        &result.context
+                    },
                     system_tokens + context_tokens,
                     target_tokens
                 )

@@ -14,14 +14,14 @@ use tracing::{info, instrument, warn};
 use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::display::{
-    DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
     hud::{HudState, McpConnectionState, ParticipantStatus, HUD_HEIGHT},
     styles::ctrl,
+    DisplayBuffer, EntryContent, EntryId, EntrySource, Ledger, StatusKind,
 };
-use crate::llm::normalize_schema_for_llamacpp;
-use crate::lua::{mcp_request_handler, register_mcp_tools, LuaRuntime, McpBridge, WrapState};
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
+use crate::llm::normalize_schema_for_llamacpp;
+use crate::lua::{mcp_request_handler, register_mcp_tools, LuaRuntime, McpBridge, WrapState};
 use crate::player::PlayerSession;
 use crate::state::SharedState;
 
@@ -184,8 +184,7 @@ impl server::Handler for SshHandler {
 
         // Create Lua runtime with user-specific script lookup
         let lua_runtime = Arc::new(Mutex::new(
-            LuaRuntime::new_for_user(Some(&handle))
-                .expect("failed to create Lua runtime"),
+            LuaRuntime::new_for_user(Some(&handle)).expect("failed to create Lua runtime"),
         ));
 
         // Create MCP bridge for async Lua→MCP tool calls
@@ -344,17 +343,17 @@ impl server::Handler for SshHandler {
             let hud_start_row = height.saturating_sub(HUD_HEIGHT);
             let hud_output = {
                 let hud = self.hud_state.lock().await;
-                let lua_runtime = self.lua_runtime.as_ref().expect("lua_runtime not initialized");
+                let lua_runtime = self
+                    .lua_runtime
+                    .as_ref()
+                    .expect("lua_runtime not initialized");
                 let lua = lua_runtime.lock().await;
                 lua.update_state(hud.clone());
                 let now_ms = Utc::now().timestamp_millis();
-                let rendered = lua.render_hud_string(now_ms, width, height)
+                let rendered = lua
+                    .render_hud_string(now_ms, width, height)
                     .unwrap_or_else(|e| format!("HUD error: {}", e));
-                format!(
-                    "{}{}",
-                    ctrl::move_to(hud_start_row, 1),
-                    rendered
-                )
+                format!("{}{}", ctrl::move_to(hud_start_row, 1), rendered)
             };
             let _ = session.data(channel, CryptoVec::from(hud_output.as_bytes()));
         }
@@ -365,12 +364,26 @@ impl server::Handler for SshHandler {
             let ledger = self.ledger.clone();
             let display = self.display.clone();
             let hud_state_for_updates = self.hud_state.clone();
-            let lua_runtime_for_updates = self.lua_runtime.clone().expect("lua_runtime not initialized");
+            let lua_runtime_for_updates = self
+                .lua_runtime
+                .clone()
+                .expect("lua_runtime not initialized");
             let term_width = width;
             let term_height = height;
 
             tokio::spawn(async move {
-                push_updates_task(handle, channel, update_rx, ledger, display, hud_state_for_updates, lua_runtime_for_updates, term_width, term_height).await;
+                push_updates_task(
+                    handle,
+                    channel,
+                    update_rx,
+                    ledger,
+                    display,
+                    hud_state_for_updates,
+                    lua_runtime_for_updates,
+                    term_width,
+                    term_height,
+                )
+                .await;
             });
         }
 
@@ -378,13 +391,25 @@ impl server::Handler for SshHandler {
         {
             let handle = session.handle();
             let hud_state = self.hud_state.clone();
-            let lua_runtime = self.lua_runtime.clone().expect("lua_runtime not initialized");
+            let lua_runtime = self
+                .lua_runtime
+                .clone()
+                .expect("lua_runtime not initialized");
             let state = self.state.clone();
             let term_width = width;
             let term_height = height;
 
             tokio::spawn(async move {
-                hud_refresh_task(handle, channel, hud_state, lua_runtime, state, term_width, term_height).await;
+                hud_refresh_task(
+                    handle,
+                    channel,
+                    hud_state,
+                    lua_runtime,
+                    state,
+                    term_width,
+                    term_height,
+                )
+                .await;
             });
         }
 
@@ -402,7 +427,10 @@ impl server::Handler for SshHandler {
 
         // Spawn background tick task (500ms interval, calls Lua background())
         {
-            let lua_runtime = self.lua_runtime.clone().expect("lua_runtime not initialized");
+            let lua_runtime = self
+                .lua_runtime
+                .clone()
+                .expect("lua_runtime not initialized");
 
             tokio::spawn(async move {
                 background_tick_task(lua_runtime).await;
@@ -449,25 +477,41 @@ async fn push_updates_task(
     while let Some(update) = update_rx.recv().await {
         // Process the update based on type
         let needs_redraw = match update {
-            LedgerUpdate::Chunk { placeholder_id, text } => {
+            LedgerUpdate::Chunk {
+                placeholder_id,
+                text,
+            } => {
                 let mut ledger = ledger.lock().await;
                 ledger.append(placeholder_id, &text)
             }
-            LedgerUpdate::ToolCall { placeholder_id: _, tool_name: _ } => {
+            LedgerUpdate::ToolCall {
+                placeholder_id: _,
+                tool_name: _,
+            } => {
                 // Status shown in HUD, not in ledger
                 false
             }
-            LedgerUpdate::ToolResult { placeholder_id, summary } => {
+            LedgerUpdate::ToolResult {
+                placeholder_id,
+                summary,
+            } => {
                 let mut ledger = ledger.lock().await;
                 // Append tool result summary (status shown in HUD)
                 ledger.append(placeholder_id, &format!("\n[{}]\n", summary))
             }
-            LedgerUpdate::Complete { placeholder_id, model_name: _ } => {
+            LedgerUpdate::Complete {
+                placeholder_id,
+                model_name: _,
+            } => {
                 let mut ledger = ledger.lock().await;
                 ledger.finalize(placeholder_id);
                 true
             }
-            LedgerUpdate::FullResponse { placeholder_id, model_name: _, content } => {
+            LedgerUpdate::FullResponse {
+                placeholder_id,
+                model_name: _,
+                content,
+            } => {
                 let mut ledger = ledger.lock().await;
                 ledger.update(placeholder_id, EntryContent::Chat(content));
                 ledger.finalize(placeholder_id);
@@ -500,7 +544,9 @@ async fn push_updates_task(
         output.push_str(&rendered);
         output.push_str(&ctrl::restore_cursor());
 
-        let _ = handle.data(channel, CryptoVec::from(output.as_bytes())).await;
+        let _ = handle
+            .data(channel, CryptoVec::from(output.as_bytes()))
+            .await;
 
         // Redraw HUD at bottom
         let hud_output = {
@@ -508,15 +554,14 @@ async fn push_updates_task(
             let lua = lua_runtime.lock().await;
             lua.update_state(hud.clone());
             let now_ms = Utc::now().timestamp_millis();
-            let rendered = lua.render_hud_string(now_ms, term_width, term_height)
+            let rendered = lua
+                .render_hud_string(now_ms, term_width, term_height)
                 .unwrap_or_else(|e| format!("HUD error: {}", e));
-            format!(
-                "{}{}",
-                ctrl::move_to(hud_start_row, 1),
-                rendered
-            )
+            format!("{}{}", ctrl::move_to(hud_start_row, 1), rendered)
         };
-        let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
+        let _ = handle
+            .data(channel, CryptoVec::from(hud_output.as_bytes()))
+            .await;
     }
 }
 
@@ -571,7 +616,8 @@ async fn hud_refresh_task(
             let lua = lua_runtime.lock().await;
             lua.update_state(hud.clone());
             let now_ms = Utc::now().timestamp_millis();
-            let rendered = lua.render_hud_string(now_ms, term_width, term_height)
+            let rendered = lua
+                .render_hud_string(now_ms, term_width, term_height)
                 .unwrap_or_else(|e| format!("HUD error: {}", e));
             format!(
                 "{}{}{}{}",
@@ -581,7 +627,9 @@ async fn hud_refresh_task(
                 ctrl::restore_cursor()
             )
         };
-        let _ = handle.data(channel, CryptoVec::from(hud_output.as_bytes())).await;
+        let _ = handle
+            .data(channel, CryptoVec::from(hud_output.as_bytes()))
+            .await;
     }
 }
 
@@ -612,7 +660,11 @@ async fn background_tick_task(lua_runtime: Arc<Mutex<LuaRuntime>>) {
 
 impl SshHandler {
     /// Redraw the entire screen with scroll region
-    async fn redraw_screen(&self, channel: ChannelId, session: &mut Session) -> Result<(), anyhow::Error> {
+    async fn redraw_screen(
+        &self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), anyhow::Error> {
         let (width, height) = self.term_size;
         let scroll_bottom = height.saturating_sub(HUD_HEIGHT + 1);
         let hud_start_row = height.saturating_sub(HUD_HEIGHT);
@@ -640,7 +692,10 @@ impl SshHandler {
         // Render HUD
         let hud_rendered = {
             let hud = self.hud_state.lock().await;
-            let lua_runtime = self.lua_runtime.as_ref().expect("lua_runtime not initialized");
+            let lua_runtime = self
+                .lua_runtime
+                .as_ref()
+                .expect("lua_runtime not initialized");
             let lua = lua_runtime.lock().await;
             lua.update_state(hud.clone());
             let now_ms = Utc::now().timestamp_millis();
@@ -686,10 +741,7 @@ impl SshHandler {
             EditorAction::Execute(line) => {
                 // Handle /quit specially
                 if line.trim() == "/quit" {
-                    let output = format!(
-                        "{}\r\nGoodbye!\r\n",
-                        ctrl::reset_scroll_region()
-                    );
+                    let output = format!("{}\r\nGoodbye!\r\n", ctrl::reset_scroll_region());
                     let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                     session.close(channel)?;
                     return Ok(());
@@ -699,11 +751,7 @@ impl SshHandler {
                 if line.trim().starts_with('@') {
                     self.handle_mention_async(channel, session, &line).await?;
                     // handle_mention_async already rendered, just redraw input line
-                    let output = format!(
-                        "{}{}",
-                        ctrl::move_to(input_row, 1),
-                        ctrl::clear_line()
-                    );
+                    let output = format!("{}{}", ctrl::move_to(input_row, 1), ctrl::clear_line());
                     let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 } else {
                     // Track room before command to detect /join
@@ -747,10 +795,7 @@ impl SshHandler {
             }
             EditorAction::Quit => {
                 // Reset scroll region and say goodbye
-                let output = format!(
-                    "{}\r\nGoodbye!\r\n",
-                    ctrl::reset_scroll_region()
-                );
+                let output = format!("{}\r\nGoodbye!\r\n", ctrl::reset_scroll_region());
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 session.close(channel)?;
             }
@@ -775,10 +820,7 @@ impl SshHandler {
     ) -> Result<(), anyhow::Error> {
         let line = self.editor.value().to_string();
         let cursor = self.editor.cursor();
-        let room: Option<String> = self
-            .player
-            .as_ref()
-            .and_then(|p| p.current_room.clone());
+        let room: Option<String> = self.player.as_ref().and_then(|p| p.current_room.clone());
 
         // If we already have completions and user pressed tab again, cycle
         if !self.completions.is_empty() {
@@ -1038,7 +1080,10 @@ impl SshHandler {
         // Build context using Lua wrap() system
         let room_name = self.player.as_ref().and_then(|p| p.current_room.clone());
         let (system_prompt, context_prefix) = {
-            let lua_runtime = self.lua_runtime.as_ref().expect("lua_runtime not initialized");
+            let lua_runtime = self
+                .lua_runtime
+                .as_ref()
+                .expect("lua_runtime not initialized");
             let lua = lua_runtime.lock().await;
 
             // Create WrapState for context composition
@@ -1068,7 +1113,8 @@ impl SshHandler {
 
         // Get MCP tools for rig agent
         let mcp_context = self.state.mcp.rig_tools().await;
-        let needs_schema_strip = matches!(model.backend, crate::model::ModelBackend::LlamaCpp { .. });
+        let needs_schema_strip =
+            matches!(model.backend, crate::model::ModelBackend::LlamaCpp { .. });
 
         // Build ToolServer with MCP + internal tools
         let tool_server_handle = {
@@ -1079,11 +1125,18 @@ impl SshHandler {
                 for (tool, peer) in ctx.tools.iter() {
                     // Normalize schemas for llama.cpp (limited schema support)
                     let tool = if needs_schema_strip {
-                        let original_schema = serde_json::to_string(&tool.input_schema).unwrap_or_default();
+                        let original_schema =
+                            serde_json::to_string(&tool.input_schema).unwrap_or_default();
                         let normalized = normalize_schema_for_llamacpp(tool);
-                        let normalized_schema = serde_json::to_string(&normalized.input_schema).unwrap_or_default();
+                        let normalized_schema =
+                            serde_json::to_string(&normalized.input_schema).unwrap_or_default();
                         if original_schema != normalized_schema {
-                            tracing::info!("normalized schema for {}: {} -> {} bytes", tool.name, original_schema.len(), normalized_schema.len());
+                            tracing::info!(
+                                "normalized schema for {}: {} -> {} bytes",
+                                tool.name,
+                                original_schema.len(),
+                                normalized_schema.len()
+                            );
                         }
                         normalized
                     } else {
@@ -1099,17 +1152,26 @@ impl SshHandler {
         // Always add internal sshwarma tools (read-only always, write tools in rooms)
         let in_room = room_name.is_some();
         let room_for_tools = room_name.clone().unwrap_or_else(|| "lobby".to_string());
-        tracing::info!("registering internal tools for room: {} (write_tools={})", room_for_tools, in_room);
+        tracing::info!(
+            "registering internal tools for room: {} (write_tools={})",
+            room_for_tools,
+            in_room
+        );
         let tool_ctx = ToolContext {
             state: self.state.clone(),
             room: room_for_tools.clone(),
             username: username.clone(),
-            lua_runtime: self.lua_runtime.clone().expect("lua_runtime not initialized"),
+            lua_runtime: self
+                .lua_runtime
+                .clone()
+                .expect("lua_runtime not initialized"),
         };
         // Use per-room config (navigation may be disabled for this room)
         let config = InternalToolConfig::for_room(&self.state, &room_for_tools).await;
         // Register tools individually (not append_toolset) so they appear in static_tool_names
-        match crate::internal_tools::register_tools(&tool_server_handle, tool_ctx, &config, in_room).await {
+        match crate::internal_tools::register_tools(&tool_server_handle, tool_ctx, &config, in_room)
+            .await
+        {
             Ok(count) => tracing::info!("registered {} internal tools", count),
             Err(e) => tracing::error!("failed to register internal tools: {}", e),
         }
@@ -1124,7 +1186,10 @@ impl SshHandler {
                     let display_name = tool.name.strip_prefix("sshwarma_").unwrap_or(&tool.name);
                     tool_guide.push_str(&format!("- **{}**: {}\n", display_name, tool.description));
                 }
-                tracing::info!("injecting {} function definitions into prompt", tool_defs.len());
+                tracing::info!(
+                    "injecting {} function definitions into prompt",
+                    tool_defs.len()
+                );
                 format!("{}{}", system_prompt, tool_guide)
             }
             Ok(_) => {
@@ -1181,7 +1246,8 @@ impl SshHandler {
                         tool_server_handle,
                         chunk_tx,
                         100, // max tool turns
-                    ).await
+                    )
+                    .await
                 }
             });
 
@@ -1192,21 +1258,28 @@ impl SshHandler {
                 match chunk {
                     StreamChunk::Text(text) => {
                         full_response.push_str(&text);
-                        let _ = update_tx.send(LedgerUpdate::Chunk {
-                            placeholder_id,
-                            text,
-                        }).await;
+                        let _ = update_tx
+                            .send(LedgerUpdate::Chunk {
+                                placeholder_id,
+                                text,
+                            })
+                            .await;
                     }
                     StreamChunk::ToolCall(name) => {
                         // Update HUD: model is running a tool
                         {
                             let mut hud = hud_state.lock().await;
-                            hud.update_status(&model_short, ParticipantStatus::RunningTool(name.clone()));
+                            hud.update_status(
+                                &model_short,
+                                ParticipantStatus::RunningTool(name.clone()),
+                            );
                         }
-                        let _ = update_tx.send(LedgerUpdate::ToolCall {
-                            placeholder_id,
-                            tool_name: name,
-                        }).await;
+                        let _ = update_tx
+                            .send(LedgerUpdate::ToolCall {
+                                placeholder_id,
+                                tool_name: name,
+                            })
+                            .await;
                     }
                     StreamChunk::ToolResult(summary) => {
                         // Update HUD: back to thinking after tool result
@@ -1214,10 +1287,12 @@ impl SshHandler {
                             let mut hud = hud_state.lock().await;
                             hud.update_status(&model_short, ParticipantStatus::Thinking);
                         }
-                        let _ = update_tx.send(LedgerUpdate::ToolResult {
-                            placeholder_id,
-                            summary,
-                        }).await;
+                        let _ = update_tx
+                            .send(LedgerUpdate::ToolResult {
+                                placeholder_id,
+                                summary,
+                            })
+                            .await;
                     }
                     StreamChunk::Done => {
                         break;
