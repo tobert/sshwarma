@@ -23,8 +23,9 @@ pub struct LuaBuffer {
 impl UserData for LuaBuffer {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // buf.id -> string
-        methods.add_meta_method(mlua::MetaMethod::Index, |lua, this, key: String| {
-            match key.as_str() {
+        methods.add_meta_method(
+            mlua::MetaMethod::Index,
+            |lua, this, key: String| match key.as_str() {
                 "id" => Ok(Value::String(lua.create_string(&this.buffer.id)?)),
                 "room_id" => match &this.buffer.room_id {
                     Some(id) => Ok(Value::String(lua.create_string(id)?)),
@@ -46,15 +47,15 @@ impl UserData for LuaBuffer {
                 "include_in_wrap" => Ok(Value::Boolean(this.buffer.include_in_wrap)),
                 "wrap_priority" => Ok(Value::Integer(this.buffer.wrap_priority)),
                 _ => Ok(Value::Nil),
-            }
-        });
+            },
+        );
 
         // buf:rows() -> LuaRowSet
         methods.add_method("rows", |_lua, this, ()| {
             let rows = this
                 .db
                 .list_buffer_rows(&this.buffer.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
 
             Ok(LuaRowSet {
                 rows,
@@ -277,17 +278,20 @@ impl UserData for LuaRowSet {
         });
 
         // rowset:reduce(initial, function(acc, row) -> acc) -> value
-        methods.add_method("reduce", |_lua, this, (initial, func): (Value, Function)| {
-            let mut acc = initial;
-            for row in &this.rows {
-                let lua_row = LuaRow {
-                    row: row.clone(),
-                    db: this.db.clone(),
-                };
-                acc = func.call((acc, lua_row))?;
-            }
-            Ok(acc)
-        });
+        methods.add_method(
+            "reduce",
+            |_lua, this, (initial, func): (Value, Function)| {
+                let mut acc = initial;
+                for row in &this.rows {
+                    let lua_row = LuaRow {
+                        row: row.clone(),
+                        db: this.db.clone(),
+                    };
+                    acc = func.call((acc, lua_row))?;
+                }
+                Ok(acc)
+            },
+        );
 
         // rowset:group_by(field) -> table { [value] = LuaRowSet }
         methods.add_method("group_by", |lua, this, field: String| {
@@ -456,7 +460,7 @@ impl UserData for LuaRow {
                 "pinned" => Ok(Value::Boolean(this.row.pinned)),
                 "hidden" => Ok(Value::Boolean(this.row.hidden)),
                 "token_count" => match this.row.token_count {
-                    Some(n) => Ok(Value::Integer(n as i32)),
+                    Some(n) => Ok(Value::Integer(n)),
                     None => Ok(Value::Nil),
                 },
                 "cost_usd" => match this.row.cost_usd {
@@ -464,7 +468,7 @@ impl UserData for LuaRow {
                     None => Ok(Value::Nil),
                 },
                 "latency_ms" => match this.row.latency_ms {
-                    Some(l) => Ok(Value::Integer(l as i32)),
+                    Some(l) => Ok(Value::Integer(l)),
                     None => Ok(Value::Nil),
                 },
                 "created_at" => Ok(Value::Number(this.row.created_at as f64)),
@@ -482,7 +486,7 @@ impl UserData for LuaRow {
             let tags = this
                 .db
                 .get_row_tags(&this.row.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
 
             let result = lua.create_table()?;
             for (i, tag) in tags.iter().enumerate() {
@@ -496,7 +500,7 @@ impl UserData for LuaRow {
             let tags = this
                 .db
                 .get_row_tags(&this.row.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             Ok(tags.contains(&tag))
         });
 
@@ -504,7 +508,7 @@ impl UserData for LuaRow {
         methods.add_method("add_tag", |_lua, this, tag: String| {
             this.db
                 .add_row_tag(&this.row.id, &tag)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             Ok(())
         });
 
@@ -512,7 +516,7 @@ impl UserData for LuaRow {
         methods.add_method("remove_tag", |_lua, this, tag: String| {
             this.db
                 .remove_row_tag(&this.row.id, &tag)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             Ok(())
         });
 
@@ -521,7 +525,7 @@ impl UserData for LuaRow {
             let children = this
                 .db
                 .list_child_rows(&this.row.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             Ok(LuaRowSet {
                 rows: children,
                 db: this.db.clone(),
@@ -546,7 +550,7 @@ impl UserData for LuaRow {
             let reactions = this
                 .db
                 .get_row_reactions(&this.row.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
 
             let result = lua.create_table()?;
             for (i, r) in reactions.iter().enumerate() {
@@ -566,7 +570,7 @@ impl UserData for LuaRow {
             |_lua, this, (agent_id, reaction): (String, String)| {
                 this.db
                     .add_row_reaction(&this.row.id, &agent_id, &reaction)
-                    .map_err(|e| mlua::Error::external(e))?;
+                    .map_err(mlua::Error::external)?;
                 Ok(())
             },
         );
@@ -576,7 +580,7 @@ impl UserData for LuaRow {
             let links = this
                 .db
                 .get_row_links_from(&this.row.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
 
             let result = lua.create_table()?;
             for (i, link) in links.iter().enumerate() {
@@ -593,7 +597,7 @@ impl UserData for LuaRow {
             let links = this
                 .db
                 .get_row_links_to(&this.row.id)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
 
             let result = lua.create_table()?;
             for (i, link) in links.iter().enumerate() {
@@ -610,11 +614,12 @@ impl UserData for LuaRow {
             "add_link",
             |_lua, this, (to_row_id, link_type): (String, String)| {
                 use crate::db::rows::LinkType;
-                let lt = LinkType::from_str(&link_type)
-                    .ok_or_else(|| mlua::Error::external(format!("invalid link type: {}", link_type)))?;
+                let lt = LinkType::parse(&link_type).ok_or_else(|| {
+                    mlua::Error::external(format!("invalid link type: {}", link_type))
+                })?;
                 this.db
                     .create_row_link(&this.row.id, &to_row_id, lt)
-                    .map_err(|e| mlua::Error::external(e))?;
+                    .map_err(mlua::Error::external)?;
                 Ok(())
             },
         );
@@ -701,15 +706,13 @@ pub fn register_data_functions(lua: &Lua, db: Arc<Database>) -> LuaResult<()> {
     // sshwarma.buffer(id) -> LuaBuffer or nil
     {
         let db = db.clone();
-        let buffer_fn = lua.create_function(move |_lua, id: String| {
-            match db.get_buffer(&id) {
-                Ok(Some(buffer)) => Ok(Some(LuaBuffer {
-                    buffer,
-                    db: db.clone(),
-                })),
-                Ok(None) => Ok(None),
-                Err(e) => Err(mlua::Error::external(e)),
-            }
+        let buffer_fn = lua.create_function(move |_lua, id: String| match db.get_buffer(&id) {
+            Ok(Some(buffer)) => Ok(Some(LuaBuffer {
+                buffer,
+                db: db.clone(),
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(mlua::Error::external(e)),
         })?;
         sshwarma.set("buffer", buffer_fn)?;
     }
@@ -757,7 +760,10 @@ pub fn register_data_functions(lua: &Lua, db: Arc<Database>) -> LuaResult<()> {
     {
         let db = db.clone();
         let row_fn = lua.create_function(move |_lua, id: String| match db.get_row(&id) {
-            Ok(Some(row)) => Ok(Some(LuaRow { row, db: db.clone() })),
+            Ok(Some(row)) => Ok(Some(LuaRow {
+                row,
+                db: db.clone(),
+            })),
             Ok(None) => Ok(None),
             Err(e) => Err(mlua::Error::external(e)),
         })?;

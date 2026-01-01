@@ -28,7 +28,7 @@ impl TriggerKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "row" => Some(TriggerKind::Row),
             "interval" => Some(TriggerKind::Interval),
@@ -65,7 +65,7 @@ impl ActionSlot {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "render" => Some(ActionSlot::Render),
             "wrap" => Some(ActionSlot::Wrap),
@@ -108,7 +108,11 @@ pub struct RoomRule {
 
 impl RoomRule {
     /// Create a new row-triggered rule
-    pub fn row_trigger(room_id: impl Into<String>, script_id: impl Into<String>, slot: ActionSlot) -> Self {
+    pub fn row_trigger(
+        room_id: impl Into<String>,
+        script_id: impl Into<String>,
+        slot: ActionSlot,
+    ) -> Self {
         Self {
             id: new_id(),
             room_id: room_id.into(),
@@ -229,7 +233,7 @@ impl Database {
             .context("failed to prepare rule query")?;
 
         let rule = stmt
-            .query_row(params![id], |row| Self::rule_from_row(row))
+            .query_row(params![id], Self::rule_from_row)
             .optional()
             .context("failed to query rule")?;
 
@@ -254,7 +258,7 @@ impl Database {
 
         let rules = stmt
             .query(params![room_id])?
-            .mapped(|row| Self::rule_from_row(row))
+            .mapped(Self::rule_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list rules")?;
 
@@ -279,7 +283,7 @@ impl Database {
 
         let rules = stmt
             .query(params![room_id, kind.as_str()])?
-            .mapped(|row| Self::rule_from_row(row))
+            .mapped(Self::rule_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list rules by trigger")?;
 
@@ -349,7 +353,7 @@ impl Database {
             name: row.get(2)?,
             enabled: enabled_int != 0,
             priority: row.get(4)?,
-            trigger_kind: TriggerKind::from_str(&trigger_kind_str).unwrap_or(TriggerKind::Row),
+            trigger_kind: TriggerKind::parse(&trigger_kind_str).unwrap_or(TriggerKind::Row),
             match_content_method: row.get(6)?,
             match_source_agent: row.get(7)?,
             match_tag: row.get(8)?,
@@ -357,7 +361,7 @@ impl Database {
             interval_ms: row.get(10)?,
             tick_divisor: row.get(11)?,
             script_id: row.get(12)?,
-            action_slot: ActionSlot::from_str(&action_slot_str).unwrap_or(ActionSlot::Background),
+            action_slot: ActionSlot::parse(&action_slot_str).unwrap_or(ActionSlot::Background),
             created_at: row.get(14)?,
         })
     }

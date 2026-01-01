@@ -27,7 +27,7 @@ impl AgentKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "human" => Some(AgentKind::Human),
             "model" => Some(AgentKind::Model),
@@ -60,7 +60,7 @@ impl BackendKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "ollama" => Some(BackendKind::Ollama),
             "openai" => Some(BackendKind::OpenAI),
@@ -142,7 +142,7 @@ impl SessionKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "ssh" => Some(SessionKind::Ssh),
             "mcp" => Some(SessionKind::Mcp),
@@ -201,7 +201,7 @@ impl AuthKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pubkey" => Some(AuthKind::Pubkey),
             "api_key" => Some(AuthKind::ApiKey),
@@ -286,9 +286,7 @@ impl Database {
             .context("failed to prepare agent query")?;
 
         let agent = stmt
-            .query_row(params![id], |row| {
-                Ok(Self::agent_from_row(row)?)
-            })
+            .query_row(params![id], Self::agent_from_row)
             .optional()
             .context("failed to query agent")?;
 
@@ -310,9 +308,7 @@ impl Database {
             .context("failed to prepare agent query")?;
 
         let agent = stmt
-            .query_row(params![name], |row| {
-                Ok(Self::agent_from_row(row)?)
-            })
+            .query_row(params![name], Self::agent_from_row)
             .optional()
             .context("failed to query agent by name")?;
 
@@ -323,28 +319,34 @@ impl Database {
     pub fn list_agents(&self, kind: Option<AgentKind>) -> Result<Vec<Agent>> {
         let conn = self.conn()?;
         let sql = match kind {
-            Some(_) => r#"
+            Some(_) => {
+                r#"
                 SELECT id, name, display_name, agent_kind, capabilities, created_at,
                        hud_script, wrap_script, context_format,
                        backend_kind, backend_model_id, backend_endpoint, backend_config, system_prompt
                 FROM agents WHERE agent_kind = ?1 ORDER BY name
-            "#,
-            None => r#"
+            "#
+            }
+            None => {
+                r#"
                 SELECT id, name, display_name, agent_kind, capabilities, created_at,
                        hud_script, wrap_script, context_format,
                        backend_kind, backend_model_id, backend_endpoint, backend_config, system_prompt
                 FROM agents ORDER BY name
-            "#,
+            "#
+            }
         };
 
-        let mut stmt = conn.prepare(sql).context("failed to prepare agents query")?;
+        let mut stmt = conn
+            .prepare(sql)
+            .context("failed to prepare agents query")?;
         let rows = match kind {
             Some(k) => stmt.query(params![k.as_str()])?,
             None => stmt.query([])?,
         };
 
         let agents = rows
-            .mapped(|row| Self::agent_from_row(row))
+            .mapped(Self::agent_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list agents")?;
 
@@ -396,8 +398,7 @@ impl Database {
 
     fn agent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         let caps_json: String = row.get(4)?;
-        let capabilities: Vec<String> =
-            serde_json::from_str(&caps_json).unwrap_or_default();
+        let capabilities: Vec<String> = serde_json::from_str(&caps_json).unwrap_or_default();
         let kind_str: String = row.get(3)?;
         let backend_kind_str: Option<String> = row.get(9)?;
 
@@ -405,13 +406,13 @@ impl Database {
             id: row.get(0)?,
             name: row.get(1)?,
             display_name: row.get(2)?,
-            kind: AgentKind::from_str(&kind_str).unwrap_or(AgentKind::Human),
+            kind: AgentKind::parse(&kind_str).unwrap_or(AgentKind::Human),
             capabilities,
             created_at: row.get(5)?,
             hud_script: row.get(6)?,
             wrap_script: row.get(7)?,
             context_format: row.get(8)?,
-            backend_kind: backend_kind_str.and_then(|s| BackendKind::from_str(&s)),
+            backend_kind: backend_kind_str.and_then(|s| BackendKind::parse(&s)),
             backend_model_id: row.get(10)?,
             backend_endpoint: row.get(11)?,
             backend_config: row.get(12)?,
@@ -455,7 +456,7 @@ impl Database {
             .context("failed to prepare session query")?;
 
         let session = stmt
-            .query_row(params![id], |row| Self::session_from_row(row))
+            .query_row(params![id], Self::session_from_row)
             .optional()
             .context("failed to query session")?;
 
@@ -478,7 +479,7 @@ impl Database {
 
         let sessions = stmt
             .query(params![agent_id])?
-            .mapped(|row| Self::session_from_row(row))
+            .mapped(Self::session_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list sessions")?;
 
@@ -501,7 +502,7 @@ impl Database {
         Ok(AgentSession {
             id: row.get(0)?,
             agent_id: row.get(1)?,
-            kind: SessionKind::from_str(&kind_str).unwrap_or(SessionKind::Internal),
+            kind: SessionKind::parse(&kind_str).unwrap_or(SessionKind::Internal),
             connected_at: row.get(3)?,
             disconnected_at: row.get(4)?,
             metadata: row.get(5)?,
@@ -546,7 +547,7 @@ impl Database {
                 let kind_str: String = row.get(1)?;
                 Ok(AgentAuth {
                     agent_id: row.get(0)?,
-                    kind: AuthKind::from_str(&kind_str).unwrap_or(AuthKind::Local),
+                    kind: AuthKind::parse(&kind_str).unwrap_or(AuthKind::Local),
                     auth_data: row.get(2)?,
                     created_at: row.get(3)?,
                 })
@@ -575,7 +576,7 @@ impl Database {
 
         let agent = stmt
             .query_row(params![kind.as_str(), auth_data], |row| {
-                Ok(Self::agent_from_row(row)?)
+                Self::agent_from_row(row)
             })
             .optional()
             .context("failed to query agent by auth")?;

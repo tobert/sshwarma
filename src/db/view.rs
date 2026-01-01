@@ -73,7 +73,7 @@ impl ScrollMode {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "tail" => Some(ScrollMode::Tail),
             "pinned" => Some(ScrollMode::Pinned),
@@ -128,11 +128,7 @@ impl Database {
     // --- View Stack ---
 
     /// Get or create view stack for agent+region
-    pub fn get_or_create_view_stack(
-        &self,
-        agent_id: &str,
-        region_name: &str,
-    ) -> Result<ViewStack> {
+    pub fn get_or_create_view_stack(&self, agent_id: &str, region_name: &str) -> Result<ViewStack> {
         if let Some(stack) = self.get_view_stack(agent_id, region_name)? {
             return Ok(stack);
         }
@@ -243,7 +239,7 @@ impl Database {
                     buffer_id: row.get(1)?,
                     scroll_row_id: row.get(2)?,
                     scroll_offset: row.get(3)?,
-                    mode: ScrollMode::from_str(&mode_str).unwrap_or(ScrollMode::Tail),
+                    mode: ScrollMode::parse(&mode_str).unwrap_or(ScrollMode::Tail),
                     updated_at: row.get(5)?,
                 })
             })
@@ -308,7 +304,7 @@ impl Database {
                     buffer_id: row.get(1)?,
                     scroll_row_id: row.get(2)?,
                     scroll_offset: row.get(3)?,
-                    mode: ScrollMode::from_str(&mode_str).unwrap_or(ScrollMode::Tail),
+                    mode: ScrollMode::parse(&mode_str).unwrap_or(ScrollMode::Tail),
                     updated_at: row.get(5)?,
                 })
             })

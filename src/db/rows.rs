@@ -74,8 +74,17 @@ impl Row {
     }
 
     /// Create a message row
-    pub fn message(buffer_id: impl Into<String>, agent_id: impl Into<String>, content: impl Into<String>, is_model: bool) -> Self {
-        let method = if is_model { "message.model" } else { "message.user" };
+    pub fn message(
+        buffer_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        content: impl Into<String>,
+        is_model: bool,
+    ) -> Self {
+        let method = if is_model {
+            "message.model"
+        } else {
+            "message.user"
+        };
         let mut row = Self::new(buffer_id, method);
         row.source_agent_id = Some(agent_id.into());
         row.content = Some(content.into());
@@ -144,7 +153,7 @@ impl LinkType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "reply" => Some(LinkType::Reply),
             "quote" => Some(LinkType::Quote),
@@ -250,7 +259,7 @@ impl Database {
             .context("failed to prepare row query")?;
 
         let row = stmt
-            .query_row(params![id], |r| Self::row_from_sqlite(r))
+            .query_row(params![id], Self::row_from_sqlite)
             .optional()
             .context("failed to query row")?;
 
@@ -278,7 +287,7 @@ impl Database {
 
         let rows = stmt
             .query(params![buffer_id])?
-            .mapped(|r| Self::row_from_sqlite(r))
+            .mapped(Self::row_from_sqlite)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list rows")?;
 
@@ -306,7 +315,7 @@ impl Database {
 
         let rows = stmt
             .query(params![parent_row_id])?
-            .mapped(|r| Self::row_from_sqlite(r))
+            .mapped(Self::row_from_sqlite)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list child rows")?;
 
@@ -334,7 +343,7 @@ impl Database {
             .context("failed to prepare last row query")?;
 
         let row = stmt
-            .query_row(params![buffer_id], |r| Self::row_from_sqlite(r))
+            .query_row(params![buffer_id], Self::row_from_sqlite)
             .optional()
             .context("failed to query last row")?;
 
@@ -487,7 +496,7 @@ impl Database {
 
         let rows = stmt
             .query(params![buffer_id, tag])?
-            .mapped(|r| Self::row_from_sqlite(r))
+            .mapped(Self::row_from_sqlite)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to find rows by tag")?;
 
@@ -588,7 +597,7 @@ impl Database {
                     id: r.get(0)?,
                     from_row_id: r.get(1)?,
                     to_row_id: r.get(2)?,
-                    link_type: LinkType::from_str(&link_type_str).unwrap_or(LinkType::Relates),
+                    link_type: LinkType::parse(&link_type_str).unwrap_or(LinkType::Relates),
                     created_at: r.get(4)?,
                 })
             })
@@ -615,7 +624,7 @@ impl Database {
                     id: r.get(0)?,
                     from_row_id: r.get(1)?,
                     to_row_id: r.get(2)?,
-                    link_type: LinkType::from_str(&link_type_str).unwrap_or(LinkType::Relates),
+                    link_type: LinkType::parse(&link_type_str).unwrap_or(LinkType::Relates),
                     created_at: r.get(4)?,
                 })
             })
@@ -656,7 +665,7 @@ impl Database {
 
         let rows = stmt
             .query(params![buffer_id, method_pattern])?
-            .mapped(|r| Self::row_from_sqlite(r))
+            .mapped(Self::row_from_sqlite)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list rows by method")?;
 
@@ -667,7 +676,11 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{agents::{Agent, AgentKind}, buffers::Buffer, rooms::Room};
+    use crate::db::{
+        agents::{Agent, AgentKind},
+        buffers::Buffer,
+        rooms::Room,
+    };
 
     fn setup() -> Result<(Database, String, String)> {
         let db = Database::in_memory()?;

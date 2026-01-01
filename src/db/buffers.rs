@@ -27,7 +27,7 @@ impl BufferType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "room_chat" => Some(BufferType::RoomChat),
             "thinking" => Some(BufferType::Thinking),
@@ -56,7 +56,7 @@ impl TombstoneStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "success" => Some(TombstoneStatus::Success),
             "failure" => Some(TombstoneStatus::Failure),
@@ -190,7 +190,7 @@ impl Database {
             .context("failed to prepare buffer query")?;
 
         let buffer = stmt
-            .query_row(params![id], |row| Self::buffer_from_row(row))
+            .query_row(params![id], Self::buffer_from_row)
             .optional()
             .context("failed to query buffer")?;
 
@@ -214,7 +214,7 @@ impl Database {
 
         let buffers = stmt
             .query(params![room_id])?
-            .mapped(|row| Self::buffer_from_row(row))
+            .mapped(Self::buffer_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list buffers")?;
 
@@ -242,7 +242,7 @@ impl Database {
 
         let buffers = stmt
             .query(params![room_id, buffer_type.as_str()])?
-            .mapped(|row| Self::buffer_from_row(row))
+            .mapped(Self::buffer_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list buffers by type")?;
 
@@ -311,10 +311,10 @@ impl Database {
             id: row.get(0)?,
             room_id: row.get(1)?,
             owner_agent_id: row.get(2)?,
-            buffer_type: BufferType::from_str(&type_str).unwrap_or(BufferType::Scratch),
+            buffer_type: BufferType::parse(&type_str).unwrap_or(BufferType::Scratch),
             created_at: row.get(4)?,
             tombstoned: tombstoned_int != 0,
-            tombstone_status: tombstone_status_str.and_then(|s| TombstoneStatus::from_str(&s)),
+            tombstone_status: tombstone_status_str.and_then(|s| TombstoneStatus::parse(&s)),
             tombstone_summary: row.get(7)?,
             tombstoned_at: row.get(8)?,
             parent_buffer_id: row.get(9)?,
@@ -398,7 +398,10 @@ mod tests {
         let mut buffer = Buffer::tool_output(&room.id, &agent.id);
         db.insert_buffer(&buffer)?;
 
-        buffer.tombstone(TombstoneStatus::Success, Some("Completed successfully".to_string()));
+        buffer.tombstone(
+            TombstoneStatus::Success,
+            Some("Completed successfully".to_string()),
+        );
         db.update_buffer(&buffer)?;
 
         let fetched = db.get_buffer(&buffer.id)?.expect("buffer should exist");

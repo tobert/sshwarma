@@ -28,7 +28,7 @@ impl ScriptKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "handler" => Some(ScriptKind::Handler),
             "renderer" => Some(ScriptKind::Renderer),
@@ -57,7 +57,7 @@ impl LuaScript {
         Self {
             id: new_id(),
             name: Some(name.into()),
-            kind: ScriptKind::from_str(kind.as_ref()).unwrap_or(ScriptKind::Handler),
+            kind: ScriptKind::parse(kind.as_ref()).unwrap_or(ScriptKind::Handler),
             code: code.into(),
             description: None,
             created_at: now,
@@ -117,7 +117,7 @@ impl Database {
             .context("failed to prepare script query")?;
 
         let script = stmt
-            .query_row(params![id], |row| Self::script_from_row(row))
+            .query_row(params![id], Self::script_from_row)
             .optional()
             .context("failed to query script")?;
 
@@ -137,7 +137,7 @@ impl Database {
             .context("failed to prepare script query")?;
 
         let script = stmt
-            .query_row(params![name], |row| Self::script_from_row(row))
+            .query_row(params![name], Self::script_from_row)
             .optional()
             .context("failed to query script by name")?;
 
@@ -148,24 +148,30 @@ impl Database {
     pub fn list_scripts(&self, kind: Option<ScriptKind>) -> Result<Vec<LuaScript>> {
         let conn = self.conn()?;
         let sql = match kind {
-            Some(_) => r#"
+            Some(_) => {
+                r#"
                 SELECT id, name, script_kind, code, description, created_at, updated_at
                 FROM lua_scripts WHERE script_kind = ?1 ORDER BY name
-            "#,
-            None => r#"
+            "#
+            }
+            None => {
+                r#"
                 SELECT id, name, script_kind, code, description, created_at, updated_at
                 FROM lua_scripts ORDER BY name
-            "#,
+            "#
+            }
         };
 
-        let mut stmt = conn.prepare(sql).context("failed to prepare scripts query")?;
+        let mut stmt = conn
+            .prepare(sql)
+            .context("failed to prepare scripts query")?;
         let rows = match kind {
             Some(k) => stmt.query(params![k.as_str()])?,
             None => stmt.query([])?,
         };
 
         let scripts = rows
-            .mapped(|row| Self::script_from_row(row))
+            .mapped(Self::script_from_row)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list scripts")?;
 
@@ -218,7 +224,7 @@ impl Database {
         Ok(LuaScript {
             id: row.get(0)?,
             name: row.get(1)?,
-            kind: ScriptKind::from_str(&kind_str).unwrap_or(ScriptKind::Handler),
+            kind: ScriptKind::parse(&kind_str).unwrap_or(ScriptKind::Handler),
             code: row.get(3)?,
             description: row.get(4)?,
             created_at: row.get(5)?,
