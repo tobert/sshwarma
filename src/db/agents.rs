@@ -396,6 +396,35 @@ impl Database {
         Ok(())
     }
 
+    /// Get or create a human agent by name
+    ///
+    /// Looks up agent by name, creates if not found.
+    /// This is a convenience method for getting user agents.
+    pub fn get_or_create_human_agent(&self, name: &str) -> Result<Agent> {
+        if let Some(agent) = self.get_agent_by_name(name)? {
+            return Ok(agent);
+        }
+
+        // Create new human agent
+        let agent = Agent::new(name, AgentKind::Human);
+        self.insert_agent(&agent)?;
+        Ok(agent)
+    }
+
+    /// Get or create a model agent by name
+    ///
+    /// Looks up agent by name, creates if not found.
+    pub fn get_or_create_model_agent(&self, name: &str) -> Result<Agent> {
+        if let Some(agent) = self.get_agent_by_name(name)? {
+            return Ok(agent);
+        }
+
+        // Create new model agent
+        let agent = Agent::new(name, AgentKind::Model);
+        self.insert_agent(&agent)?;
+        Ok(agent)
+    }
+
     fn agent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         let caps_json: String = row.get(4)?;
         let capabilities: Vec<String> = serde_json::from_str(&caps_json).unwrap_or_default();

@@ -226,43 +226,31 @@ impl SshwarmaMcpServer {
 
     #[tool(description = "Get recent message history from a room")]
     async fn get_history(&self, Parameters(params): Parameters<GetHistoryParams>) -> String {
-        use crate::display::{EntryContent, EntrySource};
-
         let limit = params.limit.unwrap_or(50).min(200);
 
-        match self.state.db.recent_entries(&params.room, limit) {
-            Ok(entries) => {
-                // Filter to only chat messages
-                let messages: Vec<_> = entries
+        match self.state.db.recent_messages(&params.room, limit) {
+            Ok(messages) => {
+                // Filter to only actual messages
+                let filtered: Vec<_> = messages
                     .iter()
-                    .filter(|e| !e.ephemeral)
-                    .filter_map(|entry| {
-                        if let EntryContent::Chat(text) = &entry.content {
-                            let sender = match &entry.source {
-                                EntrySource::User(name) => name.clone(),
-                                EntrySource::Model { name, .. } => name.clone(),
-                                EntrySource::System => "system".to_string(),
-                                EntrySource::Command { command } => format!("/{}", command),
-                            };
-                            let ts = entry.timestamp.format("%H:%M").to_string();
-                            Some((ts, sender, text.clone()))
-                        } else {
-                            None
-                        }
+                    .filter(|m| {
+                        m.message_type.starts_with("message.")
+                            && !m.content.is_empty()
+                            && !m.hidden
                     })
                     .collect();
 
-                if messages.is_empty() {
+                if filtered.is_empty() {
                     return format!("No messages in room '{}'.", params.room);
                 }
 
                 let mut output = format!(
                     "--- History for {} ({} messages) ---\n",
                     params.room,
-                    messages.len()
+                    filtered.len()
                 );
-                for (ts, sender, content) in messages {
-                    output.push_str(&format!("[{}] {}: {}\n", ts, sender, content));
+                for msg in filtered {
+                    output.push_str(&format!("[{}] {}: {}\n", msg.timestamp, msg.sender_name, msg.content));
                 }
                 output
             }
@@ -282,29 +270,24 @@ impl SshwarmaMcpServer {
             }
         }
 
-        // Add message to in-memory room
-        use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry};
-        use chrono::Utc;
+        // Add message using new Row/Buffer system
+        use crate::db::rows::Row;
 
-        let entry = LedgerEntry {
-            id: EntryId(0),
-            timestamp: Utc::now(),
-            source: EntrySource::User(sender.clone()),
-            content: EntryContent::Chat(params.message.clone()),
-            mutable: false,
-            ephemeral: false,
-            collapsible: true,
+        // Get or create the room's buffer
+        let buffer = match self.state.db.get_or_create_room_buffer(&params.room) {
+            Ok(b) => b,
+            Err(e) => return format!("Error getting room buffer: {}", e),
         };
 
-        {
-            let mut world = self.state.world.write().await;
-            if let Some(room) = world.get_room_mut(&params.room) {
-                room.add_entry(entry.source.clone(), entry.content.clone());
-            }
-        }
+        // Get or create agent for sender
+        let agent = match self.state.db.get_or_create_human_agent(&sender) {
+            Ok(a) => a,
+            Err(e) => return format!("Error getting agent: {}", e),
+        };
 
-        // Persist to database
-        match self.state.db.add_ledger_entry(&params.room, &entry) {
+        // Create and add the row
+        let mut row = Row::message(&buffer.id, &agent.id, &params.message, false);
+        match self.state.db.append_row(&mut row) {
             Ok(_) => format!("{}: {}", sender, params.message),
             Err(e) => format!("Error saving message: {}", e),
         }
@@ -331,29 +314,31 @@ impl SshwarmaMcpServer {
             }
         };
 
-        // Build context from room ledger if provided
-        use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry};
-        use chrono::Utc;
+        // Build context from room buffer if provided
+        use crate::db::rows::Row;
 
         let history = if let Some(ref room_name) = params.room {
-            let world = self.state.world.read().await;
-            if let Some(room) = world.get_room(room_name) {
-                room.ledger
-                    .recent(10)
-                    .iter()
-                    .filter(|e| !e.ephemeral)
-                    .filter_map(|entry| match &entry.content {
-                        EntryContent::Chat(text) => {
-                            let role = match &entry.source {
-                                EntrySource::User(_) => "user",
-                                EntrySource::Model { .. } => "assistant",
-                                EntrySource::System | EntrySource::Command { .. } => return None,
+            // Get room buffer
+            if let Ok(buffer) = self.state.db.get_or_create_room_buffer(room_name) {
+                // Get recent message rows
+                if let Ok(rows) = self.state.db.list_recent_buffer_rows(&buffer.id, 10) {
+                    rows.into_iter()
+                        .filter(|r| !r.ephemeral)
+                        .filter_map(|row| {
+                            let content = row.content.as_deref()?;
+                            let role = if row.content_method == "message.user" {
+                                "user"
+                            } else if row.content_method == "message.model" {
+                                "assistant"
+                            } else {
+                                return None;
                             };
-                            Some((role.to_string(), text.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
+                            Some((role.to_string(), content.to_string()))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![]
+                }
             } else {
                 vec![]
             }
@@ -375,26 +360,17 @@ impl SshwarmaMcpServer {
             Ok(response) => {
                 // Record in room if specified
                 if let Some(ref room_name) = params.room {
-                    let entry = LedgerEntry {
-                        id: EntryId(0),
-                        timestamp: Utc::now(),
-                        source: EntrySource::Model {
-                            name: model.short_name.clone(),
-                            is_streaming: false,
-                        },
-                        content: EntryContent::Chat(response.clone()),
-                        mutable: false,
-                        ephemeral: false,
-                        collapsible: true,
-                    };
-
-                    {
-                        let mut world = self.state.world.write().await;
-                        if let Some(room) = world.get_room_mut(room_name) {
-                            room.add_entry(entry.source.clone(), entry.content.clone());
+                    // Get buffer
+                    if let Ok(buffer) = self.state.db.get_or_create_room_buffer(room_name) {
+                        // Get or create model agent
+                        if let Ok(agent) = self.state.db.get_or_create_model_agent(&model.short_name) {
+                            // Add model response row
+                            let mut row = Row::new(&buffer.id, "message.model");
+                            row.source_agent_id = Some(agent.id);
+                            row.content = Some(response.clone());
+                            let _ = self.state.db.append_row(&mut row);
                         }
                     }
-                    let _ = self.state.db.add_ledger_entry(room_name, &entry);
                 }
 
                 format!("{}: {}", model.short_name, response)

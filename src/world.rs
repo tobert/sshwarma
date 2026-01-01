@@ -1,10 +1,12 @@
 //! World state: rooms and their contents
+//!
+//! Rooms are in-memory representations synced with the database.
+//! Messages are stored in the Row/Buffer system, not in Room structs.
 
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::display::{EntryContent, EntrySource, Ledger};
 use crate::model::ModelHandle;
 
 /// A room where users and models interact
@@ -16,8 +18,9 @@ pub struct Room {
     pub users: Vec<String>,
     pub models: Vec<ModelHandle>,
     pub artifacts: Vec<ArtifactRef>,
-    /// Room's conversation ledger - the authoritative history
-    pub ledger: Ledger,
+    /// Buffer ID for the room's main chat buffer (from database)
+    /// None if the room buffer hasn't been created yet
+    pub buffer_id: Option<String>,
     pub context: RoomContext,
 }
 
@@ -158,7 +161,22 @@ impl Room {
             users: Vec::new(),
             models: Vec::new(),
             artifacts: Vec::new(),
-            ledger: Ledger::new(500),
+            buffer_id: None,
+            context: RoomContext::default(),
+        }
+    }
+
+    /// Create a room with an existing buffer ID (from database)
+    pub fn with_buffer(name: String, buffer_id: String) -> Self {
+        Self {
+            id: RoomId::new(),
+            name,
+            description: None,
+            created_at: Utc::now(),
+            users: Vec::new(),
+            models: Vec::new(),
+            artifacts: Vec::new(),
+            buffer_id: Some(buffer_id),
             context: RoomContext::default(),
         }
     }
@@ -167,64 +185,29 @@ impl Room {
         self.users.len()
     }
 
+    /// Add user to in-memory list
+    /// Note: Caller should add presence.join row to the buffer
     pub fn add_user(&mut self, username: String) {
-        use crate::display::PresenceAction;
         if !self.users.contains(&username) {
-            self.users.push(username.clone());
-            self.ledger.push(
-                EntrySource::System,
-                EntryContent::Presence {
-                    user: username,
-                    action: PresenceAction::Join,
-                },
-            );
+            self.users.push(username);
         }
     }
 
+    /// Remove user from in-memory list
+    /// Note: Caller should add presence.leave row to the buffer
     pub fn remove_user(&mut self, username: &str) {
-        use crate::display::PresenceAction;
         self.users.retain(|u| u != username);
-        self.ledger.push(
-            EntrySource::System,
-            EntryContent::Presence {
-                user: username.to_string(),
-                action: PresenceAction::Leave,
-            },
-        );
     }
 
-    /// Add an entry to the room's ledger
-    pub fn add_entry(
-        &mut self,
-        source: EntrySource,
-        content: EntryContent,
-    ) -> crate::display::EntryId {
-        self.ledger.push(source, content)
+    /// Get the buffer ID, panicking if not set
+    /// Use this when you're certain the buffer has been initialized
+    pub fn buffer_id(&self) -> &str {
+        self.buffer_id.as_deref().expect("room buffer not initialized")
     }
 
-    /// Load ledger entries from DB (call once when room is first accessed)
-    pub fn load_entries_from_db(&mut self, entries: &[crate::display::LedgerEntry]) {
-        for entry in entries {
-            self.ledger
-                .push(entry.source.clone(), entry.content.clone());
-        }
-    }
-
-    /// Load history from legacy messages table into ledger
-    /// Used for backward compatibility with existing databases
-    pub fn load_history_from_db(&mut self, messages: &[crate::db::MessageRow]) {
-        for msg in messages {
-            let source = match msg.sender_type.as_str() {
-                "model" => EntrySource::Model {
-                    name: msg.sender_name.clone(),
-                    is_streaming: false,
-                },
-                "system" => EntrySource::System,
-                _ => EntrySource::User(msg.sender_name.clone()),
-            };
-            self.ledger
-                .push(source, EntryContent::Chat(msg.content.clone()));
-        }
+    /// Set the buffer ID (typically after creating via db.get_or_create_room_buffer)
+    pub fn set_buffer_id(&mut self, buffer_id: String) {
+        self.buffer_id = Some(buffer_id);
     }
 }
 
@@ -256,6 +239,13 @@ impl World {
 
     pub fn create_room(&mut self, name: String) -> &Room {
         let room = Room::new(name.clone());
+        self.rooms.insert(name.clone(), room);
+        self.rooms.get(&name).unwrap()
+    }
+
+    /// Create a room with an existing buffer ID
+    pub fn create_room_with_buffer(&mut self, name: String, buffer_id: String) -> &Room {
+        let room = Room::with_buffer(name.clone(), buffer_id);
         self.rooms.insert(name.clone(), room);
         self.rooms.get(&name).unwrap()
     }

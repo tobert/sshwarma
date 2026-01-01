@@ -618,6 +618,185 @@ impl LuaUserData for LuaDrawContext {
     }
 }
 
+// =============================================================================
+// ROW RENDERING HELPERS
+// =============================================================================
+
+use crate::db::rows::Row;
+
+/// Render rows to a plain text string with ANSI styling
+///
+/// This is the main entry point for rendering Row objects to terminal output.
+/// Used for both full renders and incremental updates.
+pub fn render_rows(rows: &[Row], width: usize) -> String {
+    let mut output = String::new();
+
+    for row in rows {
+        let line = render_row(row, width);
+        if !output.is_empty() {
+            output.push_str("\r\n");
+        }
+        output.push_str(&line);
+    }
+
+    output
+}
+
+/// Render a single row to a styled string
+fn render_row(row: &Row, width: usize) -> String {
+    let content = row.content.as_deref().unwrap_or("");
+
+    match row.content_method.as_str() {
+        "message.user" => render_user_message(content, width),
+        "message.model" => render_model_message(content, width),
+        "message.system" => render_system_message(content, width),
+        "command.output" => render_command_output(content, width),
+        "status.pending" => render_status("⏳ Pending...", width),
+        "status.thinking" => render_status("🤔 Thinking...", width),
+        "status.running" => render_status("⚙️  Running tool...", width),
+        "status.connecting" => render_status("🔌 Connecting...", width),
+        "status.complete" => render_status("✅ Complete", width),
+        "status.error" => render_error(content, width),
+        "room.header" => render_room_header(content, width),
+        "system.welcome" => render_welcome(content, width),
+        "meta.separator" => render_separator(content, width),
+        "presence.join" => render_presence(content, "joined", width),
+        "presence.leave" => render_presence(content, "left", width),
+        "meta.compaction" => render_compaction(content, width),
+        "note.user" => render_note(content, width),
+        _ => render_default(content, width),
+    }
+}
+
+/// Render user message with cyan prefix
+fn render_user_message(content: &str, width: usize) -> String {
+    let prefix = "\x1b[36m"; // Cyan
+    let reset = "\x1b[0m";
+    format_wrapped(content, width, prefix, reset)
+}
+
+/// Render model message with yellow prefix
+fn render_model_message(content: &str, width: usize) -> String {
+    let prefix = "\x1b[33m"; // Yellow
+    let reset = "\x1b[0m";
+    format_wrapped(content, width, prefix, reset)
+}
+
+/// Render system message with dim styling
+fn render_system_message(content: &str, width: usize) -> String {
+    let prefix = "\x1b[2m"; // Dim
+    let reset = "\x1b[0m";
+    format_wrapped(content, width, prefix, reset)
+}
+
+/// Render command output
+fn render_command_output(content: &str, width: usize) -> String {
+    // No special styling, just wrap if needed
+    wrap_text(content, width)
+}
+
+/// Render status indicator
+fn render_status(status: &str, _width: usize) -> String {
+    format!("\x1b[2m{}\x1b[0m", status)
+}
+
+/// Render error message
+fn render_error(content: &str, width: usize) -> String {
+    let prefix = "\x1b[31m"; // Red
+    let reset = "\x1b[0m";
+    format!("{}❌ {}{}", prefix, wrap_text(content, width.saturating_sub(3)), reset)
+}
+
+/// Render room header
+fn render_room_header(content: &str, width: usize) -> String {
+    let lines: Vec<&str> = content.splitn(2, '\n').collect();
+    let name = lines.first().unwrap_or(&"");
+    let desc = lines.get(1).unwrap_or(&"");
+
+    let mut output = String::new();
+    output.push_str(&"─".repeat(width.min(60)));
+    output.push_str("\r\n");
+    output.push_str(&format!("\x1b[1m{}\x1b[0m", name)); // Bold name
+    output.push_str("\r\n");
+    output.push_str(&"─".repeat(width.min(60)));
+    if !desc.is_empty() {
+        output.push_str("\r\n");
+        output.push_str(&format!("\x1b[2m{}\x1b[0m", desc));
+    }
+    output
+}
+
+/// Render welcome message
+fn render_welcome(username: &str, _width: usize) -> String {
+    format!("\x1b[32mWelcome, {}.\x1b[0m", username)
+}
+
+/// Render separator line
+fn render_separator(label: &str, width: usize) -> String {
+    let line_width = width.min(60);
+    if label.is_empty() {
+        "─".repeat(line_width)
+    } else {
+        let label_len = label.len() + 2; // " label "
+        let left = (line_width.saturating_sub(label_len)) / 2;
+        let right = line_width.saturating_sub(label_len).saturating_sub(left);
+        format!("{} {} {}", "─".repeat(left), label, "─".repeat(right))
+    }
+}
+
+/// Render presence notification
+fn render_presence(user: &str, action: &str, _width: usize) -> String {
+    format!("\x1b[2m* {} {}\x1b[0m", user, action)
+}
+
+/// Render compaction summary
+fn render_compaction(summary: &str, width: usize) -> String {
+    format!("\x1b[2;3m[{}]\x1b[0m", wrap_text(summary, width.saturating_sub(2)))
+}
+
+/// Render note (journal entry)
+fn render_note(content: &str, width: usize) -> String {
+    let prefix = "\x1b[35m📝 "; // Magenta with note emoji
+    let reset = "\x1b[0m";
+    format!("{}{}{}", prefix, wrap_text(content, width.saturating_sub(4)), reset)
+}
+
+/// Render default (unknown content_method)
+fn render_default(content: &str, width: usize) -> String {
+    wrap_text(content, width)
+}
+
+/// Format with prefix and suffix, wrapping content
+fn format_wrapped(content: &str, width: usize, prefix: &str, suffix: &str) -> String {
+    format!("{}{}{}", prefix, wrap_text(content, width), suffix)
+}
+
+/// Wrap text to width (simple word wrap)
+fn wrap_text(text: &str, width: usize) -> String {
+    if width == 0 || text.is_empty() {
+        return text.to_string();
+    }
+
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.len() <= width {
+            lines.push(line.to_string());
+        } else {
+            // Simple wrap at width (could be smarter about word boundaries)
+            let mut remaining = line;
+            while remaining.len() > width {
+                let (chunk, rest) = remaining.split_at(width);
+                lines.push(chunk.to_string());
+                remaining = rest;
+            }
+            if !remaining.is_empty() {
+                lines.push(remaining.to_string());
+            }
+        }
+    }
+    lines.join("\r\n")
+}
+
 /// Register render functions in Lua
 pub fn register_render_functions(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
@@ -1482,5 +1661,339 @@ mod tests {
         let ansi = buf.to_ansi();
         assert!(ansi.contains("Start"));
         assert!(ansi.contains("Last row"));
+    }
+
+    // ==========================================================================
+    // Row rendering tests
+    // ==========================================================================
+
+    #[test]
+    fn test_render_rows_empty() {
+        let rows: Vec<Row> = vec![];
+        let output = super::render_rows(&rows, 80);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_render_rows_user_message() {
+        let mut row = Row::new("buffer1", "message.user");
+        row.content = Some("Hello world".to_string());
+
+        let output = super::render_rows(&[row], 80);
+        assert!(output.contains("Hello world"));
+        assert!(output.contains("\x1b[36m")); // Cyan
+        assert!(output.contains("\x1b[0m")); // Reset
+    }
+
+    #[test]
+    fn test_render_rows_model_message() {
+        let mut row = Row::new("buffer1", "message.model");
+        row.content = Some("AI response".to_string());
+
+        let output = super::render_rows(&[row], 80);
+        assert!(output.contains("AI response"));
+        assert!(output.contains("\x1b[33m")); // Yellow
+    }
+
+    #[test]
+    fn test_render_rows_multiple() {
+        let mut row1 = Row::new("buffer1", "message.user");
+        row1.content = Some("First message".to_string());
+
+        let mut row2 = Row::new("buffer1", "message.model");
+        row2.content = Some("Second message".to_string());
+
+        let output = super::render_rows(&[row1, row2], 80);
+        assert!(output.contains("First message"));
+        assert!(output.contains("Second message"));
+        assert!(output.contains("\r\n")); // Line separator
+    }
+
+    #[test]
+    fn test_render_rows_status() {
+        let row = Row::new("buffer1", "status.thinking");
+        let output = super::render_rows(&[row], 80);
+        assert!(output.contains("Thinking"));
+    }
+
+    #[test]
+    fn test_render_rows_error() {
+        let mut row = Row::new("buffer1", "status.error");
+        row.content = Some("Something went wrong".to_string());
+
+        let output = super::render_rows(&[row], 80);
+        assert!(output.contains("Something went wrong"));
+        assert!(output.contains("\x1b[31m")); // Red
+        assert!(output.contains("❌"));
+    }
+
+    #[test]
+    fn test_render_rows_room_header() {
+        let mut row = Row::new("buffer1", "room.header");
+        row.content = Some("workshop\nA collaborative space".to_string());
+
+        let output = super::render_rows(&[row], 80);
+        assert!(output.contains("workshop"));
+        assert!(output.contains("collaborative"));
+        assert!(output.contains("─")); // Header lines
+    }
+
+    #[test]
+    fn test_render_rows_presence() {
+        let mut join = Row::new("buffer1", "presence.join");
+        join.content = Some("alice".to_string());
+
+        let mut leave = Row::new("buffer1", "presence.leave");
+        leave.content = Some("bob".to_string());
+
+        let output = super::render_rows(&[join, leave], 80);
+        assert!(output.contains("alice"));
+        assert!(output.contains("joined"));
+        assert!(output.contains("bob"));
+        assert!(output.contains("left"));
+    }
+
+    #[test]
+    fn test_wrap_text_short() {
+        let output = super::wrap_text("Hello", 80);
+        assert_eq!(output, "Hello");
+    }
+
+    #[test]
+    fn test_wrap_text_long() {
+        let long = "a".repeat(100);
+        let output = super::wrap_text(&long, 50);
+        // Should have line break
+        assert!(output.contains("\r\n"));
+        // Each line should be max 50 chars
+        for line in output.split("\r\n") {
+            assert!(line.len() <= 50);
+        }
+    }
+
+    #[test]
+    fn test_wrap_text_empty() {
+        assert_eq!(super::wrap_text("", 80), "");
+    }
+
+    #[test]
+    fn test_wrap_text_zero_width() {
+        assert_eq!(super::wrap_text("Hello", 0), "Hello");
+    }
+
+    // ==========================================================================
+    // Performance benchmarks (run with `cargo test perf_ -- --nocapture`)
+    // ==========================================================================
+
+    fn measure<F: FnMut()>(name: &str, iterations: usize, mut f: F) {
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            f();
+        }
+        let elapsed = start.elapsed();
+        let per_iter = elapsed / iterations as u32;
+        eprintln!(
+            "  {}: {} iterations in {:?} ({:?}/iter, {:.0} ops/sec)",
+            name,
+            iterations,
+            elapsed,
+            per_iter,
+            iterations as f64 / elapsed.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn perf_buffer_allocation() {
+        eprintln!("\n=== Buffer Allocation ===");
+
+        measure("80x24 (terminal)", 10_000, || {
+            let _ = RenderBuffer::new(80, 24);
+        });
+
+        measure("200x50 (large term)", 5_000, || {
+            let _ = RenderBuffer::new(200, 50);
+        });
+
+        measure("500x200 (100k cells)", 500, || {
+            let _ = RenderBuffer::new(500, 200);
+        });
+
+        measure("1000x500 (500k cells)", 100, || {
+            let _ = RenderBuffer::new(1000, 500);
+        });
+    }
+
+    #[test]
+    fn perf_fill_operations() {
+        eprintln!("\n=== Fill Operations ===");
+        let style = Style::new();
+
+        measure("fill 80x24", 10_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.fill(0, 0, 80, 24, '#', &style);
+        });
+
+        measure("fill 200x50", 2_000, || {
+            let mut buf = RenderBuffer::new(200, 50);
+            buf.fill(0, 0, 200, 50, '#', &style);
+        });
+
+        measure("fill 500x200", 200, || {
+            let mut buf = RenderBuffer::new(500, 200);
+            buf.fill(0, 0, 500, 200, '#', &style);
+        });
+    }
+
+    #[test]
+    fn perf_print_operations() {
+        eprintln!("\n=== Print Operations ===");
+        let style = Style::new();
+        let text = "The quick brown fox jumps over the lazy dog";
+
+        measure("print ASCII 80x24", 10_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            for y in 0..24 {
+                buf.print(0, y, text, &style);
+            }
+        });
+
+        let wide_text = "日本語テスト🎵🎸🎹絵文字";
+        measure("print unicode 80x24", 10_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            for y in 0..24 {
+                buf.print(0, y, wide_text, &style);
+            }
+        });
+    }
+
+    #[test]
+    fn perf_ansi_generation() {
+        eprintln!("\n=== ANSI Generation ===");
+        let style = Style::new();
+
+        // Simple buffer - no style changes
+        measure("to_ansi 80x24 plain", 5_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.fill(0, 0, 80, 24, 'X', &style);
+            let _ = buf.to_ansi();
+        });
+
+        // Styled buffer - uniform style
+        let styled = Style::new().fg(Color::Cyan).bold();
+        measure("to_ansi 80x24 uniform style", 5_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.fill(0, 0, 80, 24, 'X', &styled);
+            let _ = buf.to_ansi();
+        });
+
+        // Worst case - alternating styles
+        let colors = [Color::Red, Color::Green, Color::Blue];
+        measure("to_ansi 80x24 alternating", 2_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            for y in 0..24 {
+                for x in 0..80 {
+                    let c = colors[((x + y) % 3) as usize];
+                    buf.set(x, y, 'X', &Style::new().fg(c));
+                }
+            }
+            let _ = buf.to_ansi();
+        });
+
+        // Large buffer
+        measure("to_ansi 200x50 plain", 500, || {
+            let mut buf = RenderBuffer::new(200, 50);
+            buf.fill(0, 0, 200, 50, 'X', &style);
+            let _ = buf.to_ansi();
+        });
+    }
+
+    #[test]
+    fn perf_clear_refill_cycle() {
+        eprintln!("\n=== Clear/Refill Cycle (animation) ===");
+        let style = Style::new();
+
+        measure("80x24 clear+fill cycle", 10_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.clear();
+            buf.fill(0, 0, 80, 24, '#', &style);
+        });
+
+        // Full render cycle
+        measure("80x24 full render cycle", 5_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.clear();
+            buf.fill(0, 0, 80, 24, '.', &style);
+            buf.draw_box(5, 2, 70, 20, &style);
+            buf.print(10, 10, "Hello, World!", &style);
+            let _ = buf.to_ansi();
+        });
+    }
+
+    #[test]
+    fn perf_draw_primitives() {
+        eprintln!("\n=== Draw Primitives ===");
+        let style = Style::new();
+
+        measure("draw_box 20x10", 50_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.draw_box(0, 0, 20, 10, &style);
+        });
+
+        measure("gauge width=50", 50_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            buf.gauge(0, 0, 50, 0.75, &style);
+        });
+
+        measure("sparkline 20 values", 20_000, || {
+            let mut buf = RenderBuffer::new(80, 24);
+            let data: Vec<f64> = (0..20).map(|i| (i as f64).sin() * 50.0 + 50.0).collect();
+            buf.sparkline(0, 0, &data, &style);
+        });
+    }
+
+    #[test]
+    fn perf_realistic_hud() {
+        eprintln!("\n=== Realistic HUD Render ===");
+
+        // Simulate what a HUD render actually does
+        measure("HUD-like render 80x8", 5_000, || {
+            let mut buf = RenderBuffer::new(80, 8);
+            let dim = Style::new().dim();
+            let cyan = Style::new().fg(Color::Cyan);
+            let yellow = Style::new().fg(Color::Yellow);
+
+            // Border
+            buf.draw_box(0, 0, 80, 8, &cyan);
+
+            // Participants line
+            buf.print(2, 1, "◇ alice  ◇ bob  ", &dim);
+            buf.print(20, 1, "◈ qwen-8b", &yellow);
+
+            // Status line
+            buf.print(2, 2, "thinking...", &dim);
+
+            // MCP line
+            buf.print(2, 3, "● holler (7/12)  ● exa (3/5)", &dim);
+
+            // Room line
+            buf.print(2, 4, "workshop │ ↑→ │ 0:05:23", &cyan);
+
+            // Progress gauge
+            buf.gauge(2, 5, 30, 0.65, &yellow);
+
+            let _ = buf.to_ansi();
+        });
+
+        // Higher refresh rate simulation
+        measure("HUD render @ 30fps (33ms budget)", 1_000, || {
+            for _ in 0..30 {
+                // 30 frames
+                let mut buf = RenderBuffer::new(80, 8);
+                buf.draw_box(0, 0, 80, 8, &Style::new().fg(Color::Cyan));
+                buf.print(2, 1, "◇ alice  ◇ bob  ◈ qwen-8b", &Style::new());
+                buf.print(2, 2, "thinking...", &Style::new().dim());
+                let _ = buf.to_ansi();
+            }
+        });
     }
 }

@@ -677,6 +677,91 @@ impl Database {
 
     // --- Queries by content_method ---
 
+    /// Append text to a row's content (for streaming)
+    ///
+    /// Used for streaming responses where content is incrementally added.
+    /// Only works on mutable rows.
+    pub fn append_to_row(&self, row_id: &str, text: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = now_ms();
+        conn.execute(
+            r#"
+            UPDATE rows SET
+                content = COALESCE(content, '') || ?2,
+                updated_at = ?3
+            WHERE id = ?1 AND mutable = 1
+            "#,
+            params![row_id, text, now],
+        )
+        .context("failed to append to row")?;
+        Ok(())
+    }
+
+    /// Finalize a row (mark as complete, set mutable=false)
+    ///
+    /// Used when streaming is complete or when a row should no longer be modified.
+    pub fn finalize_row(&self, row_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = now_ms();
+        conn.execute(
+            r#"
+            UPDATE rows SET
+                mutable = 0,
+                finalized_at = ?2,
+                updated_at = ?2
+            WHERE id = ?1
+            "#,
+            params![row_id, now],
+        )
+        .context("failed to finalize row")?;
+        Ok(())
+    }
+
+    /// Get rows since a specific row ID (for incremental rendering)
+    ///
+    /// Returns rows with position > the position of the given row.
+    /// If since_id is None, returns all rows.
+    pub fn rows_since(&self, buffer_id: &str, since_id: Option<&str>) -> Result<Vec<Row>> {
+        let conn = self.conn()?;
+
+        // Get the position of the since row
+        let since_position: f64 = if let Some(id) = since_id {
+            let mut stmt = conn
+                .prepare("SELECT position FROM rows WHERE id = ?1")
+                .context("failed to prepare position query")?;
+            stmt.query_row(params![id], |r| r.get(0))
+                .optional()
+                .context("failed to get since row position")?
+                .unwrap_or(-f64::INFINITY)
+        } else {
+            -f64::INFINITY
+        };
+
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT id, buffer_id, parent_row_id, position,
+                   source_agent_id, source_session_id,
+                   content_method, content_format, content_meta, content,
+                   collapsed, ephemeral, mutable, pinned, hidden,
+                   token_count, cost_usd, latency_ms,
+                   created_at, updated_at, finalized_at
+            FROM rows
+            WHERE buffer_id = ?1 AND parent_row_id IS NULL AND position > ?2
+            ORDER BY position
+            "#,
+            )
+            .context("failed to prepare rows since query")?;
+
+        let rows = stmt
+            .query(params![buffer_id, since_position])?
+            .mapped(Self::row_from_sqlite)
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to list rows since")?;
+
+        Ok(rows)
+    }
+
     /// List rows by content method pattern (LIKE query)
     pub fn list_rows_by_method(&self, buffer_id: &str, method_pattern: &str) -> Result<Vec<Row>> {
         let conn = self.conn()?;
@@ -920,5 +1005,90 @@ mod tests {
         assert_eq!(fractional::before(5.0), 4.0);
         assert!(!fractional::needs_rebalance(0.0, 0.5));
         assert!(fractional::needs_rebalance(0.0, 1e-11));
+    }
+
+    #[test]
+    fn test_append_to_row() -> Result<()> {
+        let (db, buffer_id, agent_id) = setup()?;
+
+        // Create a mutable row (like for streaming)
+        let mut row = Row::thinking(&buffer_id, &agent_id);
+        row.content = Some("Hello".to_string());
+        db.append_row(&mut row)?;
+
+        // Append more content
+        db.append_to_row(&row.id, " world")?;
+        db.append_to_row(&row.id, "!")?;
+
+        let fetched = db.get_row(&row.id)?.expect("row should exist");
+        assert_eq!(fetched.content, Some("Hello world!".to_string()));
+
+        // Non-mutable rows should not be appended to
+        let mut immutable = Row::message(&buffer_id, &agent_id, "Fixed", false);
+        db.append_row(&mut immutable)?;
+        db.append_to_row(&immutable.id, " extra")?;
+
+        let fetched = db.get_row(&immutable.id)?.expect("row should exist");
+        assert_eq!(fetched.content, Some("Fixed".to_string())); // Unchanged
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_finalize_row() -> Result<()> {
+        let (db, buffer_id, agent_id) = setup()?;
+
+        // Create a mutable row
+        let mut row = Row::thinking(&buffer_id, &agent_id);
+        row.content = Some("Thinking...".to_string());
+        db.append_row(&mut row)?;
+
+        // Should be mutable before finalize
+        let fetched = db.get_row(&row.id)?.expect("row should exist");
+        assert!(fetched.mutable);
+        assert!(fetched.finalized_at.is_none());
+
+        // Finalize
+        db.finalize_row(&row.id)?;
+
+        let fetched = db.get_row(&row.id)?.expect("row should exist");
+        assert!(!fetched.mutable);
+        assert!(fetched.finalized_at.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rows_since() -> Result<()> {
+        let (db, buffer_id, agent_id) = setup()?;
+
+        let mut row1 = Row::message(&buffer_id, &agent_id, "First", false);
+        let mut row2 = Row::message(&buffer_id, &agent_id, "Second", false);
+        let mut row3 = Row::message(&buffer_id, &agent_id, "Third", false);
+
+        db.append_row(&mut row1)?;
+        db.append_row(&mut row2)?;
+        db.append_row(&mut row3)?;
+
+        // Get rows since row1 (should be row2, row3)
+        let since_1 = db.rows_since(&buffer_id, Some(&row1.id))?;
+        assert_eq!(since_1.len(), 2);
+        assert_eq!(since_1[0].content, Some("Second".to_string()));
+        assert_eq!(since_1[1].content, Some("Third".to_string()));
+
+        // Get rows since row2 (should be row3)
+        let since_2 = db.rows_since(&buffer_id, Some(&row2.id))?;
+        assert_eq!(since_2.len(), 1);
+        assert_eq!(since_2[0].content, Some("Third".to_string()));
+
+        // Get rows since row3 (should be empty)
+        let since_3 = db.rows_since(&buffer_id, Some(&row3.id))?;
+        assert!(since_3.is_empty());
+
+        // Get all rows (since None)
+        let all = db.rows_since(&buffer_id, None)?;
+        assert_eq!(all.len(), 3);
+
+        Ok(())
     }
 }

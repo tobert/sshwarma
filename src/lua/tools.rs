@@ -4,7 +4,6 @@
 //! All functions are registered in a `tools` global table.
 
 use crate::display::hud::HudState;
-use crate::display::{EntryContent, EntrySource};
 use crate::lua::cache::ToolCache;
 use crate::lua::context::{
     build_hud_context, build_notifications_table, NotificationLevel, PendingNotification,
@@ -428,35 +427,44 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 None => return Ok(list), // Empty list if not in a room
             };
 
-            // Try to get history from SharedState
+            // Try to get history from database
             if let Some(shared) = state.shared_state() {
-                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
-                if let Some(room) = world.rooms.get(&room_name) {
-                    let mut idx = 1;
-                    for entry in room.ledger.recent(limit).iter().filter(|e| !e.ephemeral) {
-                        // Extract sender name
-                        let sender_name = match &entry.source {
-                            EntrySource::User(name) => name.clone(),
-                            EntrySource::Model { name, .. } => name.clone(),
-                            EntrySource::System | EntrySource::Command { .. } => continue,
-                        };
+                // Get buffer for room
+                if let Ok(buffer) = shared.db.get_or_create_room_buffer(&room_name) {
+                    // Get recent rows
+                    if let Ok(rows) = shared.db.list_recent_buffer_rows(&buffer.id, limit) {
+                        let mut idx = 1;
+                        for db_row in rows.iter().filter(|r| !r.ephemeral) {
+                            // Only include message rows
+                            if !db_row.content_method.starts_with("message.") {
+                                continue;
+                            }
 
-                        // Extract content (only Chat messages)
-                        let text = match &entry.content {
-                            EntryContent::Chat(text) => text.clone(),
-                            _ => continue,
-                        };
+                            // Get content
+                            let text = match &db_row.content {
+                                Some(t) => t.clone(),
+                                None => continue,
+                            };
 
-                        let row = lua.create_table()?;
-                        row.set("author", sender_name)?;
-                        row.set("content", text)?;
-                        row.set("timestamp", entry.timestamp.timestamp_millis())?;
-                        row.set(
-                            "is_model",
-                            matches!(entry.source, EntrySource::Model { .. }),
-                        )?;
-                        list.set(idx, row)?;
-                        idx += 1;
+                            // Get author name from agent
+                            let author = if let Some(ref agent_id) = db_row.source_agent_id {
+                                if let Ok(Some(agent)) = shared.db.get_agent(agent_id) {
+                                    agent.name
+                                } else {
+                                    "unknown".to_string()
+                                }
+                            } else {
+                                "system".to_string()
+                            };
+
+                            let row = lua.create_table()?;
+                            row.set("author", author)?;
+                            row.set("content", text)?;
+                            row.set("timestamp", db_row.created_at)?;
+                            row.set("is_model", db_row.content_method == "message.model")?;
+                            list.set(idx, row)?;
+                            idx += 1;
+                        }
                     }
                 }
             }
@@ -1162,7 +1170,6 @@ mod tests {
     use crate::config::Config;
     use crate::db::Database;
     use crate::display::hud::HudState;
-    use crate::display::{EntryContent, EntrySource};
     use crate::llm::LlmClient;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelRegistry};
@@ -1229,14 +1236,17 @@ mod tests {
             }
         }
 
-        /// Add chat message to room's ledger
+        /// Add chat message to room's buffer
         async fn add_message(&self, room: &str, sender: &str, content: &str) {
-            let mut world = self.world.write().await;
-            if let Some(r) = world.get_room_mut(room) {
-                r.ledger.push(
-                    EntrySource::User(sender.to_string()),
-                    EntryContent::Chat(content.to_string()),
-                );
+            use crate::db::rows::Row;
+
+            // Get or create buffer
+            if let Ok(buffer) = self.db.get_or_create_room_buffer(room) {
+                // Get or create agent
+                if let Ok(agent) = self.db.get_or_create_human_agent(sender) {
+                    let mut row = Row::message(&buffer.id, &agent.id, content, false);
+                    let _ = self.db.append_row(&mut row);
+                }
             }
         }
 

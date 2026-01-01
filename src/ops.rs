@@ -162,30 +162,17 @@ pub async fn set_room_navigation(
 
 /// Say something to the room
 pub async fn say(state: &SharedState, room_name: &str, sender: &str, message: &str) -> Result<()> {
-    use crate::display::{EntryContent, EntrySource, LedgerEntry};
-    use chrono::Utc;
+    use crate::db::rows::Row;
 
-    // Create the entry
-    let entry = LedgerEntry {
-        id: crate::display::EntryId(0), // Will be assigned by ledger/db
-        timestamp: Utc::now(),
-        source: EntrySource::User(sender.to_string()),
-        content: EntryContent::Chat(message.to_string()),
-        mutable: false,
-        ephemeral: false,
-        collapsible: true,
-    };
+    // Get or create the room's buffer
+    let buffer = state.db.get_or_create_room_buffer(room_name)?;
 
-    // Add to in-memory world
-    {
-        let mut world = state.world.write().await;
-        if let Some(room) = world.get_room_mut(room_name) {
-            room.add_entry(entry.source.clone(), entry.content.clone());
-        }
-    }
+    // Get agent ID for sender (create if needed)
+    let agent_id = state.db.get_or_create_human_agent(sender)?.id;
 
-    // Persist to database
-    state.db.add_ledger_entry(room_name, &entry)?;
+    // Create and add the row
+    let mut row = Row::message(&buffer.id, &agent_id, message, false);
+    state.db.append_row(&mut row)?;
 
     Ok(())
 }
@@ -364,17 +351,17 @@ pub async fn join(
         }
     }
 
+    // Ensure room buffer exists in database
+    let buffer = state.db.get_or_create_room_buffer(target_room)?;
+
     // Join target room
     {
         let mut world = state.world.write().await;
         if let Some(room) = world.get_room_mut(target_room) {
             room.add_user(username.to_string());
-
-            // Load DB history into ledger if empty
-            if room.ledger.all().is_empty() {
-                if let Ok(messages) = state.db.recent_messages(target_room, 100) {
-                    room.load_history_from_db(&messages);
-                }
+            // Set buffer ID if not already set
+            if room.buffer_id.is_none() {
+                room.set_buffer_id(buffer.id.clone());
             }
         }
     }

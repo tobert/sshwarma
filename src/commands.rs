@@ -1,6 +1,5 @@
 //! REPL command implementations
 
-use crate::display::{EntryContent, EntrySource};
 use crate::lua::WrapState;
 use crate::model::{ModelBackend, ModelHandle};
 use crate::ops;
@@ -418,28 +417,31 @@ MCP:
 
         let mut output = format!("{} → @{}: {}\r\n", username, model_name, message);
 
-        // Build context from room ledger
+        // Build context from room buffer
         let history = if let Some(ref room_name) =
             self.player.as_ref().and_then(|p| p.current_room.clone())
         {
-            let world = self.state.world.read().await;
-            if let Some(room) = world.get_room(room_name) {
-                room.ledger
-                    .recent(10)
-                    .iter()
-                    .filter(|e| !e.ephemeral)
-                    .filter_map(|entry| match &entry.content {
-                        EntryContent::Chat(text) => {
-                            let role = match &entry.source {
-                                EntrySource::User(_) => "user",
-                                EntrySource::Model { .. } => "assistant",
-                                EntrySource::System | EntrySource::Command { .. } => return None,
+            // Get buffer for room
+            if let Ok(buffer) = self.state.db.get_or_create_room_buffer(room_name) {
+                // Get recent rows
+                if let Ok(rows) = self.state.db.list_recent_buffer_rows(&buffer.id, 10) {
+                    rows.into_iter()
+                        .filter(|r| !r.ephemeral)
+                        .filter_map(|row| {
+                            let content = row.content.as_deref()?;
+                            let role = if row.content_method == "message.user" {
+                                "user"
+                            } else if row.content_method == "message.model" {
+                                "assistant"
+                            } else {
+                                return None;
                             };
-                            Some((role.to_string(), text.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
+                            Some((role.to_string(), content.to_string()))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![]
+                }
             } else {
                 vec![]
             }
@@ -466,29 +468,19 @@ MCP:
                 if let Some(ref room_name) =
                     self.player.as_ref().and_then(|p| p.current_room.clone())
                 {
-                    use crate::display::LedgerEntry;
-                    use chrono::Utc;
+                    use crate::db::rows::Row;
 
-                    let entry = LedgerEntry {
-                        id: crate::display::EntryId(0),
-                        timestamp: Utc::now(),
-                        source: EntrySource::Model {
-                            name: model.short_name.clone(),
-                            is_streaming: false,
-                        },
-                        content: EntryContent::Chat(response.clone()),
-                        mutable: false,
-                        ephemeral: false,
-                        collapsible: true,
-                    };
-
-                    {
-                        let mut world = self.state.world.write().await;
-                        if let Some(room) = world.get_room_mut(room_name) {
-                            room.add_entry(entry.source.clone(), entry.content.clone());
+                    // Get buffer for room
+                    if let Ok(buffer) = self.state.db.get_or_create_room_buffer(room_name) {
+                        // Get or create model agent
+                        if let Ok(agent) = self.state.db.get_or_create_model_agent(&model.short_name) {
+                            // Add model response row
+                            let mut row = Row::new(&buffer.id, "message.model");
+                            row.source_agent_id = Some(agent.id);
+                            row.content = Some(response.clone());
+                            let _ = self.state.db.append_row(&mut row);
                         }
                     }
-                    let _ = self.state.db.add_ledger_entry(room_name, &entry);
                 }
 
                 let formatted = response.replace('\n', "\r\n");

@@ -265,80 +265,6 @@ impl Database {
         Ok(())
     }
 
-    /// Add a ledger entry to a room's chat buffer
-    pub fn add_ledger_entry(&self, room: &str, entry: &crate::display::LedgerEntry) -> Result<()> {
-        use crate::display::{EntryContent, EntrySource};
-        use rows::Row;
-
-        // Get room and buffer
-        let room_obj = match self.get_room_by_name(room)? {
-            Some(r) => r,
-            None => return Ok(()), // Room doesn't exist, ignore
-        };
-        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
-
-        // Map EntrySource to source_agent_id
-        let source_agent_id = match &entry.source {
-            EntrySource::User(name) => self.get_agent_by_name(name)?.map(|a| a.id),
-            EntrySource::Model { name, .. } => self.get_agent_by_name(name)?.map(|a| a.id),
-            EntrySource::System | EntrySource::Command { .. } => None,
-        };
-
-        // Map EntryContent to content_method and content
-        let (content_method, content) = match &entry.content {
-            EntryContent::Chat(text) => {
-                let method = match &entry.source {
-                    EntrySource::User(_) => "message.user",
-                    EntrySource::Model { .. } => "message.model",
-                    _ => "message.system",
-                };
-                (method, Some(text.clone()))
-            }
-            EntryContent::CommandOutput(text) => ("command.output", Some(text.clone())),
-            EntryContent::Status(kind) => {
-                use crate::display::StatusKind;
-                let method = match kind {
-                    StatusKind::Pending => "status.pending",
-                    StatusKind::Thinking => "status.thinking",
-                    StatusKind::RunningTool(_) => "status.running",
-                    StatusKind::Connecting => "status.connecting",
-                    StatusKind::Complete => "status.complete",
-                };
-                (method, None)
-            }
-            EntryContent::RoomHeader { name, description } => (
-                "room.header",
-                Some(format!(
-                    "{}\n{}",
-                    name,
-                    description.as_deref().unwrap_or("")
-                )),
-            ),
-            EntryContent::Welcome { username } => ("system.welcome", Some(username.clone())),
-            EntryContent::HistorySeparator { label } => ("meta.separator", Some(label.clone())),
-            EntryContent::Error(msg) => ("status.error", Some(msg.clone())),
-            EntryContent::Presence { user, action } => {
-                use crate::display::PresenceAction;
-                let method = match action {
-                    PresenceAction::Join => "presence.join",
-                    PresenceAction::Leave => "presence.leave",
-                };
-                (method, Some(user.clone()))
-            }
-            EntryContent::Compaction(summary) => ("meta.compaction", Some(summary.clone())),
-        };
-
-        let mut row = Row::new(&buffer.id, content_method);
-        row.source_agent_id = source_agent_id;
-        row.content = content;
-        row.mutable = entry.mutable;
-        row.ephemeral = entry.ephemeral;
-        row.collapsed = entry.collapsible;
-
-        self.append_row(&mut row)?;
-        Ok(())
-    }
-
     /// Get recent messages from a room's chat buffer
     pub fn recent_messages(&self, room: &str, limit: usize) -> Result<Vec<MessageRow>> {
         // Get room and buffer
@@ -913,110 +839,6 @@ impl Database {
         Ok(())
     }
 
-    #[allow(unused_variables)]
-    /// Get recent entries from a room's chat buffer (for wrap.lua context)
-    pub fn recent_entries(
-        &self,
-        room: &str,
-        limit: usize,
-    ) -> Result<Vec<crate::display::LedgerEntry>> {
-        use crate::display::{
-            EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction, StatusKind,
-        };
-        use chrono::{TimeZone, Utc};
-
-        // Get room and buffer
-        let room_obj = match self.get_room_by_name(room)? {
-            Some(r) => r,
-            None => return Ok(vec![]),
-        };
-        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
-
-        // Get recent rows
-        let rows = self.list_recent_buffer_rows(&buffer.id, limit)?;
-
-        // Convert to LedgerEntry
-        let entries = rows
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| {
-                // Parse timestamp
-                let timestamp = Utc
-                    .timestamp_millis_opt(row.created_at)
-                    .single()
-                    .unwrap_or_else(Utc::now);
-
-                // Map source
-                let source = if let Some(agent_id) = &row.source_agent_id {
-                    if let Ok(Some(agent)) = self.get_agent(agent_id) {
-                        match agent.kind {
-                            agents::AgentKind::Human => EntrySource::User(agent.name),
-                            agents::AgentKind::Model => EntrySource::Model {
-                                name: agent.name,
-                                is_streaming: false,
-                            },
-                            _ => EntrySource::System,
-                        }
-                    } else {
-                        EntrySource::System
-                    }
-                } else {
-                    EntrySource::System
-                };
-
-                // Map content_method back to EntryContent
-                let content_text = row.content.clone().unwrap_or_default();
-                let content = match row.content_method.as_str() {
-                    "message.user" | "message.model" | "message.system" => {
-                        EntryContent::Chat(content_text)
-                    }
-                    "command.output" => EntryContent::CommandOutput(content_text),
-                    "status.pending" => EntryContent::Status(StatusKind::Pending),
-                    "status.thinking" => EntryContent::Status(StatusKind::Thinking),
-                    "status.running" => EntryContent::Status(StatusKind::RunningTool(None)),
-                    "status.connecting" => EntryContent::Status(StatusKind::Connecting),
-                    "status.complete" => EntryContent::Status(StatusKind::Complete),
-                    "status.error" => EntryContent::Error(content_text),
-                    "room.header" => {
-                        let parts: Vec<&str> = content_text.splitn(2, '\n').collect();
-                        EntryContent::RoomHeader {
-                            name: parts.first().unwrap_or(&"").to_string(),
-                            description: parts.get(1).map(|s| s.to_string()),
-                        }
-                    }
-                    "system.welcome" => EntryContent::Welcome {
-                        username: content_text,
-                    },
-                    "meta.separator" => EntryContent::HistorySeparator {
-                        label: content_text,
-                    },
-                    "presence.join" => EntryContent::Presence {
-                        user: content_text,
-                        action: PresenceAction::Join,
-                    },
-                    "presence.leave" => EntryContent::Presence {
-                        user: content_text,
-                        action: PresenceAction::Leave,
-                    },
-                    "meta.compaction" => EntryContent::Compaction(content_text),
-                    _ => EntryContent::Chat(content_text),
-                };
-
-                LedgerEntry {
-                    id: EntryId(i as u64),
-                    timestamp,
-                    source,
-                    content,
-                    mutable: row.mutable,
-                    ephemeral: row.ephemeral,
-                    collapsible: row.collapsed,
-                }
-            })
-            .collect();
-
-        Ok(entries)
-    }
-
     /// Get room parent (for forked rooms)
     pub fn get_parent(&self, room: &str) -> Result<Option<String>> {
         if let Some(room_obj) = self.get_room_by_name(room)? {
@@ -1200,6 +1022,38 @@ impl Database {
             )?;
         }
         Ok(())
+    }
+
+    // =============================================================================
+    // NEW HELPER METHODS FOR MIGRATION
+    // =============================================================================
+
+    /// Get or create the main chat buffer for a room (by name)
+    ///
+    /// Convenience method that takes a room name instead of room_id.
+    /// Creates both the room and buffer if they don't exist.
+    pub fn get_or_create_room_buffer(&self, room_name: &str) -> Result<buffers::Buffer> {
+        // Ensure room exists
+        let room = if let Some(r) = self.get_room_by_name(room_name)? {
+            r
+        } else {
+            let r = rooms::Room::new(room_name);
+            self.insert_room(&r)?;
+            r
+        };
+
+        // Get or create the chat buffer
+        self.get_or_create_room_chat_buffer(&room.id)
+    }
+
+    /// Get the buffer ID for a room (by name), or None if room doesn't exist
+    pub fn get_room_buffer_id(&self, room_name: &str) -> Result<Option<String>> {
+        if let Some(room) = self.get_room_by_name(room_name)? {
+            let buffer = self.get_or_create_room_chat_buffer(&room.id)?;
+            Ok(Some(buffer.id))
+        } else {
+            Ok(None)
+        }
     }
 }
 

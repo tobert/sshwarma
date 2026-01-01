@@ -695,8 +695,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Database;
-    use crate::display::EntryContent;
-    use crate::display::EntrySource;
     use crate::llm::LlmClient;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
@@ -758,12 +756,15 @@ mod tests {
         }
 
         async fn add_message(&self, room: &str, sender: &str, content: &str) {
-            let mut world = self.world.write().await;
-            if let Some(r) = world.get_room_mut(room) {
-                r.ledger.push(
-                    EntrySource::User(sender.to_string()),
-                    EntryContent::Chat(content.to_string()),
-                );
+            use crate::db::rows::Row;
+
+            // Get or create buffer
+            if let Ok(buffer) = self.shared_state.db.get_or_create_room_buffer(room) {
+                // Get or create agent
+                if let Ok(agent) = self.shared_state.db.get_or_create_human_agent(sender) {
+                    let mut row = Row::message(&buffer.id, &agent.id, content, false);
+                    let _ = self.shared_state.db.append_row(&mut row);
+                }
             }
         }
     }

@@ -4,7 +4,6 @@
 //! The main binary is in `main.rs`, admin CLI in `bin/sshwarma-admin.rs`.
 
 pub mod ansi;
-pub mod comm;
 pub mod commands;
 pub mod completion;
 pub mod config;

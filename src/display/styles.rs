@@ -288,6 +288,15 @@ pub mod ctrl {
 
     /// Carriage return only
     pub const CR: &str = "\r";
+
+    /// Backspace
+    pub const BACKSPACE: &str = "\x08";
+
+    /// Cursor left
+    pub const LEFT: &str = "\x1b[D";
+
+    /// Cursor right
+    pub const RIGHT: &str = "\x1b[C";
 }
 
 #[cfg(test)]
