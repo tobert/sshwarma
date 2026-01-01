@@ -126,7 +126,13 @@ fn format_sender(source: &EntrySource) -> String {
 }
 
 /// Render a chat message with proper multi-line handling
-fn render_chat(output: &mut String, ts_prefix: &str, sender: &str, text: &str, config: &RenderConfig) {
+fn render_chat(
+    output: &mut String,
+    ts_prefix: &str,
+    sender: &str,
+    text: &str,
+    config: &RenderConfig,
+) {
     let lines: Vec<&str> = text.lines().collect();
 
     if lines.is_empty() {
@@ -149,7 +155,12 @@ fn render_chat(output: &mut String, ts_prefix: &str, sender: &str, text: &str, c
 
     // Continuation lines
     let max_lines = config.max_lines_per_entry;
-    for (i, line) in lines.iter().skip(1).take(max_lines.saturating_sub(1)).enumerate() {
+    for (i, line) in lines
+        .iter()
+        .skip(1)
+        .take(max_lines.saturating_sub(1))
+        .enumerate()
+    {
         output.push_str(ctrl::CRLF);
         if i == 0 {
             // First continuation gets the timestamp indent too if present
@@ -164,7 +175,10 @@ fn render_chat(output: &mut String, ts_prefix: &str, sender: &str, text: &str, c
     // Truncation notice
     if lines.len() > max_lines {
         output.push_str(ctrl::CRLF);
-        output.push_str(&styles::dim(&format!("... ({} more lines)", lines.len() - max_lines)));
+        output.push_str(&styles::dim(&format!(
+            "... ({} more lines)",
+            lines.len() - max_lines
+        )));
     }
 }
 
@@ -182,7 +196,10 @@ fn render_command_output(output: &mut String, text: &str, config: &RenderConfig)
 
     if lines.len() > max_lines {
         output.push_str(ctrl::CRLF);
-        output.push_str(&styles::dim(&format!("... ({} more lines)", lines.len() - max_lines)));
+        output.push_str(&styles::dim(&format!(
+            "... ({} more lines)",
+            lines.len() - max_lines
+        )));
     }
 }
 

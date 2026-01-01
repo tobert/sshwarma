@@ -123,10 +123,7 @@ mod tests {
 
     #[test]
     fn test_with_config() {
-        let backoff = Backoff::with_config(
-            Duration::from_millis(50),
-            Duration::from_secs(1),
-        );
+        let backoff = Backoff::with_config(Duration::from_millis(50), Duration::from_secs(1));
         assert_eq!(backoff.base, Duration::from_millis(50));
         assert_eq!(backoff.max, Duration::from_secs(1));
     }
@@ -154,10 +151,8 @@ mod tests {
 
     #[test]
     fn test_cap_respected() {
-        let mut backoff = Backoff::with_config(
-            Duration::from_millis(100),
-            Duration::from_millis(500),
-        );
+        let mut backoff =
+            Backoff::with_config(Duration::from_millis(100), Duration::from_millis(500));
 
         // 100, 200, 400, 500 (capped), 500...
         assert_eq!(backoff.next_delay(), Duration::from_millis(100));

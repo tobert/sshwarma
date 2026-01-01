@@ -141,7 +141,10 @@ impl ModelsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
-            tracing::warn!("models config not found at {}, using defaults", path.display());
+            tracing::warn!(
+                "models config not found at {}, using defaults",
+                path.display()
+            );
             return Ok(Self::default());
         }
 

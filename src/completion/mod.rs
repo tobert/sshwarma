@@ -187,14 +187,10 @@ impl CompletionEngine {
         // Find start of word to replace
         let start = if ctx.is_mention() {
             // Include the @
-            before_cursor
-                .rfind('@')
-                .unwrap_or(ctx.cursor)
+            before_cursor.rfind('@').unwrap_or(ctx.cursor)
         } else if ctx.is_command() && ctx.command_name().is_none() {
             // Include the /
-            before_cursor
-                .rfind('/')
-                .unwrap_or(ctx.cursor)
+            before_cursor.rfind('/').unwrap_or(ctx.cursor)
         } else {
             // Just the current word
             before_cursor

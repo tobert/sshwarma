@@ -14,11 +14,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use sshwarma::config::{Config, ModelsConfig};
 use sshwarma::db::Database;
-use sshwarma::paths;
 use sshwarma::llm::LlmClient;
 use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::ModelRegistry;
+use sshwarma::paths;
 use sshwarma::ssh::SshServer;
 use sshwarma::state::SharedState;
 use sshwarma::world::World;
@@ -60,11 +60,14 @@ async fn main() -> Result<()> {
     }
 
     // Load models configuration
-    let models_config = ModelsConfig::load(&config.models_config_path)
-        .context("failed to load models config")?;
+    let models_config =
+        ModelsConfig::load(&config.models_config_path).context("failed to load models config")?;
 
     // Initialize LLM client (set OLLAMA_HOST for local models)
-    info!("initializing LLM client (ollama: {})", models_config.ollama_endpoint);
+    info!(
+        "initializing LLM client (ollama: {})",
+        models_config.ollama_endpoint
+    );
     let llm = LlmClient::with_ollama_endpoint(&models_config.ollama_endpoint)
         .context("failed to create LLM client")?;
 
@@ -152,20 +155,21 @@ fn init_telemetry() -> Result<()> {
         .with_target(true)
         .with_thread_ids(false);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("sshwarma=info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("sshwarma=info"));
 
     // Optional OTLP export when endpoint is configured
     let otel_layer = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
         use opentelemetry::trace::TracerProvider;
         use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 
-        let service_name = std::env::var("OTEL_SERVICE_NAME")
-            .unwrap_or_else(|_| "sshwarma".to_string());
+        let service_name =
+            std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "sshwarma".to_string());
 
-        let resource = opentelemetry_sdk::Resource::new(vec![
-            opentelemetry::KeyValue::new("service.name", service_name.clone()),
-        ]);
+        let resource = opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+            "service.name",
+            service_name.clone(),
+        )]);
 
         // Build OTLP span exporter
         let exporter = SpanExporter::builder()

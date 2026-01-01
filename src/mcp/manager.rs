@@ -293,7 +293,9 @@ impl McpManager {
                     state: conn.state.as_str().to_string(),
                     tool_count: conn.tools.len(),
                     error: match &conn.state {
-                        ConnectionState::Reconnecting { last_error, .. } => Some(last_error.clone()),
+                        ConnectionState::Reconnecting { last_error, .. } => {
+                            Some(last_error.clone())
+                        }
                         _ => None,
                     },
                     attempt: match &conn.state {
@@ -325,9 +327,8 @@ impl McpManager {
                     }
                 }
             }
-            found.ok_or_else(|| {
-                anyhow::anyhow!("tool '{}' not found in any connected MCP", name)
-            })?
+            found
+                .ok_or_else(|| anyhow::anyhow!("tool '{}' not found in any connected MCP", name))?
         };
 
         debug!(tool = %name, mcp = %source, "calling tool");
@@ -453,7 +454,11 @@ impl McpManager {
         let service = conn.service.as_ref()?;
 
         let peer = service.peer().to_owned();
-        let tools_with_peers = conn.tools.iter().map(|t| (t.clone(), peer.clone())).collect();
+        let tools_with_peers = conn
+            .tools
+            .iter()
+            .map(|t| (t.clone(), peer.clone()))
+            .collect();
 
         Some(RigToolContext {
             tools: tools_with_peers,
@@ -469,11 +474,7 @@ impl McpManager {
     ///
     /// Useful for tests that need to ensure a connection is ready before proceeding.
     /// Polls the connection status at intervals until connected or timeout.
-    pub async fn wait_for_connected(
-        &self,
-        name: &str,
-        timeout: std::time::Duration,
-    ) -> Result<()> {
+    pub async fn wait_for_connected(&self, name: &str, timeout: std::time::Duration) -> Result<()> {
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(50);
 

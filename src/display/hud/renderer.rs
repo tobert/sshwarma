@@ -234,7 +234,11 @@ fn render_room_row(state: &HudState, inner_width: usize) -> String {
         parts.push(format!("│ {}", exits));
     }
 
-    parts.push(format!("│ {} {}", duration.with(colors::DIM), tick.to_string().with(colors::DIM)));
+    parts.push(format!(
+        "│ {} {}",
+        duration.with(colors::DIM),
+        tick.to_string().with(colors::DIM)
+    ));
 
     let content = parts.join(" ");
     pad_row(content, inner_width)

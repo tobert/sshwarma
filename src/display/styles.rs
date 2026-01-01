@@ -50,10 +50,7 @@ pub fn separator(label: Option<&str>, width: u16) -> String {
             let side_len = (width.saturating_sub(label_len as u16 + 2) / 2) as usize;
             let left = line_char.repeat(side_len.max(3));
             let right = line_char.repeat(side_len.max(3));
-            format!(
-                "{}",
-                format!("{} {} {}", left, l, right).dark_grey()
-            )
+            format!("{}", format!("{} {} {}", left, l, right).dark_grey())
         }
         None => format!("{}", line_char.repeat(width as usize).dark_grey()),
     }
@@ -158,12 +155,7 @@ pub fn boxed_header(title: &str, width: u16) -> String {
     let right_pad = padding - left_pad;
 
     let horizontal = BoxChars::HORIZONTAL.repeat(inner_width);
-    let padded_title = format!(
-        "{}{}{}",
-        " ".repeat(left_pad),
-        title,
-        " ".repeat(right_pad)
-    );
+    let padded_title = format!("{}{}{}", " ".repeat(left_pad), title, " ".repeat(right_pad));
 
     let mut result = String::new();
     // Use CRLF for SSH terminals

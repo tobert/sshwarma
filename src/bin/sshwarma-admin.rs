@@ -174,10 +174,7 @@ fn cmd_list(db: &Database) -> Result<()> {
 
     println!("Users:");
     for user in users {
-        let last_seen = user
-            .last_seen
-            .as_deref()
-            .unwrap_or("never");
+        let last_seen = user.last_seen.as_deref().unwrap_or("never");
         println!(
             "  {} ({} keys, last seen: {})",
             user.handle, user.key_count, last_seen
@@ -205,7 +202,11 @@ fn cmd_keys(db: &Database, args: &[String]) -> Result<()> {
         let comment = key.comment.as_deref().unwrap_or("");
         // Show abbreviated key
         let key_preview = if key.pubkey.len() > 40 {
-            format!("{}...{}", &key.pubkey[..20], &key.pubkey[key.pubkey.len() - 10..])
+            format!(
+                "{}...{}",
+                &key.pubkey[..20],
+                &key.pubkey[key.pubkey.len() - 10..]
+            )
         } else {
             key.pubkey.clone()
         };

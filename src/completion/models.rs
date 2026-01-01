@@ -15,12 +15,10 @@ impl ModelCompleter {
             .models
             .list()
             .into_iter()
-            .map(|info| {
-                Completion {
-                    text: format!("@{}", info.short_name),
-                    label: format!("@{:<12} {}", info.short_name, info.display_name),
-                    score: 0,
-                }
+            .map(|info| Completion {
+                text: format!("@{}", info.short_name),
+                label: format!("@{:<12} {}", info.short_name, info.display_name),
+                score: 0,
             })
             .collect()
     }

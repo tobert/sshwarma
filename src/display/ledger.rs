@@ -367,7 +367,10 @@ mod tests {
     fn test_ledger_push() {
         let mut ledger = Ledger::new(100);
 
-        let id1 = ledger.push(EntrySource::User("alice".into()), EntryContent::Chat("hello".into()));
+        let id1 = ledger.push(
+            EntrySource::User("alice".into()),
+            EntryContent::Chat("hello".into()),
+        );
         let id2 = ledger.push(
             EntrySource::Model {
                 name: "qwen".into(),
