@@ -56,7 +56,7 @@ tracing-opentelemetry = "0.28"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Utilities
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 dashmap = "6"
 toml = "0.8"
 

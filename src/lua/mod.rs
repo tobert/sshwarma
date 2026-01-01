@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod context;
+pub mod data;
 pub mod mcp_bridge;
 pub mod render;
 pub mod tool_middleware;
