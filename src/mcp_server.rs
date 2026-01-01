@@ -18,6 +18,8 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::config::Config;
+use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
+use crate::db::scripts::{LuaScript, ScriptKind};
 use crate::db::Database;
 use crate::llm::LlmClient;
 use crate::lua::{LuaRuntime, WrapState};
@@ -198,6 +200,69 @@ pub struct PreviewWrapParams {
     pub room: Option<String>,
     #[schemars(description = "Username to simulate (defaults to 'claude')")]
     pub username: Option<String>,
+}
+
+/// Parameters for list_rules
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListRulesParams {
+    #[schemars(description = "Name of the room to list rules for")]
+    pub room: String,
+}
+
+/// Parameters for create_rule
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateRuleParams {
+    #[schemars(description = "Name of the room to add the rule to")]
+    pub room: String,
+    #[schemars(description = "Trigger type: 'tick', 'interval', or 'row'")]
+    pub trigger_kind: String,
+    #[schemars(description = "For tick triggers: run every N ticks (500ms each)")]
+    pub tick_divisor: Option<i32>,
+    #[schemars(description = "For interval triggers: milliseconds between runs")]
+    pub interval_ms: Option<i64>,
+    #[schemars(description = "For row triggers: glob pattern to match content_method (e.g. 'message.*')")]
+    pub match_pattern: Option<String>,
+    #[schemars(description = "Name of the script to execute (must exist in database)")]
+    pub script_name: String,
+    #[schemars(description = "Optional human-readable name for the rule")]
+    pub name: Option<String>,
+}
+
+/// Parameters for delete_rule
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteRuleParams {
+    #[schemars(description = "Name of the room")]
+    pub room: String,
+    #[schemars(description = "Rule ID or prefix to delete")]
+    pub rule_id: String,
+}
+
+/// Parameters for toggle_rule
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ToggleRuleParams {
+    #[schemars(description = "Name of the room")]
+    pub room: String,
+    #[schemars(description = "Rule ID or prefix")]
+    pub rule_id: String,
+    #[schemars(description = "Enable (true) or disable (false) the rule")]
+    pub enabled: bool,
+}
+
+/// Parameters for list_scripts
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListScriptsParams {}
+
+/// Parameters for create_script
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateScriptParams {
+    #[schemars(description = "Unique name for the script")]
+    pub name: String,
+    #[schemars(description = "Script kind: 'handler', 'renderer', or 'transformer'")]
+    pub kind: String,
+    #[schemars(description = "Lua source code. Must define handle(tick, state) for handlers.")]
+    pub code: String,
+    #[schemars(description = "Optional description of what the script does")]
+    pub description: Option<String>,
 }
 
 #[tool_router]
@@ -818,6 +883,232 @@ impl SshwarmaMcpServer {
                 )
             }
             Err(e) => format!("Error composing context: {}", e),
+        }
+    }
+
+    #[tool(description = "List rules in a room")]
+    async fn list_rules(&self, Parameters(params): Parameters<ListRulesParams>) -> String {
+        match self.state.db.list_room_rules(&params.room) {
+            Ok(rules) => {
+                if rules.is_empty() {
+                    return format!("No rules in room '{}'.", params.room);
+                }
+
+                let mut output = format!("## Rules for {}\n\n", params.room);
+                for rule in rules {
+                    let status = if rule.enabled { "✓" } else { "✗" };
+                    let trigger = match rule.trigger_kind {
+                        TriggerKind::Tick => format!("tick:{}", rule.tick_divisor.unwrap_or(1)),
+                        TriggerKind::Interval => {
+                            format!("interval:{}ms", rule.interval_ms.unwrap_or(0))
+                        }
+                        TriggerKind::Row => {
+                            format!("row:{}", rule.match_content_method.as_deref().unwrap_or("*"))
+                        }
+                    };
+                    let name = rule.name.as_deref().unwrap_or("(unnamed)");
+                    output.push_str(&format!(
+                        "[{}] {} `{}` → {} ({})\n",
+                        status,
+                        &rule.id[..8],
+                        trigger,
+                        rule.script_id,
+                        name
+                    ));
+                }
+                output
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Create a new rule for a room")]
+    async fn create_rule(&self, Parameters(params): Parameters<CreateRuleParams>) -> String {
+        // Parse trigger kind
+        let trigger_kind = match params.trigger_kind.as_str() {
+            "tick" => TriggerKind::Tick,
+            "interval" => TriggerKind::Interval,
+            "row" => TriggerKind::Row,
+            _ => {
+                return format!(
+                    "Invalid trigger_kind '{}'. Use: tick, interval, row",
+                    params.trigger_kind
+                )
+            }
+        };
+
+        // Validate trigger parameters
+        match trigger_kind {
+            TriggerKind::Tick => {
+                if params.tick_divisor.is_none() {
+                    return "tick trigger requires tick_divisor parameter".to_string();
+                }
+            }
+            TriggerKind::Interval => {
+                if params.interval_ms.is_none() {
+                    return "interval trigger requires interval_ms parameter".to_string();
+                }
+            }
+            TriggerKind::Row => {
+                if params.match_pattern.is_none() {
+                    return "row trigger requires match_pattern parameter".to_string();
+                }
+            }
+        }
+
+        // Look up script by name
+        let script = match self.state.db.get_script_by_name(&params.script_name) {
+            Ok(Some(s)) => s,
+            Ok(None) => return format!("Script '{}' not found.", params.script_name),
+            Err(e) => return format!("Error looking up script: {}", e),
+        };
+
+        // Create the rule
+        let rule = RoomRule {
+            id: uuid::Uuid::now_v7().to_string(),
+            room_id: params.room.clone(),
+            name: params.name,
+            enabled: true,
+            priority: 0.0,
+            trigger_kind,
+            match_content_method: params.match_pattern,
+            match_source_agent: None,
+            match_tag: None,
+            match_buffer_type: None,
+            interval_ms: params.interval_ms,
+            tick_divisor: params.tick_divisor,
+            script_id: script.id.clone(),
+            action_slot: ActionSlot::Background,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        match self.state.db.insert_rule(&rule) {
+            Ok(_) => format!(
+                "Created rule {} in room '{}': {} → {}",
+                &rule.id[..8],
+                params.room,
+                params.trigger_kind,
+                params.script_name
+            ),
+            Err(e) => format!("Error creating rule: {}", e),
+        }
+    }
+
+    #[tool(description = "Delete a rule from a room")]
+    async fn delete_rule(&self, Parameters(params): Parameters<DeleteRuleParams>) -> String {
+        // Find rule by ID prefix
+        let rules = match self.state.db.list_room_rules(&params.room) {
+            Ok(r) => r,
+            Err(e) => return format!("Error listing rules: {}", e),
+        };
+
+        let matching: Vec<_> = rules
+            .iter()
+            .filter(|r| r.id.starts_with(&params.rule_id))
+            .collect();
+
+        match matching.len() {
+            0 => format!("No rule matching '{}' in room '{}'.", params.rule_id, params.room),
+            1 => {
+                let rule = matching[0];
+                match self.state.db.delete_rule(&rule.id) {
+                    Ok(_) => format!("Deleted rule {}.", &rule.id[..8]),
+                    Err(e) => format!("Error deleting rule: {}", e),
+                }
+            }
+            n => format!(
+                "Ambiguous: {} rules match '{}'. Be more specific.",
+                n, params.rule_id
+            ),
+        }
+    }
+
+    #[tool(description = "Enable or disable a rule")]
+    async fn toggle_rule(&self, Parameters(params): Parameters<ToggleRuleParams>) -> String {
+        // Find rule by ID prefix
+        let rules = match self.state.db.list_room_rules(&params.room) {
+            Ok(r) => r,
+            Err(e) => return format!("Error listing rules: {}", e),
+        };
+
+        let matching: Vec<_> = rules
+            .iter()
+            .filter(|r| r.id.starts_with(&params.rule_id))
+            .collect();
+
+        match matching.len() {
+            0 => format!("No rule matching '{}' in room '{}'.", params.rule_id, params.room),
+            1 => {
+                let rule = matching[0];
+                match self.state.db.set_rule_enabled(&rule.id, params.enabled) {
+                    Ok(_) => {
+                        let status = if params.enabled { "enabled" } else { "disabled" };
+                        format!("Rule {} {}.", &rule.id[..8], status)
+                    }
+                    Err(e) => format!("Error updating rule: {}", e),
+                }
+            }
+            n => format!(
+                "Ambiguous: {} rules match '{}'. Be more specific.",
+                n, params.rule_id
+            ),
+        }
+    }
+
+    #[tool(description = "List available Lua scripts")]
+    async fn list_scripts(&self, Parameters(_params): Parameters<ListScriptsParams>) -> String {
+        match self.state.db.list_scripts(None) {
+            Ok(scripts) => {
+                if scripts.is_empty() {
+                    return "No scripts found.".to_string();
+                }
+
+                let mut output = "## Available Scripts\n\n".to_string();
+                for script in scripts {
+                    let name = script.name.as_deref().unwrap_or("(anonymous)");
+                    let desc = script
+                        .description
+                        .as_deref()
+                        .unwrap_or("No description");
+                    output.push_str(&format!(
+                        "- **{}** ({:?}): {}\n",
+                        name, script.kind, desc
+                    ));
+                }
+                output
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Create a new Lua script")]
+    async fn create_script(&self, Parameters(params): Parameters<CreateScriptParams>) -> String {
+        // Parse script kind
+        let kind = match params.kind.as_str() {
+            "handler" => ScriptKind::Handler,
+            "renderer" => ScriptKind::Renderer,
+            "transformer" => ScriptKind::Transformer,
+            _ => {
+                return format!(
+                    "Invalid kind '{}'. Use: handler, renderer, transformer",
+                    params.kind
+                )
+            }
+        };
+
+        let script = LuaScript {
+            id: uuid::Uuid::now_v7().to_string(),
+            name: Some(params.name.clone()),
+            kind,
+            code: params.code,
+            description: params.description,
+            created_at: chrono::Utc::now().timestamp(),
+            updated_at: chrono::Utc::now().timestamp(),
+        };
+
+        match self.state.db.insert_script(&script) {
+            Ok(_) => format!("Created script '{}'.", params.name),
+            Err(e) => format!("Error creating script: {}", e),
         }
     }
 }
