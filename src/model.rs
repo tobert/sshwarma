@@ -67,6 +67,20 @@ pub enum ModelBackend {
     },
 }
 
+impl ModelBackend {
+    /// Get the variant name for logging/tracing
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ModelBackend::Ollama { .. } => "ollama",
+            ModelBackend::LlamaCpp { .. } => "llamacpp",
+            ModelBackend::OpenAI { .. } => "openai",
+            ModelBackend::Anthropic { .. } => "anthropic",
+            ModelBackend::Gemini { .. } => "gemini",
+            ModelBackend::Mock { .. } => "mock",
+        }
+    }
+}
+
 /// Registry of available models
 pub struct ModelRegistry {
     models: HashMap<String, ModelHandle>,

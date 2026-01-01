@@ -10,6 +10,7 @@ use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPro
 use rig::tool::server::ToolServerHandle;
 use rmcp::service::ServerSink;
 use tokio::sync::mpsc;
+use tracing::instrument;
 
 use crate::model::{ModelBackend, ModelHandle};
 
@@ -188,6 +189,15 @@ impl LlmClient {
     /// History is a slice of (user_message, assistant_response) pairs that will be
     /// included as context for the model. The model will see these as prior conversation
     /// turns before the current message.
+    #[instrument(
+        name = "llm.chat",
+        skip(self, system_prompt, history, message),
+        fields(
+            model.name = %model.short_name,
+            model.backend = model.backend.variant_name(),
+            history.turns = history.len(),
+        )
+    )]
     pub async fn chat_with_context(
         &self,
         model: &ModelHandle,
@@ -394,6 +404,15 @@ impl LlmClient {
     /// This is the main entry point when you have combined tools.
     /// Build a ToolServer with internal sshwarma tools + optional MCP tools,
     /// then pass the handle here.
+    #[instrument(
+        name = "llm.chat_with_tools",
+        skip(self, system_prompt, message, tool_server_handle),
+        fields(
+            model.name = %model.short_name,
+            model.backend = model.backend.variant_name(),
+            max_turns = max_turns,
+        )
+    )]
     pub async fn chat_with_tool_server(
         &self,
         model: &ModelHandle,
@@ -504,6 +523,15 @@ impl LlmClient {
     ///
     /// This is the streaming version of `chat_with_tool_server`.
     /// Sends StreamChunk items through the channel as they arrive.
+    #[instrument(
+        name = "llm.stream_with_tools",
+        skip(self, system_prompt, message, tool_server_handle, tx),
+        fields(
+            model.name = %model.short_name,
+            model.backend = model.backend.variant_name(),
+            max_turns = max_turns,
+        )
+    )]
     pub async fn stream_with_tool_server(
         &self,
         model: &ModelHandle,

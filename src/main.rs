@@ -9,6 +9,8 @@ use russh::server::Server as _;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use sshwarma::config::{Config, ModelsConfig};
 use sshwarma::db::Database;
@@ -23,12 +25,7 @@ use sshwarma::world::World;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("sshwarma=info".parse()?),
-        )
-        .init();
+    init_telemetry()?;
 
     // Ensure XDG directories exist
     paths::ensure_dirs().context("failed to create directories")?;
@@ -138,6 +135,68 @@ async fn main() -> Result<()> {
     server
         .run_on_address(Arc::new(russh_config), config.listen_addr)
         .await?;
+
+    Ok(())
+}
+
+/// Initialize telemetry with optional OTLP export
+///
+/// When OTEL_EXPORTER_OTLP_ENDPOINT is set, traces and metrics are exported
+/// via OTLP (e.g., to Jaeger, Grafana Tempo, or any OTLP-compatible backend).
+/// Otherwise, only console logging via tracing-subscriber is enabled.
+fn init_telemetry() -> Result<()> {
+    use tracing_subscriber::EnvFilter;
+
+    // Console logging layer (always enabled)
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(false);
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("sshwarma=info"));
+
+    // Optional OTLP export when endpoint is configured
+    let otel_layer = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        use opentelemetry::trace::TracerProvider;
+        use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+
+        let service_name = std::env::var("OTEL_SERVICE_NAME")
+            .unwrap_or_else(|_| "sshwarma".to_string());
+
+        // Build OTLP span exporter
+        let exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&endpoint)
+            .build()
+            .context("failed to build OTLP exporter")?;
+
+        // Create tracer provider with batch export
+        let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+            .with_resource(opentelemetry_sdk::Resource::new(vec![
+                opentelemetry::KeyValue::new("service.name", service_name.clone()),
+            ]))
+            .build();
+
+        let tracer = tracer_provider.tracer("sshwarma");
+
+        // Set global provider
+        opentelemetry::global::set_tracer_provider(tracer_provider);
+
+        // Log after subscriber is set up would be ideal, but we need to return the layer
+        // The info! below will work once the subscriber is initialized
+        eprintln!("OTLP export enabled: {} -> {}", service_name, endpoint);
+        Some(tracing_opentelemetry::layer().with_tracer(tracer))
+    } else {
+        None
+    };
+
+    // Build the subscriber
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .with(otel_layer)
+        .init();
 
     Ok(())
 }

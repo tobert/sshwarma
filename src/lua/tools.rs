@@ -721,6 +721,236 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("mcp_list", mcp_list_fn)?;
 
+    // =========================================================================
+    // Telemetry Tools
+    // =========================================================================
+
+    // tools.trace_attr(key, value) -> nil
+    // Add an attribute to the current tracing span
+    // Note: tracing spans require fields to be declared at creation time,
+    // so this logs the attribute as an event instead
+    let trace_attr_fn = lua.create_function(|_, (key, value): (String, Value)| {
+        match value {
+            Value::String(s) => {
+                if let Ok(s) = s.to_str() {
+                    tracing::trace!(lua_attr_key = %key, lua_attr_value = %s);
+                }
+            }
+            Value::Integer(i) => {
+                tracing::trace!(lua_attr_key = %key, lua_attr_value = i);
+            }
+            Value::Number(n) => {
+                tracing::trace!(lua_attr_key = %key, lua_attr_value = n);
+            }
+            Value::Boolean(b) => {
+                tracing::trace!(lua_attr_key = %key, lua_attr_value = b);
+            }
+            _ => {} // Ignore complex types (tables, functions, etc.)
+        }
+        Ok(())
+    })?;
+    tools.set("trace_attr", trace_attr_fn)?;
+
+    // tools.trace_attrs(table) -> nil
+    // Add multiple attributes as trace events
+    let trace_attrs_fn = lua.create_function(|_, attrs: Value| {
+        if let Value::Table(t) = attrs {
+            // Collect all attributes and log as a single event
+            let json = lua_to_json(&Value::Table(t)).unwrap_or_default();
+            tracing::trace!(lua_attrs = %json);
+        }
+        Ok(())
+    })?;
+    tools.set("trace_attrs", trace_attrs_fn)?;
+
+    // tools.log_info(msg, fields) -> nil
+    let log_info_fn = lua.create_function(|_, (msg, fields): (String, Option<Value>)| {
+        match fields {
+            Some(Value::Table(t)) => {
+                let json = lua_to_json(&Value::Table(t)).unwrap_or_default();
+                tracing::info!(message = %msg, lua_fields = %json);
+            }
+            _ => {
+                tracing::info!(message = %msg);
+            }
+        }
+        Ok(())
+    })?;
+    tools.set("log_info", log_info_fn)?;
+
+    // tools.log_warn(msg, fields) -> nil
+    let log_warn_fn = lua.create_function(|_, (msg, fields): (String, Option<Value>)| {
+        match fields {
+            Some(Value::Table(t)) => {
+                let json = lua_to_json(&Value::Table(t)).unwrap_or_default();
+                tracing::warn!(message = %msg, lua_fields = %json);
+            }
+            _ => {
+                tracing::warn!(message = %msg);
+            }
+        }
+        Ok(())
+    })?;
+    tools.set("log_warn", log_warn_fn)?;
+
+    // tools.log_error(msg, fields) -> nil
+    let log_error_fn = lua.create_function(|_, (msg, fields): (String, Option<Value>)| {
+        match fields {
+            Some(Value::Table(t)) => {
+                let json = lua_to_json(&Value::Table(t)).unwrap_or_default();
+                tracing::error!(message = %msg, lua_fields = %json);
+            }
+            _ => {
+                tracing::error!(message = %msg);
+            }
+        }
+        Ok(())
+    })?;
+    tools.set("log_error", log_error_fn)?;
+
+    // tools.log_debug(msg, fields) -> nil
+    let log_debug_fn = lua.create_function(|_, (msg, fields): (String, Option<Value>)| {
+        match fields {
+            Some(Value::Table(t)) => {
+                let json = lua_to_json(&Value::Table(t)).unwrap_or_default();
+                tracing::debug!(message = %msg, lua_fields = %json);
+            }
+            _ => {
+                tracing::debug!(message = %msg);
+            }
+        }
+        Ok(())
+    })?;
+    tools.set("log_debug", log_debug_fn)?;
+
+    // tools.metric_counter(name, delta, labels) -> nil
+    // Increment a counter metric with auto-context (room) and optional extra labels
+    let metric_counter_fn = {
+        let state = state.clone();
+        lua.create_function(move |_, (name, delta, extra_labels): (String, Option<i64>, Option<Value>)| {
+            let delta = delta.unwrap_or(1) as u64;
+
+            // Auto-context from HudState
+            let hud = state.hud_state();
+            let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+
+            // Build attributes
+            let mut attrs = vec![
+                opentelemetry::KeyValue::new("room", room),
+            ];
+
+            // Add extra labels if provided
+            if let Some(Value::Table(t)) = extra_labels {
+                for pair in t.pairs::<String, Value>() {
+                    if let Ok((k, v)) = pair {
+                        let val = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let Some(val) = val {
+                            attrs.push(opentelemetry::KeyValue::new(k, val));
+                        }
+                    }
+                }
+            }
+
+            // Record via OpenTelemetry metrics API
+            let meter = opentelemetry::global::meter("sshwarma.lua");
+            let counter = meter.u64_counter(name).build();
+            counter.add(delta, &attrs);
+
+            Ok(())
+        })?
+    };
+    tools.set("metric_counter", metric_counter_fn)?;
+
+    // tools.metric_gauge(name, value, labels) -> nil
+    // Set a gauge metric value with auto-context
+    let metric_gauge_fn = {
+        let state = state.clone();
+        lua.create_function(move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
+            // Auto-context from HudState
+            let hud = state.hud_state();
+            let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+
+            // Build attributes
+            let mut attrs = vec![
+                opentelemetry::KeyValue::new("room", room),
+            ];
+
+            // Add extra labels if provided
+            if let Some(Value::Table(t)) = extra_labels {
+                for pair in t.pairs::<String, Value>() {
+                    if let Ok((k, v)) = pair {
+                        let val = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let Some(val) = val {
+                            attrs.push(opentelemetry::KeyValue::new(k, val));
+                        }
+                    }
+                }
+            }
+
+            // Record via OpenTelemetry metrics API (using observable gauge pattern)
+            let meter = opentelemetry::global::meter("sshwarma.lua");
+            let gauge = meter.f64_gauge(name).build();
+            gauge.record(value, &attrs);
+
+            Ok(())
+        })?
+    };
+    tools.set("metric_gauge", metric_gauge_fn)?;
+
+    // tools.metric_histogram(name, value, labels) -> nil
+    // Record a histogram observation with auto-context
+    let metric_histogram_fn = {
+        let state = state.clone();
+        lua.create_function(move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
+            // Auto-context from HudState
+            let hud = state.hud_state();
+            let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+
+            // Build attributes
+            let mut attrs = vec![
+                opentelemetry::KeyValue::new("room", room),
+            ];
+
+            // Add extra labels if provided
+            if let Some(Value::Table(t)) = extra_labels {
+                for pair in t.pairs::<String, Value>() {
+                    if let Ok((k, v)) = pair {
+                        let val = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let Some(val) = val {
+                            attrs.push(opentelemetry::KeyValue::new(k, val));
+                        }
+                    }
+                }
+            }
+
+            // Record via OpenTelemetry metrics API
+            let meter = opentelemetry::global::meter("sshwarma.lua");
+            let histogram = meter.f64_histogram(name).build();
+            histogram.record(value, &attrs);
+
+            Ok(())
+        })?
+    };
+    tools.set("metric_histogram", metric_histogram_fn)?;
+
     // Set as global
     lua.globals().set("tools", tools)?;
 

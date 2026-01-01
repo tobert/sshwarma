@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
@@ -245,6 +245,15 @@ impl server::Handler for SshHandler {
         Ok(())
     }
 
+    #[instrument(
+        name = "ssh.shell_request",
+        skip(self, session),
+        fields(
+            user.name = self.player.as_ref().map(|p| p.username.as_str()).unwrap_or("unknown"),
+            term.width = self.term_size.0,
+            term.height = self.term_size.1,
+        )
+    )]
     async fn shell_request(
         &mut self,
         channel: ChannelId,
@@ -421,6 +430,7 @@ impl server::Handler for SshHandler {
 }
 
 /// Background task that watches for model responses and pushes them to the terminal
+#[instrument(name = "ssh.push_updates", skip_all)]
 async fn push_updates_task(
     handle: Handle,
     channel: ChannelId,
@@ -514,6 +524,7 @@ async fn push_updates_task(
 /// Tiered update schedule:
 /// - Every tick (100ms): Lua renders HUD (handles spinner, notifications)
 /// - Every 10 ticks (1s): Poll MCP connection status, check Lua hot-reload
+#[instrument(name = "ssh.hud_refresh", skip_all)]
 async fn hud_refresh_task(
     handle: Handle,
     channel: ChannelId,
@@ -581,6 +592,7 @@ async fn hud_refresh_task(
 /// - tick % 2 == 0: every 1s
 /// - tick % 4 == 0: every 2s
 /// - tick % 8 == 0: every 4s
+#[instrument(name = "ssh.background_tick", skip_all)]
 async fn background_tick_task(lua_runtime: Arc<Mutex<LuaRuntime>>) {
     let tick_interval = Duration::from_millis(500); // 120 BPM
     let mut interval = tokio::time::interval(tick_interval);
