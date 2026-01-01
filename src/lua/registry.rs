@@ -13,33 +13,32 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::db::Database;
-use crate::display::hud::HudState;
 use crate::mcp::McpManager;
 use crate::state::SharedState;
+use crate::status::StatusTracker;
+use crate::world::World;
+use tokio::sync::RwLock;
 
 /// Context passed to tool handlers
 pub struct ToolContext {
     pub db: Arc<Database>,
     pub mcp: Arc<McpManager>,
-    pub hud_state: Option<HudState>,
+    pub world: Arc<RwLock<World>>,
+    pub status_tracker: Arc<StatusTracker>,
     pub username: Option<String>,
     pub room: Option<String>,
 }
 
 impl ToolContext {
-    pub fn new(state: &SharedState) -> Self {
+    pub fn new(state: &SharedState, status_tracker: Arc<StatusTracker>) -> Self {
         Self {
             db: state.db.clone(),
             mcp: state.mcp.clone(),
-            hud_state: None,
+            world: state.world.clone(),
+            status_tracker,
             username: None,
             room: None,
         }
-    }
-
-    pub fn with_hud(mut self, hud: HudState) -> Self {
-        self.hud_state = Some(hud);
-        self
     }
 
     pub fn with_user(mut self, username: String) -> Self {
@@ -105,39 +104,60 @@ impl ToolRegistry {
 
     /// Register all builtin tools
     fn register_builtins(&mut self) {
-        // Status tool - returns app state
+        // Status tool - returns live app state for HUD
         self.register("status", |ctx, _args| {
             let mut result = serde_json::json!({});
 
-            // Add HUD state if available
-            if let Some(ref hud) = ctx.hud_state {
+            // Query room info from DB
+            if let Some(ref room_name) = ctx.room {
+                let vibe = ctx.db.get_vibe(room_name).ok().flatten();
+                let exits = ctx.db.get_exits(room_name).unwrap_or_default();
+
                 result["room"] = serde_json::json!({
-                    "name": hud.room_name,
-                    "vibe": hud.vibe,
-                    "description": hud.description,
+                    "name": room_name,
+                    "vibe": vibe,
                 });
 
-                result["participants"] = serde_json::json!(
-                    hud.participants.iter().map(|p| {
-                        serde_json::json!({
-                            "name": p.name,
-                            "kind": match p.kind {
-                                crate::display::hud::ParticipantKind::User => "user",
-                                crate::display::hud::ParticipantKind::Model => "model",
-                            },
-                            "status": p.status.text(),
-                            "active": p.status.is_active(),
-                        })
-                    }).collect::<Vec<_>>()
-                );
+                result["exits"] = serde_json::json!(exits);
 
-                result["session"] = serde_json::json!({
-                    "duration_ms": hud.session_duration().num_milliseconds(),
-                    "duration": hud.duration_string(),
-                });
+                // Try to get participants from world (non-blocking)
+                if let Ok(world) = ctx.world.try_read() {
+                    if let Some(room) = world.get_room(room_name) {
+                        let status_snapshot = ctx.status_tracker.snapshot();
 
-                result["exits"] = serde_json::json!(hud.exits);
+                        let participants: Vec<_> = room
+                            .users
+                            .iter()
+                            .map(|name| {
+                                let status = status_snapshot.get(name);
+                                serde_json::json!({
+                                    "name": name,
+                                    "kind": "user",
+                                    "status": status.map(|s| s.text()).unwrap_or_default(),
+                                    "active": status.map(|s| s.is_active()).unwrap_or(false),
+                                })
+                            })
+                            .chain(room.models.iter().map(|model| {
+                                let status = status_snapshot.get(&model.short_name);
+                                serde_json::json!({
+                                    "name": model.short_name,
+                                    "kind": "model",
+                                    "status": status.map(|s| s.text()).unwrap_or_default(),
+                                    "active": status.map(|s| s.is_active()).unwrap_or(false),
+                                })
+                            }))
+                            .collect();
+
+                        result["participants"] = serde_json::json!(participants);
+                    }
+                }
             }
+
+            // Session info from status tracker
+            result["session"] = serde_json::json!({
+                "duration_ms": ctx.status_tracker.duration_ms(),
+                "duration": ctx.status_tracker.duration_string(),
+            });
 
             // Add user context
             if let Some(ref user) = ctx.username {
@@ -147,25 +167,28 @@ impl ToolRegistry {
             Ok(result)
         });
 
-        // MCP status tool
-        self.register("mcp_status", |_ctx, _args| {
-            // This needs async, so we'll return cached state for now
-            // In the new architecture, MCP state updates via rows
-            Ok(serde_json::json!({
-                "note": "mcp_status will be updated via row events"
-            }))
-        });
-
         // Room tool - get current room info
         self.register("room", |ctx, _args| {
-            if let Some(ref hud) = ctx.hud_state {
+            if let Some(ref room_name) = ctx.room {
+                let vibe = ctx.db.get_vibe(room_name).ok().flatten();
+                let exits = ctx.db.get_exits(room_name).unwrap_or_default();
+
+                let (user_count, model_count) = if let Ok(world) = ctx.world.try_read() {
+                    if let Some(room) = world.get_room(room_name) {
+                        (room.users.len(), room.models.len())
+                    } else {
+                        (0, 0)
+                    }
+                } else {
+                    (0, 0)
+                };
+
                 Ok(serde_json::json!({
-                    "name": hud.room_name,
-                    "vibe": hud.vibe,
-                    "description": hud.description,
-                    "exits": hud.exits,
-                    "users": hud.user_count(),
-                    "models": hud.model_count(),
+                    "name": room_name,
+                    "vibe": vibe,
+                    "exits": exits,
+                    "users": user_count,
+                    "models": model_count,
                 }))
             } else {
                 Ok(serde_json::json!(null))
@@ -192,7 +215,6 @@ impl ToolRegistry {
 
         // Notify tool - push a notification
         self.register("notify", |_ctx, args| {
-            // Extract args
             let message = args
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -229,7 +251,6 @@ impl ToolRegistry {
         self.register("rows", |ctx, args| {
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20) as usize;
 
-            // Get room's buffer
             if let Some(ref room) = ctx.room {
                 if let Ok(buffer) = ctx.db.get_or_create_room_buffer(room) {
                     if let Ok(rows) = ctx.db.list_recent_buffer_rows(&buffer.id, limit) {
@@ -257,6 +278,7 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::McpManager;
 
     #[test]
     fn test_registry_new() {
@@ -270,10 +292,16 @@ mod tests {
     #[test]
     fn test_time_tool() {
         let registry = ToolRegistry::new();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let mcp = Arc::new(McpManager::new());
+        let world = Arc::new(RwLock::new(World::new()));
+        let status_tracker = Arc::new(StatusTracker::new());
+
         let ctx = ToolContext {
-            db: Arc::new(Database::in_memory().unwrap()),
-            mcp: Arc::new(McpManager::new()),
-            hud_state: None,
+            db,
+            mcp,
+            world,
+            status_tracker,
             username: None,
             room: None,
         };

@@ -3,8 +3,9 @@
 //! Handles model response streaming with Row updates.
 
 use crate::db::Database;
-use crate::display::hud::{HudState, ParticipantStatus, HUD_HEIGHT};
-use crate::display::styles::ctrl;
+use crate::lua::LuaRuntime;
+use crate::status::Status;
+use crate::terminal::{self, HUD_HEIGHT};
 use crate::ui::render::render_rows;
 use russh::server::Handle;
 use russh::{ChannelId, CryptoVec};
@@ -23,6 +24,7 @@ pub enum RowUpdate {
     ToolCall {
         row_id: String,
         tool_name: String,
+        model_name: String,
     },
     /// Tool result received
     ToolResult {
@@ -43,7 +45,7 @@ pub async fn push_updates_task(
     mut rx: mpsc::Receiver<RowUpdate>,
     db: Arc<Database>,
     buffer_id: String,
-    hud_state: Arc<Mutex<HudState>>,
+    lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
     term_width: u16,
     term_height: u16,
 ) {
@@ -62,8 +64,6 @@ pub async fn push_updates_task(
                 _accumulated_text.push_str(&text);
                 _current_row_id = Some(row_id.clone());
 
-                // HUD status updates happen through the HUD refresh task
-
                 // Render updated row
                 if let Ok(Some(row)) = db.get_row(&row_id) {
                     let rendered = render_rows(&[row], term_width as usize);
@@ -74,13 +74,11 @@ pub async fn push_updates_task(
                 }
             }
 
-            RowUpdate::ToolCall { row_id, tool_name } => {
-                // Update HUD to show tool running
-                {
-                    let mut hud = hud_state.lock().await;
-                    if let Some(participant) = hud.participants.iter_mut().find(|p| p.kind == crate::display::hud::ParticipantKind::Model) {
-                        participant.status = ParticipantStatus::RunningTool(tool_name.clone());
-                    }
+            RowUpdate::ToolCall { row_id, tool_name, model_name } => {
+                // Update status to show tool running
+                if let Some(ref lua_runtime) = lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().set_status(&model_name, Status::RunningTool(tool_name.clone()));
                 }
 
                 // Update row to show tool call
@@ -104,10 +102,10 @@ pub async fn push_updates_task(
                     tracing::error!("failed to finalize row: {}", e);
                 }
 
-                // Update HUD to idle
-                {
-                    let mut hud = hud_state.lock().await;
-                    hud.update_status(&model_name, ParticipantStatus::Idle);
+                // Update status to idle
+                if let Some(ref lua_runtime) = lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().set_status(&model_name, Status::Idle);
                 }
 
                 // Full re-render to clean up
@@ -119,8 +117,6 @@ pub async fn push_updates_task(
                         .await;
                 }
 
-                // HUD is redrawn by the refresh task - no need to redraw here
-
                 _accumulated_text.clear();
                 _current_row_id = None;
             }
@@ -131,19 +127,19 @@ pub async fn push_updates_task(
 /// Format output for streaming update (partial line replacement)
 fn format_streaming_output(rendered: &str, _width: u16, _height: u16) -> String {
     // Move to start of line, clear, write new content
-    format!("{}{}{}", ctrl::CR, ctrl::clear_line(), rendered)
+    format!("{}{}{}", terminal::CR, terminal::clear_line(), rendered)
 }
 
 /// Format output for full re-render
 fn format_full_render(rendered: &str, _width: u16, height: u16) -> String {
     let mut output = String::new();
     // Move to top, clear scroll region, redraw
-    output.push_str(&ctrl::move_to(1, 1));
+    output.push_str(&terminal::move_to(1, 1));
     for _ in 0..height.saturating_sub(HUD_HEIGHT + 1) {
-        output.push_str(&ctrl::clear_line());
-        output.push_str(ctrl::CRLF);
+        output.push_str(&terminal::clear_line());
+        output.push_str(terminal::CRLF);
     }
-    output.push_str(&ctrl::move_to(1, 1));
+    output.push_str(&terminal::move_to(1, 1));
     output.push_str(rendered);
     output
 }

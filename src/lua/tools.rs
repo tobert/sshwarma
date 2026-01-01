@@ -3,19 +3,17 @@
 //! Provides Lua functions that bridge to Rust state and MCP tools.
 //! All functions are registered in a `tools` global table.
 
-use crate::display::hud::HudState;
 use crate::lua::cache::ToolCache;
-use crate::lua::context::{
-    build_hud_context, build_notifications_table, NotificationLevel, PendingNotification,
-};
+use crate::lua::context::{build_notifications_table, NotificationLevel, PendingNotification};
 use crate::lua::mcp_bridge::McpBridge;
 use crate::lua::tool_middleware::ToolMiddleware;
 use crate::model::ModelHandle;
 use crate::state::SharedState;
+use crate::status::{Status, StatusTracker};
 use crate::ui::{LuaArea, LuaDrawContext, Rect, RenderBuffer};
 use crate::world::JournalKind;
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Session context for wrap operations
 ///
@@ -33,34 +31,33 @@ pub struct SessionContext {
 
 /// Shared state holder for Lua callbacks
 ///
-/// Uses Arc<RwLock<...>> for thread-safe interior mutability,
-/// allowing the state to be shared across async handlers and
+/// Uses Arc for thread-safe sharing across async handlers and
 /// spawned tasks (required for russh's Send+Sync handler bounds).
 #[derive(Clone)]
 pub struct LuaToolState {
-    /// Current HUD state (updated by Rust before each render)
-    hud_state: Arc<RwLock<HudState>>,
+    /// Participant status tracker (thinking, running tool, etc.)
+    status_tracker: Arc<StatusTracker>,
     /// Pending notifications queue (Rust adds, Lua drains)
-    pending_notifications: Arc<RwLock<Vec<PendingNotification>>>,
+    pending_notifications: Arc<std::sync::RwLock<Vec<PendingNotification>>>,
     /// Tool result cache for instant reads
     cache: ToolCache,
     /// Shared application state for extended data access (world, ledger, etc.)
-    shared_state: Arc<RwLock<Option<Arc<SharedState>>>>,
+    shared_state: Arc<std::sync::RwLock<Option<Arc<SharedState>>>>,
     /// Session context (user, model, room) for wrap operations
-    session_context: Arc<RwLock<Option<SessionContext>>>,
+    session_context: Arc<std::sync::RwLock<Option<SessionContext>>>,
     /// Tool middleware for routing and transformation
     middleware: ToolMiddleware,
 }
 
 impl LuaToolState {
-    /// Create a new tool state with default HUD state
+    /// Create a new tool state
     pub fn new() -> Self {
         Self {
-            hud_state: Arc::new(RwLock::new(HudState::new())),
-            pending_notifications: Arc::new(RwLock::new(Vec::new())),
+            status_tracker: Arc::new(StatusTracker::new()),
+            pending_notifications: Arc::new(std::sync::RwLock::new(Vec::new())),
             cache: ToolCache::new(),
-            shared_state: Arc::new(RwLock::new(None)),
-            session_context: Arc::new(RwLock::new(None)),
+            shared_state: Arc::new(std::sync::RwLock::new(None)),
+            session_context: Arc::new(std::sync::RwLock::new(None)),
             middleware: ToolMiddleware::new(),
         }
     }
@@ -70,16 +67,19 @@ impl LuaToolState {
         &self.middleware
     }
 
-    /// Update the HUD state (called before render)
-    pub fn update_hud_state(&self, state: HudState) {
-        if let Ok(mut guard) = self.hud_state.write() {
-            *guard = state;
-        }
+    /// Get the status tracker
+    pub fn status_tracker(&self) -> &Arc<StatusTracker> {
+        &self.status_tracker
     }
 
-    /// Get a clone of the current HUD state
-    pub fn hud_state(&self) -> HudState {
-        self.hud_state.read().map(|g| g.clone()).unwrap_or_default()
+    /// Set a participant's status
+    pub fn set_status(&self, name: &str, status: Status) {
+        self.status_tracker.set(name, status);
+    }
+
+    /// Get a participant's status
+    pub fn get_status(&self, name: &str) -> Status {
+        self.status_tracker.get(name)
     }
 
     /// Push a notification to the queue
@@ -165,26 +165,16 @@ impl Default for LuaToolState {
 /// Register all tool functions in the Lua state
 ///
 /// Creates a global `tools` table with:
-/// - `tools.hud_state()` - returns current HUD state as table
 /// - `tools.clear_notifications()` - drains pending notifications
 /// - `tools.cached(key)` - reads from cache
 ///
+/// For HUD state, use `sshwarma.call("status")` instead.
 /// MCP tools can be registered dynamically via `register_mcp_tool`.
 pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let tools = lua.create_table()?;
 
     // Store state in Lua registry for access from callbacks
     lua.set_named_registry_value("tool_state", LuaToolStateWrapper(state.clone()))?;
-
-    // tools.hud_state() -> table
-    let hud_state_fn = {
-        let state = state.clone();
-        lua.create_function(move |lua, ()| {
-            let hud = state.hud_state();
-            build_hud_context(lua, &hud)
-        })?
-    };
-    tools.set("hud_state", hud_state_fn)?;
 
     // tools.clear_notifications() -> array of notifications
     let clear_notifications_fn = {
@@ -263,84 +253,115 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("kv_delete", kv_delete_fn)?;
 
-    // Room/participant tools (mirrors sshwarma_* internal tools)
+    // Room/participant tools (query live data from session_context, shared_state, status_tracker)
 
     // tools.look() -> room summary
     let look_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
-            let hud = state.hud_state();
             let result = lua.create_table()?;
 
-            // Room name
-            if let Some(ref room) = hud.room_name {
+            // Get room name from session context
+            let room_name = state.session_context().and_then(|ctx| ctx.room_name);
+
+            if let Some(ref room) = room_name {
                 result.set("room", room.clone())?;
             } else {
                 result.set("room", Value::Nil)?;
+                return Ok(result);
             }
 
-            // Description
-            if let Some(ref desc) = hud.description {
-                result.set("description", desc.clone())?;
-            } else {
-                result.set("description", Value::Nil)?;
-            }
+            let room_name = room_name.unwrap();
 
-            // Vibe
-            if let Some(ref vibe) = hud.vibe {
-                result.set("vibe", vibe.clone())?;
-            } else {
-                result.set("vibe", Value::Nil)?;
-            }
+            // Get room data from shared state
+            if let Some(shared) = state.shared_state() {
+                // Get room from world
+                let world = shared.world.blocking_read();
+                if let Some(room) = world.get_room(&room_name) {
+                    // Description
+                    if let Some(ref desc) = room.description {
+                        result.set("description", desc.clone())?;
+                    } else {
+                        result.set("description", Value::Nil)?;
+                    }
 
-            // Users array
-            let users = lua.create_table()?;
-            let mut user_idx = 1;
-            for p in &hud.participants {
-                if p.is_user() {
-                    users.set(user_idx, p.name.clone())?;
-                    user_idx += 1;
+                    // Users array
+                    let users_table = lua.create_table()?;
+                    for (i, user) in room.users.iter().enumerate() {
+                        users_table.set(i + 1, user.clone())?;
+                    }
+                    result.set("users", users_table)?;
                 }
-            }
-            result.set("users", users)?;
+                drop(world);
 
-            // Models array
-            let models = lua.create_table()?;
-            let mut model_idx = 1;
-            for p in &hud.participants {
-                if p.is_model() {
-                    models.set(model_idx, p.name.clone())?;
-                    model_idx += 1;
+                // Get vibe from DB
+                let vibe = shared.db.get_vibe(&room_name).ok().flatten();
+                if let Some(v) = vibe {
+                    result.set("vibe", v)?;
+                } else {
+                    result.set("vibe", Value::Nil)?;
                 }
-            }
-            result.set("models", models)?;
 
-            // Exits table
-            let exits = lua.create_table()?;
-            for (dir, room) in &hud.exits {
-                exits.set(dir.clone(), room.clone())?;
+                // Get exits from DB
+                let exits = shared.db.get_exits(&room_name).unwrap_or_default();
+                let exits_table = lua.create_table()?;
+                for (dir, dest) in exits {
+                    exits_table.set(dir, dest)?;
+                }
+                result.set("exits", exits_table)?;
+
+                // Models array (from model registry)
+                let models_table = lua.create_table()?;
+                for (i, m) in shared.models.available().iter().enumerate() {
+                    models_table.set(i + 1, m.short_name.clone())?;
+                }
+                result.set("models", models_table)?;
             }
-            result.set("exits", exits)?;
 
             Ok(result)
         })?
     };
     tools.set("look", look_fn)?;
 
-    // tools.who() -> participant list
+    // tools.who() -> participant list with status
     let who_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
-            let hud = state.hud_state();
             let list = lua.create_table()?;
+            let mut idx = 1;
 
-            for (i, p) in hud.participants.iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.set("name", p.name.clone())?;
-                entry.set("is_model", p.is_model())?;
-                entry.set("status", p.status.text())?;
-                entry.set("glyph", p.status.glyph())?;
-                list.set(i + 1, entry)?;
+            // Get room name from session context
+            let room_name = state.session_context().and_then(|ctx| ctx.room_name);
+
+            if let Some(shared) = state.shared_state() {
+                // Get users from room
+                if let Some(ref room) = room_name {
+                    let world = shared.world.blocking_read();
+                    if let Some(room_data) = world.get_room(room) {
+                        for user in &room_data.users {
+                            let entry = lua.create_table()?;
+                            entry.set("name", user.clone())?;
+                            entry.set("is_model", false)?;
+                            let status = state.get_status(user);
+                            entry.set("status", status.text())?;
+                            entry.set("glyph", status.glyph())?;
+                            list.set(idx, entry)?;
+                            idx += 1;
+                        }
+                    }
+                }
+
+                // Get models from registry
+                for m in shared.models.available() {
+                    let entry = lua.create_table()?;
+                    entry.set("name", m.short_name.clone())?;
+                    entry.set("is_model", true)?;
+                    let status = state.get_status(&m.short_name);
+                    entry.set("status", status.text())?;
+                    entry.set("glyph", status.glyph())?;
+                    list.set(idx, entry)?;
+                    idx += 1;
+                }
             }
 
             Ok(list)
@@ -352,11 +373,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let exits_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
-            let hud = state.hud_state();
             let map = lua.create_table()?;
 
-            for (dir, dest) in hud.exits.iter() {
-                map.set(dir.clone(), dest.clone())?;
+            // Get room name from session context
+            let room_name = state.session_context().and_then(|ctx| ctx.room_name);
+
+            if let (Some(shared), Some(room)) = (state.shared_state(), room_name) {
+                let exits = shared.db.get_exits(&room).unwrap_or_default();
+                for (dir, dest) in exits {
+                    map.set(dir, dest)?;
+                }
             }
 
             Ok(map)
@@ -368,8 +394,14 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let vibe_fn = {
         let state = state.clone();
         lua.create_function(move |_lua, ()| {
-            let hud = state.hud_state();
-            Ok(hud.vibe.clone())
+            // Get room name from session context
+            let room_name = state.session_context().and_then(|ctx| ctx.room_name);
+
+            if let (Some(shared), Some(room)) = (state.shared_state(), room_name) {
+                Ok(shared.db.get_vibe(&room).ok().flatten())
+            } else {
+                Ok(None)
+            }
         })?
     };
     tools.set("vibe", vibe_fn)?;
@@ -378,19 +410,20 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let mcp_connections_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
-            let hud = state.hud_state();
             let list = lua.create_table()?;
 
-            for (i, m) in hud.mcp_connections.iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.set("name", m.name.clone())?;
-                entry.set("tools", m.tool_count)?;
-                entry.set("connected", m.connected)?;
-                entry.set("calls", m.call_count)?;
-                if let Some(ref last_tool) = m.last_tool {
-                    entry.set("last_tool", last_tool.clone())?;
+            if let Some(shared) = state.shared_state() {
+                for (i, server) in shared.mcp.list().iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("name", server.name.clone())?;
+                    entry.set("tools", server.tool_count)?;
+                    entry.set("connected", server.state == "connected")?;
+                    entry.set("calls", server.call_count as i64)?;
+                    if let Some(ref last_tool) = server.last_tool {
+                        entry.set("last_tool", last_tool.clone())?;
+                    }
+                    list.set(i + 1, entry)?;
                 }
-                list.set(i + 1, entry)?;
             }
 
             Ok(list)
@@ -402,11 +435,17 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let session_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
-            let hud = state.hud_state();
             let result = lua.create_table()?;
-            result.set("start_ms", hud.session_start.timestamp_millis())?;
-            result.set("duration", hud.duration_string())?;
-            result.set("spinner_frame", hud.spinner_frame)?;
+            let tracker = state.status_tracker();
+            result.set("start_ms", tracker.session_start().timestamp_millis())?;
+            result.set("duration", tracker.duration_string())?;
+            // Spinner frame: tick-based, advances every 100ms
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let spinner_frame = ((now / 100) % 10) as u8;
+            result.set("spinner_frame", spinner_frame)?;
             Ok(result)
         })?
     };
@@ -421,10 +460,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             let limit = limit.unwrap_or(30);
             let list = lua.create_table()?;
 
-            // Get room name from HudState
-            let hud = state.hud_state();
-            let room_name = match &hud.room_name {
-                Some(name) => name.clone(),
+            // Get room name from session context
+            let room_name = match state.session_context().and_then(|ctx| ctx.room_name) {
+                Some(name) => name,
                 None => return Ok(list), // Empty list if not in a room
             };
 
@@ -485,10 +523,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             // Parse kind filter if provided
             let kind_filter = kind.as_ref().and_then(|k| JournalKind::parse(k));
 
-            // Get room name from HudState
-            let hud = state.hud_state();
-            let room_name = match &hud.room_name {
-                Some(name) => name.clone(),
+            // Get room name from session context
+            let room_name = match state.session_context().and_then(|ctx| ctx.room_name) {
+                Some(name) => name,
                 None => return Ok(list),
             };
 
@@ -529,10 +566,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, ()| {
             let list = lua.create_table()?;
 
-            // Get room name from HudState
-            let hud = state.hud_state();
-            let room_name = match &hud.room_name {
-                Some(name) => name.clone(),
+            // Get room name from session context
+            let room_name = match state.session_context().and_then(|ctx| ctx.room_name) {
+                Some(name) => name,
                 None => return Ok(list),
             };
 
@@ -625,10 +661,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, target: String| {
             let list = lua.create_table()?;
 
-            // Get room name from HudState
-            let hud = state.hud_state();
-            let room_name = match &hud.room_name {
-                Some(name) => name.clone(),
+            // Get room name from session context
+            let room_name = match state.session_context().and_then(|ctx| ctx.room_name) {
+                Some(name) => name,
                 None => return Ok(list),
             };
 
@@ -889,9 +924,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             move |_, (name, delta, extra_labels): (String, Option<i64>, Option<Value>)| {
                 let delta = delta.unwrap_or(1) as u64;
 
-                // Auto-context from HudState
-                let hud = state.hud_state();
-                let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+                // Auto-context from session context
+                let room = state
+                    .session_context()
+                    .and_then(|ctx| ctx.room_name)
+                    .unwrap_or_else(|| "lobby".to_string());
 
                 // Build attributes
                 let mut attrs = vec![opentelemetry::KeyValue::new("room", room)];
@@ -929,9 +966,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         let state = state.clone();
         lua.create_function(
             move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
-                // Auto-context from HudState
-                let hud = state.hud_state();
-                let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+                // Auto-context from session context
+                let room = state
+                    .session_context()
+                    .and_then(|ctx| ctx.room_name)
+                    .unwrap_or_else(|| "lobby".to_string());
 
                 // Build attributes
                 let mut attrs = vec![opentelemetry::KeyValue::new("room", room)];
@@ -969,9 +1008,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         let state = state.clone();
         lua.create_function(
             move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
-                // Auto-context from HudState
-                let hud = state.hud_state();
-                let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+                // Auto-context from session context
+                let room = state
+                    .session_context()
+                    .and_then(|ctx| ctx.room_name)
+                    .unwrap_or_else(|| "lobby".to_string());
 
                 // Build attributes
                 let mut attrs = vec![opentelemetry::KeyValue::new("room", room)];
@@ -1198,13 +1239,12 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             // 2. Try builtin tool
             if registry.has(&name) {
                 // Build context from current state
-                let hud = state.hud_state();
                 let shared = state.shared_state();
                 let session = state.session_context();
+                let status_tracker = state.status_tracker().clone();
 
                 let ctx = if let Some(ref shared) = shared {
-                    let mut ctx = ToolContext::new(shared);
-                    ctx = ctx.with_hud(hud);
+                    let mut ctx = ToolContext::new(shared, status_tracker);
                     if let Some(ref sess) = session {
                         ctx = ctx.with_user(sess.username.clone());
                         if let Some(ref room) = sess.room_name {
@@ -1213,13 +1253,14 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                     }
                     ctx
                 } else {
-                    // Minimal context without SharedState
+                    // Minimal context without SharedState - create empty world
                     ToolContext {
                         db: std::sync::Arc::new(crate::db::Database::in_memory().map_err(|e| {
                             mlua::Error::external(format!("db error: {}", e))
                         })?),
                         mcp: std::sync::Arc::new(crate::mcp::McpManager::new()),
-                        hud_state: Some(hud),
+                        world: std::sync::Arc::new(tokio::sync::RwLock::new(crate::world::World::new())),
+                        status_tracker,
                         username: session.as_ref().map(|s| s.username.clone()),
                         room: session.as_ref().and_then(|s| s.room_name.clone()),
                     }
@@ -1304,7 +1345,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Database;
-    use crate::display::hud::HudState;
     use crate::llm::LlmClient;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelRegistry};
@@ -1424,17 +1464,11 @@ mod tests {
             }
         }
 
-        /// Create a configured LuaToolState with shared_state, session_context, and hud_state
+        /// Create a configured LuaToolState with shared_state and session_context
         fn lua_tool_state(&self, room: &str) -> LuaToolState {
             let state = LuaToolState::new();
             state.set_shared_state(Some(self.shared_state.clone()));
             state.set_session_context(Some(self.session_context(room)));
-
-            // Also set HudState with the room name (tools read room_name from HudState)
-            let mut hud = HudState::new();
-            hud.room_name = Some(room.to_string());
-            state.update_hud_state(hud);
-
             state
         }
     }
@@ -1450,7 +1484,8 @@ mod tests {
         let tools: Table = lua.globals().get("tools").expect("should have tools");
 
         // Verify functions exist
-        let _hud_state: Function = tools.get("hud_state").expect("should have hud_state");
+        let _look: Function = tools.get("look").expect("should have look");
+        let _who: Function = tools.get("who").expect("should have who");
         let _clear: Function = tools
             .get("clear_notifications")
             .expect("should have clear_notifications");

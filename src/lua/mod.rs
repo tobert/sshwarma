@@ -14,18 +14,17 @@ pub mod tools;
 pub mod wrap;
 
 pub use cache::ToolCache;
-pub use context::{build_hud_context, NotificationLevel, PendingNotification};
+pub use context::{NotificationLevel, PendingNotification};
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use registry::ToolRegistry;
 pub use render::{parse_lua_output, HUD_ROWS};
 pub use tool_middleware::{ToolContext, ToolMiddleware};
-pub use tools::{register_mcp_tools, LuaToolState};
+pub use tools::{register_mcp_tools, LuaToolState, SessionContext};
 pub use wrap::{compose_context, WrapResult, WrapState};
 
 // Re-export startup script path for main.rs
 pub use self::startup_script_path as get_startup_script_path;
 
-use crate::display::hud::HudState;
 use crate::lua::tools::register_tools;
 use crate::paths;
 use anyhow::{Context, Result};
@@ -345,13 +344,6 @@ impl LuaRuntime {
         Ok(())
     }
 
-    /// Update the HUD state before rendering
-    ///
-    /// Call this before `call_on_tick()` to provide current state.
-    pub fn update_state(&self, state: HudState) {
-        self.tool_state.update_hud_state(state);
-    }
-
     /// Push a notification for the HUD to display
     pub fn push_notification(&self, message: String, ttl_ms: i64) {
         self.tool_state.push_notification(message, ttl_ms);
@@ -422,14 +414,6 @@ impl LuaRuntime {
         self.tool_state
             .set_shared_state(Some(wrap_state.shared_state.clone()));
 
-        // Also set HudState with room_name so tools.history() etc. can find the room
-        // (tools use HudState.room_name to determine which room to read from)
-        {
-            let mut hud = self.tool_state.hud_state();
-            hud.room_name = wrap_state.room_name.clone();
-            self.tool_state.update_hud_state(hud);
-        }
-
         // Call compose_context from wrap.rs
         let result = wrap::compose_context(&self.lua, target_tokens);
 
@@ -454,48 +438,9 @@ impl LuaRuntime {
         }));
 
         // Set shared state for extended data tools
+        // Lua queries room data via sshwarma.call("status") or sshwarma.call("room")
         self.tool_state
             .set_shared_state(Some(wrap_state.shared_state.clone()));
-
-        // Populate HudState with room data from SharedState
-        {
-            let mut hud = self.tool_state.hud_state();
-            hud.room_name = wrap_state.room_name.clone();
-
-            // Fetch room data if we have a room name
-            if let Some(ref room_name) = wrap_state.room_name {
-                let world =
-                    tokio::task::block_in_place(|| wrap_state.shared_state.world.blocking_read());
-                if let Some(room) = world.get_room(room_name) {
-                    // Vibe and exits are stored in DB, not always in memory
-                    hud.vibe = wrap_state
-                        .shared_state
-                        .db
-                        .get_vibe(room_name)
-                        .ok()
-                        .flatten();
-                    hud.exits = wrap_state
-                        .shared_state
-                        .db
-                        .get_exits(room_name)
-                        .unwrap_or_default();
-                    hud.description = room.description.clone();
-
-                    // Build participants list
-                    let users: Vec<String> = room.users.to_vec();
-                    let models: Vec<String> = wrap_state
-                        .shared_state
-                        .models
-                        .available()
-                        .iter()
-                        .map(|m| m.short_name.clone())
-                        .collect();
-                    hud.set_participants(users, models);
-                }
-            }
-
-            self.tool_state.update_hud_state(hud);
-        }
 
         // Call Lua's look_ansi() function
         let globals = self.lua.globals();
@@ -530,48 +475,9 @@ impl LuaRuntime {
         }));
 
         // Set shared state for extended data tools
+        // Lua queries room data via sshwarma.call("status") or sshwarma.call("room")
         self.tool_state
             .set_shared_state(Some(wrap_state.shared_state.clone()));
-
-        // Populate HudState with room data from SharedState
-        {
-            let mut hud = self.tool_state.hud_state();
-            hud.room_name = wrap_state.room_name.clone();
-
-            // Fetch room data if we have a room name
-            if let Some(ref room_name) = wrap_state.room_name {
-                let world =
-                    tokio::task::block_in_place(|| wrap_state.shared_state.world.blocking_read());
-                if let Some(room) = world.get_room(room_name) {
-                    // Vibe and exits are stored in DB, not always in memory
-                    hud.vibe = wrap_state
-                        .shared_state
-                        .db
-                        .get_vibe(room_name)
-                        .ok()
-                        .flatten();
-                    hud.exits = wrap_state
-                        .shared_state
-                        .db
-                        .get_exits(room_name)
-                        .unwrap_or_default();
-                    hud.description = room.description.clone();
-
-                    // Build participants list
-                    let users: Vec<String> = room.users.to_vec();
-                    let models: Vec<String> = wrap_state
-                        .shared_state
-                        .models
-                        .available()
-                        .iter()
-                        .map(|m| m.short_name.clone())
-                        .collect();
-                    hud.set_participants(users, models);
-                }
-            }
-
-            self.tool_state.update_hud_state(hud);
-        }
 
         // Call Lua's look_markdown() function
         let globals = self.lua.globals();
@@ -854,13 +760,11 @@ mod tests {
 
         let runtime = LuaRuntime::new().expect("should create runtime");
 
-        // Update with empty state
-        runtime.update_state(HudState::new());
-
         // Create a render buffer
         let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
 
         // Call on_tick - should draw to buffer without error
+        // Lua queries status via sshwarma.call("status") - no pre-population needed
         runtime
             .call_on_tick(1, render_buffer.clone(), 80, 8)
             .expect("should call on_tick");
@@ -878,7 +782,6 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let runtime = LuaRuntime::new().expect("should create runtime");
-        runtime.update_state(HudState::new());
 
         let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
 
@@ -1247,7 +1150,6 @@ end
         assert!(runtime.check_reload(), "should detect file modification");
 
         // Verify new script is loaded by calling on_tick
-        runtime.update_state(HudState::new());
         let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
         runtime
             .call_on_tick(1, render_buffer.clone(), 80, 8)
@@ -1296,7 +1198,6 @@ end
         );
 
         // Should still render (using embedded default)
-        runtime.update_state(HudState::new());
         let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
         runtime
             .call_on_tick(1, render_buffer.clone(), 80, 8)
@@ -1347,7 +1248,6 @@ end
         // The reload attempt happened but may have failed
         // The important thing is that on_tick still works
 
-        runtime.update_state(HudState::new());
         let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
         let result = runtime.call_on_tick(1, render_buffer.clone(), 80, 8);
 

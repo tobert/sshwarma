@@ -3,8 +3,6 @@
 use crate::ansi::EscapeParser;
 use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::db::rows::Row;
-use crate::display::hud::{HudState, McpConnectionState, HUD_HEIGHT};
-use crate::display::styles::ctrl;
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge};
 use crate::model::ModelHandle;
@@ -13,8 +11,8 @@ use crate::ssh::hud::spawn_hud_refresh;
 use crate::ssh::session::SessionState;
 use crate::ssh::streaming::{push_updates_task, RowUpdate};
 use crate::state::SharedState;
+use crate::terminal::{self, HUD_HEIGHT};
 use anyhow::Result;
-use chrono::Utc;
 use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::sync::Arc;
@@ -39,7 +37,6 @@ pub struct SshHandler {
     pub update_rx: Option<mpsc::Receiver<RowUpdate>>,
     pub session_handle: Option<Handle>,
     pub main_channel: Option<ChannelId>,
-    pub hud_state: Arc<Mutex<HudState>>,
     pub lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
     pub mcp_bridge: Option<Arc<McpBridge>>,
     pub mcp_request_rx: Option<mpsc::Receiver<crate::lua::mcp_bridge::McpRequest>>,
@@ -62,7 +59,6 @@ impl SshHandler {
             update_rx: Some(update_rx),
             session_handle: None,
             main_channel: None,
-            hud_state: Arc::new(Mutex::new(HudState::new())),
             lua_runtime: None,
             mcp_bridge: None,
             mcp_request_rx: None,
@@ -88,13 +84,6 @@ impl SshHandler {
         let (bridge, request_rx) = McpBridge::with_defaults();
         self.mcp_bridge = Some(Arc::new(bridge));
         self.mcp_request_rx = Some(request_rx);
-
-        // Initialize HUD state
-        {
-            let mut hud = self.hud_state.lock().await;
-            hud.add_user(username.to_string());
-            hud.session_start = Utc::now();
-        }
     }
 
     /// Join a room
@@ -113,12 +102,16 @@ impl SshHandler {
             player.current_room = Some(room_name.to_string());
         }
 
-        // Update HUD
-        {
-            let mut hud = self.hud_state.lock().await;
-            let exits = self.state.db.get_exits(room_name).unwrap_or_default();
-            let vibe = self.state.db.get_vibe(room_name).ok().flatten();
-            hud.set_room(Some(room_name.to_string()), vibe, None, exits);
+        // Update Lua session context so status tool knows the room
+        if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            if let Some(ref player) = self.player {
+                lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
+                    username: player.username.clone(),
+                    model: None,
+                    room_name: Some(room_name.to_string()),
+                }));
+            }
         }
 
         // Add join presence row
@@ -183,10 +176,16 @@ impl SshHandler {
             player.current_room = None;
         }
 
-        // Update HUD
-        {
-            let mut hud = self.hud_state.lock().await;
-            hud.set_room(None, None, None, std::collections::HashMap::new());
+        // Update Lua session context
+        if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            if let Some(ref player) = self.player {
+                lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
+                    username: player.username.clone(),
+                    model: None,
+                    room_name: None,
+                }));
+            }
         }
 
         Ok(())
@@ -374,33 +373,24 @@ impl server::Handler for SshHandler {
 
         // Setup terminal
         let mut init = String::new();
-        init.push_str(&ctrl::set_scroll_region(1, height.saturating_sub(HUD_HEIGHT)));
-        init.push_str(&ctrl::move_to(1, 1));
-        init.push_str(&ctrl::clear_screen());
+        init.push_str(&terminal::set_scroll_region(1, height.saturating_sub(HUD_HEIGHT)));
+        init.push_str(&terminal::move_to(1, 1));
+        init.push_str(&terminal::clear_screen());
         let _ = session.data(channel, CryptoVec::from(init.as_bytes()));
 
-        // Send welcome
+        // Send welcome and set session context
         if let Some(ref player) = self.player {
             let welcome = format!("\x1b[32mWelcome, {}.\x1b[0m\r\n\r\n", player.username);
             let _ = session.data(channel, CryptoVec::from(welcome.as_bytes()));
 
-            // Initialize HUD
-            {
-                let mut hud = self.hud_state.lock().await;
-                hud.add_user(player.username.clone());
-
-                let mcp_connections = self.state.mcp.list_connections().await;
-                hud.set_mcp_connections(
-                    mcp_connections.into_iter()
-                        .map(|c| McpConnectionState {
-                            name: c.name,
-                            tool_count: c.tool_count,
-                            connected: true,
-                            call_count: c.call_count,
-                            last_tool: c.last_tool,
-                        })
-                        .collect(),
-                );
+            // Set session context for status tool
+            if let Some(ref lua_runtime) = self.lua_runtime {
+                let lua = lua_runtime.lock().await;
+                lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
+                    username: player.username.clone(),
+                    model: None,
+                    room_name: None,
+                }));
             }
         }
 
@@ -409,12 +399,12 @@ impl server::Handler for SshHandler {
             let handle = session.handle();
             let db = self.state.db.clone();
             let buffer_id = self.current_buffer_id().await.unwrap_or_default();
-            let hud_state = self.hud_state.clone();
+            let lua_runtime = self.lua_runtime.clone();
 
             tokio::spawn(async move {
                 push_updates_task(
                     handle, channel, update_rx, db, buffer_id,
-                    hud_state, width, height,
+                    lua_runtime, width, height,
                 ).await;
             });
         }
@@ -423,7 +413,6 @@ impl server::Handler for SshHandler {
         spawn_hud_refresh(
             session.handle(),
             channel,
-            self.hud_state.clone(),
             self.lua_runtime.clone().expect("lua_runtime"),
             self.state.clone(),
             width,
@@ -499,8 +488,8 @@ impl SshHandler {
                 // Redraw the input line
                 let output = format!(
                     "{}{}{}",
-                    ctrl::move_to(input_row, 1),
-                    ctrl::clear_line(),
+                    terminal::move_to(input_row, 1),
+                    terminal::clear_line(),
                     self.editor.value()
                 );
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
@@ -509,14 +498,14 @@ impl SshHandler {
             EditorAction::Execute(line) => {
                 // Handle /quit specially
                 if line.trim() == "/quit" {
-                    let output = format!("{}\r\nGoodbye!\r\n", ctrl::reset_scroll_region());
+                    let output = format!("{}\r\nGoodbye!\r\n", terminal::reset_scroll_region());
                     let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                     let _ = session.close(channel);
                     return;
                 }
 
                 // Move to new line
-                let _ = session.data(channel, CryptoVec::from(ctrl::CRLF.as_bytes()));
+                let _ = session.data(channel, CryptoVec::from(terminal::CRLF.as_bytes()));
 
                 // Process the input
                 if let Err(e) = self.process_input(channel, session, &line).await {
@@ -533,14 +522,14 @@ impl SshHandler {
 
             EditorAction::ClearScreen => {
                 // Full redraw
-                let _ = session.data(channel, CryptoVec::from(ctrl::clear_screen().as_bytes()));
+                let _ = session.data(channel, CryptoVec::from(terminal::clear_screen().as_bytes()));
                 self.render_full(channel, session).await;
                 self.show_prompt(channel, session).await;
             }
 
             EditorAction::Quit => {
                 // Reset scroll region and say goodbye
-                let output = format!("{}\r\nGoodbye!\r\n", ctrl::reset_scroll_region());
+                let output = format!("{}\r\nGoodbye!\r\n", terminal::reset_scroll_region());
                 let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 let _ = session.close(channel);
             }
@@ -562,7 +551,7 @@ impl SshHandler {
 
     #[allow(dead_code)]
     async fn redraw_line(&self, channel: ChannelId, session: &mut Session, line: &str) {
-        let output = format!("{}{}{}", ctrl::CR, ctrl::clear_to_eol(), line);
+        let output = format!("{}{}{}", terminal::CR, terminal::clear_to_eol(), line);
         let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
     }
 

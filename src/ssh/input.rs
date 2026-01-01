@@ -1,9 +1,9 @@
 //! Input handling and command dispatch
 
 use crate::db::rows::Row;
-use crate::display::hud::ParticipantStatus;
-use crate::display::styles::ctrl;
 use crate::interp::{self, Input};
+use crate::status::Status;
+use crate::terminal;
 use anyhow::Result;
 use russh::server::Session;
 use russh::{ChannelId, CryptoVec};
@@ -130,10 +130,10 @@ impl SshHandler {
         // Render current state
         self.render_full(channel, session).await;
 
-        // Update HUD status
-        {
-            let mut hud = self.hud_state.lock().await;
-            hud.update_status(&model.short_name, ParticipantStatus::Thinking);
+        // Update status tracker
+        if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            lua.tool_state().set_status(&model.short_name, Status::Thinking);
         }
 
         // Spawn background task for model response
@@ -197,12 +197,12 @@ impl SshHandler {
         if let Ok(rendered) = sess.render_full(&self.state.db) {
             // Clear and redraw
             let mut output = String::new();
-            output.push_str(&ctrl::move_to(1, 1));
+            output.push_str(&terminal::move_to(1, 1));
             for _ in 0..height.saturating_sub(10) {
-                output.push_str(&ctrl::clear_line());
-                output.push_str(ctrl::CRLF);
+                output.push_str(&terminal::clear_line());
+                output.push_str(terminal::CRLF);
             }
-            output.push_str(&ctrl::move_to(1, 1));
+            output.push_str(&terminal::move_to(1, 1));
             output.push_str(&rendered);
             let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
         }

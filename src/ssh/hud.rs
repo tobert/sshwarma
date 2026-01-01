@@ -8,9 +8,9 @@
 //! Also executes room rules on tick/interval triggers.
 
 use crate::db::rules::ActionSlot;
-use crate::display::hud::{HudState, HUD_HEIGHT};
 use crate::lua::LuaRuntime;
 use crate::state::SharedState;
+use crate::terminal::HUD_HEIGHT;
 use crate::ui::RenderBuffer;
 use russh::server::Handle;
 use russh::{ChannelId, CryptoVec};
@@ -22,7 +22,6 @@ use tokio::sync::Mutex as TokioMutex;
 pub fn spawn_hud_refresh(
     handle: Handle,
     channel: ChannelId,
-    hud_state: Arc<TokioMutex<HudState>>,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
     state: Arc<SharedState>,
     term_width: u16,
@@ -32,7 +31,6 @@ pub fn spawn_hud_refresh(
         hud_refresh_task(
             handle,
             channel,
-            hud_state,
             lua_runtime,
             state,
             term_width,
@@ -46,7 +44,6 @@ pub fn spawn_hud_refresh(
 async fn hud_refresh_task(
     handle: Handle,
     channel: ChannelId,
-    hud_state: Arc<TokioMutex<HudState>>,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
     state: Arc<SharedState>,
     term_width: u16,
@@ -63,24 +60,6 @@ async fn hud_refresh_task(
         interval.tick().await;
         tick += 1;
 
-        // Update MCP connections every second
-        if tick % 10 == 0 {
-            let connections = state.mcp.list_connections().await;
-            let mut hud = hud_state.lock().await;
-            hud.set_mcp_connections(
-                connections
-                    .into_iter()
-                    .map(|c| crate::display::hud::McpConnectionState {
-                        name: c.name,
-                        tool_count: c.tool_count,
-                        connected: true,
-                        call_count: c.call_count,
-                        last_tool: c.last_tool,
-                    })
-                    .collect(),
-            );
-        }
-
         // Run Lua background function every 500ms (tick % 5)
         if tick % 5 == 0 {
             let background_tick = tick / 5;
@@ -94,9 +73,12 @@ async fn hud_refresh_task(
             }
 
             // Execute room rules (tick and interval triggers)
+            // Get room name from session context
             let room_name = {
-                let hud = hud_state.lock().await;
-                hud.room_name.clone()
+                let lua = lua_runtime.lock().await;
+                lua.tool_state()
+                    .session_context()
+                    .and_then(|ctx| ctx.room_name.clone())
             };
 
             if let Some(ref room_id) = room_name {
@@ -137,9 +119,7 @@ async fn hud_refresh_task(
 
         // Render via on_tick
         let output = {
-            let hud = hud_state.lock().await;
             let lua = lua_runtime.lock().await;
-            lua.update_state(hud.clone());
 
             // Clear buffer before drawing
             {
@@ -148,6 +128,7 @@ async fn hud_refresh_task(
             }
 
             // Call on_tick - Lua draws to buffer
+            // Lua queries live data via sshwarma.call("status")
             if let Err(e) = lua.call_on_tick(tick, render_buffer.clone(), term_width, HUD_HEIGHT) {
                 tracing::debug!("on_tick error: {}", e);
                 continue;

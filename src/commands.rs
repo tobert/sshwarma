@@ -1,5 +1,6 @@
 //! REPL command implementations
 
+use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
 use crate::lua::WrapState;
 use crate::model::{ModelBackend, ModelHandle};
 use crate::ops;
@@ -94,6 +95,7 @@ impl SshHandler {
                 "exits" => CommandResult::normal(self.cmd_exits().await),
                 "fork" => CommandResult::normal(self.cmd_fork(args).await),
                 "nav" => CommandResult::normal(self.cmd_nav(args).await),
+                "rules" => CommandResult::normal(self.cmd_rules(args).await),
                 // Debug commands - ephemeral (not included in history/context)
                 "wrap" => CommandResult::ephemeral(self.cmd_wrap(args).await),
                 "quit" => CommandResult::normal("Goodbye!"),
@@ -143,6 +145,14 @@ Prompts:
   /prompt pop <target>           Remove last slot
   /prompt rm <target> <slot>     Remove slot by index
   /prompt delete <name>          Delete a prompt
+
+Rules:
+  /rules                         List room rules
+  /rules add <trigger> <script>  Add a rule (tick:N, interval:Nms, row:pattern)
+  /rules del <id>                Delete a rule
+  /rules enable <id>             Enable a rule
+  /rules disable <id>            Disable a rule
+  /rules scripts                 List available scripts
 
 Communication:
   <text>              Say to room
@@ -1347,5 +1357,212 @@ MCP:
 
         // Default to user (could also check DB users table)
         "user".to_string()
+    }
+
+    // =========================================================================
+    // Rules Commands
+    // =========================================================================
+
+    async fn cmd_rules(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to manage rules.".to_string(),
+        };
+
+        let args = args.trim();
+
+        // Subcommands
+        if args.starts_with("add ") {
+            let rest = args.trim_start_matches("add ").trim();
+            return self.cmd_rules_add(&room, rest).await;
+        }
+
+        if args.starts_with("del ") || args.starts_with("delete ") {
+            let id = args
+                .trim_start_matches("del ")
+                .trim_start_matches("delete ")
+                .trim();
+            return self.cmd_rules_del(&room, id).await;
+        }
+
+        if args.starts_with("enable ") {
+            let id = args.trim_start_matches("enable ").trim();
+            return self.cmd_rules_enable(&room, id, true).await;
+        }
+
+        if args.starts_with("disable ") {
+            let id = args.trim_start_matches("disable ").trim();
+            return self.cmd_rules_enable(&room, id, false).await;
+        }
+
+        if args == "scripts" {
+            return self.cmd_rules_scripts().await;
+        }
+
+        // Default: list rules
+        self.cmd_rules_list(&room).await
+    }
+
+    async fn cmd_rules_list(&self, room: &str) -> String {
+        let rules = match self.state.db.list_room_rules(room) {
+            Ok(r) => r,
+            Err(e) => return format!("Error listing rules: {}", e),
+        };
+
+        if rules.is_empty() {
+            return format!("No rules in room '{}'.\r\nUse /rules add <trigger> <script> to create one.", room);
+        }
+
+        let mut out = format!("Rules in '{}':\r\n", room);
+        for rule in rules {
+            let name = rule.name.as_deref().unwrap_or("(unnamed)");
+            let trigger = match rule.trigger_kind {
+                TriggerKind::Tick => format!("tick:{}", rule.tick_divisor.unwrap_or(1)),
+                TriggerKind::Interval => format!("interval:{}ms", rule.interval_ms.unwrap_or(1000)),
+                TriggerKind::Row => {
+                    let pattern = rule.match_content_method.as_deref().unwrap_or("*");
+                    format!("row:{}", pattern)
+                }
+            };
+            let status = if rule.enabled { "✓" } else { "○" };
+            out.push_str(&format!(
+                "  {} {} [{}] → {} ({})\r\n",
+                status,
+                &rule.id[..8], // short ID
+                trigger,
+                rule.script_id.get(..8).unwrap_or(&rule.script_id),
+                name
+            ));
+        }
+        out
+    }
+
+    async fn cmd_rules_add(&self, room: &str, args: &str) -> String {
+        // Parse: <trigger> <script_name>
+        // trigger formats: tick:N, interval:Nms, row:pattern
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return "Usage: /rules add <trigger> <script_name>\r\n\
+                    Triggers: tick:N (every N ticks), interval:Nms, row:pattern".to_string();
+        }
+
+        let trigger_str = parts[0];
+        let script_name = parts[1].trim();
+
+        // Look up script by name
+        let script = match self.state.db.get_script_by_name(script_name) {
+            Ok(Some(s)) => s,
+            Ok(None) => return format!("Script '{}' not found. Use /rules scripts to list available scripts.", script_name),
+            Err(e) => return format!("Error looking up script: {}", e),
+        };
+
+        // Parse trigger
+        let mut rule = if trigger_str.starts_with("tick:") {
+            let divisor: i32 = match trigger_str.trim_start_matches("tick:").parse() {
+                Ok(n) if n > 0 => n,
+                _ => return "Invalid tick divisor. Use tick:N where N > 0".to_string(),
+            };
+            RoomRule::tick_trigger(room, &script.id, divisor)
+        } else if trigger_str.starts_with("interval:") {
+            let ms_str = trigger_str.trim_start_matches("interval:").trim_end_matches("ms");
+            let interval_ms: i64 = match ms_str.parse() {
+                Ok(n) if n > 0 => n,
+                _ => return "Invalid interval. Use interval:Nms where N > 0".to_string(),
+            };
+            RoomRule::interval_trigger(room, &script.id, interval_ms)
+        } else if trigger_str.starts_with("row:") {
+            let pattern = trigger_str.trim_start_matches("row:");
+            let mut rule = RoomRule::row_trigger(room, &script.id, ActionSlot::Background);
+            rule.match_content_method = Some(pattern.to_string());
+            rule
+        } else {
+            return "Unknown trigger type. Use tick:N, interval:Nms, or row:pattern".to_string();
+        };
+
+        rule.name = Some(script_name.to_string());
+
+        if let Err(e) = self.state.db.insert_rule(&rule) {
+            return format!("Error creating rule: {}", e);
+        }
+
+        // Invalidate cache so rule takes effect immediately
+        self.state.rules.invalidate_cache(room);
+
+        format!("Created rule {} → {}", &rule.id[..8], script_name)
+    }
+
+    async fn cmd_rules_del(&self, room: &str, id: &str) -> String {
+        // Find rule by prefix match
+        let rules = match self.state.db.list_room_rules(room) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let matching: Vec<_> = rules.iter().filter(|r| r.id.starts_with(id)).collect();
+
+        match matching.len() {
+            0 => format!("No rule found matching '{}'", id),
+            1 => {
+                let rule = matching[0];
+                if let Err(e) = self.state.db.delete_rule(&rule.id) {
+                    return format!("Error deleting rule: {}", e);
+                }
+                self.state.rules.invalidate_cache(room);
+                format!("Deleted rule {}", &rule.id[..8])
+            }
+            _ => format!("Ambiguous ID '{}' matches {} rules. Be more specific.", id, matching.len()),
+        }
+    }
+
+    async fn cmd_rules_enable(&self, room: &str, id: &str, enabled: bool) -> String {
+        // Get all rules (including disabled ones) by checking each trigger type
+        let all_rules = match self.state.db.list_rules_by_trigger(room, TriggerKind::Tick) {
+            Ok(mut r) => {
+                if let Ok(mut interval) = self.state.db.list_rules_by_trigger(room, TriggerKind::Interval) {
+                    r.append(&mut interval);
+                }
+                if let Ok(mut row) = self.state.db.list_rules_by_trigger(room, TriggerKind::Row) {
+                    r.append(&mut row);
+                }
+                r
+            }
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let matching: Vec<_> = all_rules.iter().filter(|r| r.id.starts_with(id)).collect();
+
+        match matching.len() {
+            0 => format!("No rule found matching '{}'", id),
+            1 => {
+                let rule = matching[0];
+                if let Err(e) = self.state.db.set_rule_enabled(&rule.id, enabled) {
+                    return format!("Error: {}", e);
+                }
+                self.state.rules.invalidate_cache(room);
+                let action = if enabled { "Enabled" } else { "Disabled" };
+                format!("{} rule {}", action, &rule.id[..8])
+            }
+            _ => format!("Ambiguous ID '{}' matches {} rules. Be more specific.", id, matching.len()),
+        }
+    }
+
+    async fn cmd_rules_scripts(&self) -> String {
+        let scripts = match self.state.db.list_scripts(None) {
+            Ok(s) => s,
+            Err(e) => return format!("Error listing scripts: {}", e),
+        };
+
+        if scripts.is_empty() {
+            return "No scripts available.\r\nScripts are stored in the database via the API.".to_string();
+        }
+
+        let mut out = "Available scripts:\r\n".to_string();
+        for script in scripts {
+            let name = script.name.as_deref().unwrap_or("(unnamed)");
+            let kind = script.kind.as_str();
+            let desc = script.description.as_deref().unwrap_or("");
+            out.push_str(&format!("  {} [{}] {}\r\n", name, kind, desc));
+        }
+        out
     }
 }
