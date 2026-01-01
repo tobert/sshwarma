@@ -6,7 +6,9 @@
 use crate::display::hud::HudState;
 use crate::display::{EntryContent, EntrySource};
 use crate::lua::cache::ToolCache;
-use crate::lua::context::{build_hud_context, build_notifications_table, PendingNotification};
+use crate::lua::context::{
+    build_hud_context, build_notifications_table, NotificationLevel, PendingNotification,
+};
 use crate::lua::mcp_bridge::McpBridge;
 use crate::lua::tool_middleware::ToolMiddleware;
 use crate::model::ModelHandle;
@@ -82,10 +84,21 @@ impl LuaToolState {
 
     /// Push a notification to the queue
     pub fn push_notification(&self, message: String, ttl_ms: i64) {
+        self.push_notification_with_level(message, ttl_ms, NotificationLevel::Info);
+    }
+
+    /// Push a notification with a specific level
+    pub fn push_notification_with_level(
+        &self,
+        message: String,
+        ttl_ms: i64,
+        level: NotificationLevel,
+    ) {
         let notification = PendingNotification {
             message,
             created_at_ms: chrono::Utc::now().timestamp_millis(),
             ttl_ms,
+            level,
         };
         if let Ok(mut guard) = self.pending_notifications.write() {
             guard.push(notification);
@@ -189,6 +202,27 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("clear_notifications", clear_notifications_fn)?;
+
+    // tools.notify(message, [level], [ttl_ms]) -> nil
+    // Pushes a notification to the queue
+    // level: "info" (default), "warning", "error"
+    // ttl_ms: time-to-live in milliseconds (default: 5000)
+    let notify_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |_lua, (message, level, ttl_ms): (String, Option<String>, Option<i64>)| {
+                let level = match level.as_deref() {
+                    Some("error") => NotificationLevel::Error,
+                    Some("warning") => NotificationLevel::Warning,
+                    _ => NotificationLevel::Info,
+                };
+                let ttl = ttl_ms.unwrap_or(5000);
+                state.push_notification_with_level(message, ttl, level);
+                Ok(())
+            },
+        )?
+    };
+    tools.set("notify", notify_fn)?;
 
     // tools.cached(key) -> value or nil (alias: kv_get)
     let cached_fn = {

@@ -5,6 +5,7 @@
 
 use crossterm::style::{Attribute, Color};
 use mlua::prelude::*;
+use unicode_width::UnicodeWidthChar;
 
 /// A single cell in the render buffer
 #[derive(Debug, Clone, Default)]
@@ -234,15 +235,21 @@ impl RenderBuffer {
         }
     }
 
-    /// Print text at position with style
+    /// Print text at position with style.
+    /// Handles wide characters (emoji, CJK) by advancing cursor by display width.
     pub fn print(&mut self, x: u16, y: u16, text: &str, style: &Style) {
         let mut cx = x;
         for c in text.chars() {
             if cx >= self.width {
                 break;
             }
+            let char_width = c.width().unwrap_or(1) as u16;
+            // Skip zero-width chars (combining marks, etc.)
+            if char_width == 0 {
+                continue;
+            }
             self.set(cx, y, c, style);
-            cx += 1;
+            cx += char_width;
         }
     }
 
@@ -993,5 +1000,487 @@ mod tests {
         // Should contain ANSI escape codes for red
         assert!(ansi.contains("\x1b["), "should contain ANSI escapes");
         assert!(ansi.contains("R"));
+    }
+
+    // ==========================================================================
+    // Wide character (unicode display width) tests
+    // ==========================================================================
+
+    #[test]
+    fn test_print_wide_emoji() {
+        // Emoji are typically 2 columns wide
+        let mut buf = RenderBuffer::new(10, 1);
+        buf.print(0, 0, "A🎵B", &Style::new());
+
+        // 'A' at 0, '🎵' at 1 (takes 2 cols), 'B' at 3
+        assert_eq!(buf.get(0, 0).unwrap().char, 'A');
+        assert_eq!(buf.get(1, 0).unwrap().char, '🎵');
+        assert_eq!(buf.get(3, 0).unwrap().char, 'B');
+        // Position 2 should still be empty (the emoji visually covers it)
+        assert_eq!(buf.get(2, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_print_wide_cjk() {
+        // CJK characters are 2 columns wide
+        let mut buf = RenderBuffer::new(10, 1);
+        buf.print(0, 0, "A日B", &Style::new());
+
+        // 'A' at 0, '日' at 1 (takes 2 cols), 'B' at 3
+        assert_eq!(buf.get(0, 0).unwrap().char, 'A');
+        assert_eq!(buf.get(1, 0).unwrap().char, '日');
+        assert_eq!(buf.get(3, 0).unwrap().char, 'B');
+    }
+
+    #[test]
+    fn test_print_wide_clips_at_boundary() {
+        // Wide char that would overflow should still be placed
+        // (terminal will handle the clipping)
+        let mut buf = RenderBuffer::new(5, 1);
+        buf.print(0, 0, "ABC🎵", &Style::new());
+
+        // A=0, B=1, C=2, emoji at 3 (would need cols 3-4)
+        assert_eq!(buf.get(0, 0).unwrap().char, 'A');
+        assert_eq!(buf.get(1, 0).unwrap().char, 'B');
+        assert_eq!(buf.get(2, 0).unwrap().char, 'C');
+        assert_eq!(buf.get(3, 0).unwrap().char, '🎵');
+        // col 4 is empty
+        assert_eq!(buf.get(4, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_print_all_wide_chars() {
+        // String of all wide chars
+        let mut buf = RenderBuffer::new(10, 1);
+        buf.print(0, 0, "日本", &Style::new());
+
+        // '日' at 0 (width 2), '本' at 2 (width 2)
+        assert_eq!(buf.get(0, 0).unwrap().char, '日');
+        assert_eq!(buf.get(2, 0).unwrap().char, '本');
+        // Positions 1 and 3 are continuation space
+        assert_eq!(buf.get(1, 0).unwrap().char, '\0');
+        assert_eq!(buf.get(3, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_print_mixed_width_overflow() {
+        // Test that we stop at buffer boundary correctly
+        let mut buf = RenderBuffer::new(4, 1);
+        buf.print(0, 0, "A🎵BC", &Style::new());
+
+        // A=0, emoji=1 (width 2, cursor->3), B=3, C would be at 4 (out of bounds)
+        assert_eq!(buf.get(0, 0).unwrap().char, 'A');
+        assert_eq!(buf.get(1, 0).unwrap().char, '🎵');
+        assert_eq!(buf.get(3, 0).unwrap().char, 'B');
+        // 'C' should not appear (buffer is only 4 wide)
+    }
+
+    #[test]
+    fn test_print_zero_width_chars_skipped() {
+        // Zero-width joiner and combining marks should be skipped
+        let mut buf = RenderBuffer::new(10, 1);
+        // U+200D is zero-width joiner
+        buf.print(0, 0, "A\u{200D}B", &Style::new());
+
+        // ZWJ is skipped, so we get A at 0, B at 1
+        assert_eq!(buf.get(0, 0).unwrap().char, 'A');
+        assert_eq!(buf.get(1, 0).unwrap().char, 'B');
+    }
+
+    #[test]
+    fn test_wide_char_ansi_output() {
+        let mut buf = RenderBuffer::new(10, 1);
+        buf.print(0, 0, "日本語", &Style::new());
+
+        let ansi = buf.to_ansi();
+        // Should contain the actual CJK characters
+        assert!(ansi.contains("日"), "should contain 日");
+        assert!(ansi.contains("本"), "should contain 本");
+        assert!(ansi.contains("語"), "should contain 語");
+    }
+
+    // ==========================================================================
+    // ANSI output snapshot tests
+    // ==========================================================================
+
+    #[test]
+    fn test_ansi_rgb_foreground_color() {
+        let mut buf = RenderBuffer::new(3, 1);
+        buf.print(
+            0,
+            0,
+            "RGB",
+            &Style::new().fg(Color::Rgb {
+                r: 255,
+                g: 128,
+                b: 0,
+            }),
+        );
+
+        let ansi = buf.to_ansi();
+        // Should contain SGR sequence for 24-bit foreground: ESC[38;2;R;G;Bm
+        assert!(
+            ansi.contains("\x1b[38;2;255;128;0m"),
+            "should contain RGB foreground sequence, got: {:?}",
+            ansi
+        );
+        assert!(ansi.contains("RGB"));
+    }
+
+    #[test]
+    fn test_ansi_rgb_background_color() {
+        let mut buf = RenderBuffer::new(2, 1);
+        buf.print(
+            0,
+            0,
+            "BG",
+            &Style::new().bg(Color::Rgb {
+                r: 0,
+                g: 100,
+                b: 200,
+            }),
+        );
+
+        let ansi = buf.to_ansi();
+        // Should contain SGR sequence for 24-bit background: ESC[48;2;R;G;Bm
+        assert!(
+            ansi.contains("\x1b[48;2;0;100;200m"),
+            "should contain RGB background sequence, got: {:?}",
+            ansi
+        );
+    }
+
+    #[test]
+    fn test_ansi_bold_attribute() {
+        let mut buf = RenderBuffer::new(4, 1);
+        buf.print(0, 0, "BOLD", &Style::new().bold());
+
+        let ansi = buf.to_ansi();
+        // Bold is SGR attribute 1: ESC[1m
+        assert!(
+            ansi.contains("\x1b[1m"),
+            "should contain bold attribute, got: {:?}",
+            ansi
+        );
+    }
+
+    #[test]
+    fn test_ansi_dim_attribute() {
+        let mut buf = RenderBuffer::new(3, 1);
+        buf.print(0, 0, "DIM", &Style::new().dim());
+
+        let ansi = buf.to_ansi();
+        // Dim is SGR attribute 2: ESC[2m
+        assert!(
+            ansi.contains("\x1b[2m"),
+            "should contain dim attribute, got: {:?}",
+            ansi
+        );
+    }
+
+    #[test]
+    fn test_ansi_reset_at_line_end() {
+        let mut buf = RenderBuffer::new(5, 1);
+        buf.print(0, 0, "Hello", &Style::new().fg(Color::Red));
+
+        let ansi = buf.to_ansi();
+        // Should end with reset sequence: ESC[0m (or ESC[39;49m)
+        assert!(
+            ansi.ends_with("\x1b[0m") || ansi.ends_with("\x1b[39;49m"),
+            "should end with reset, got: {:?}",
+            ansi
+        );
+    }
+
+    #[test]
+    fn test_ansi_multiline_has_crlf() {
+        let mut buf = RenderBuffer::new(5, 3);
+        buf.print(0, 0, "Line1", &Style::new());
+        buf.print(0, 1, "Line2", &Style::new());
+        buf.print(0, 2, "Line3", &Style::new());
+
+        let ansi = buf.to_ansi();
+        // Should have \r\n between lines
+        let lines: Vec<&str> = ansi.split("\r\n").collect();
+        assert_eq!(lines.len(), 3, "should have 3 lines separated by CRLF");
+    }
+
+    #[test]
+    fn test_ansi_style_transition() {
+        let mut buf = RenderBuffer::new(4, 1);
+        // First 2 chars red, last 2 chars blue
+        buf.set(0, 0, 'R', &Style::new().fg(Color::Red));
+        buf.set(1, 0, 'R', &Style::new().fg(Color::Red));
+        buf.set(2, 0, 'B', &Style::new().fg(Color::Blue));
+        buf.set(3, 0, 'B', &Style::new().fg(Color::Blue));
+
+        let ansi = buf.to_ansi();
+        // Should have red sequence, then blue sequence
+        let red_pos = ansi.find("\x1b[38;5;9m").or(ansi.find("\x1b[31m"));
+        let blue_pos = ansi.find("\x1b[38;5;12m").or(ansi.find("\x1b[34m"));
+
+        assert!(red_pos.is_some(), "should have red color");
+        assert!(blue_pos.is_some(), "should have blue color");
+        // Red should come before blue
+        if let (Some(r), Some(b)) = (red_pos, blue_pos) {
+            assert!(r < b, "red should come before blue");
+        }
+    }
+
+    #[test]
+    fn test_ansi_null_chars_become_spaces() {
+        let mut buf = RenderBuffer::new(5, 1);
+        // Only set first and last char, middle should be spaces
+        buf.set(0, 0, 'A', &Style::new());
+        buf.set(4, 0, 'B', &Style::new());
+
+        let ansi = buf.to_ansi();
+        // Should render as "A   B" (with spaces in middle)
+        assert!(
+            ansi.contains("A   B"),
+            "nulls should become spaces, got: {:?}",
+            ansi
+        );
+    }
+
+    #[test]
+    fn test_ansi_style_optimization() {
+        // Same style shouldn't repeat escape sequences
+        let mut buf = RenderBuffer::new(5, 1);
+        let style = Style::new().fg(Color::Rgb {
+            r: 100,
+            g: 100,
+            b: 100,
+        });
+        buf.print(0, 0, "AAAAA", &style);
+
+        let ansi = buf.to_ansi();
+        // The color sequence should appear only once (at the start)
+        let seq = "\x1b[38;2;100;100;100m";
+        let count = ansi.matches(seq).count();
+        assert_eq!(
+            count, 1,
+            "color sequence should appear exactly once, got {} in {:?}",
+            count, ansi
+        );
+    }
+
+    #[test]
+    fn test_ansi_bold_to_normal_resets() {
+        let mut buf = RenderBuffer::new(4, 1);
+        buf.set(0, 0, 'B', &Style::new().bold());
+        buf.set(1, 0, 'B', &Style::new().bold());
+        buf.set(2, 0, 'N', &Style::new()); // Normal
+        buf.set(3, 0, 'N', &Style::new());
+
+        let ansi = buf.to_ansi();
+        // Should have bold, then reset when transitioning to normal
+        assert!(ansi.contains("\x1b[1m"), "should have bold");
+
+        // The reset at position 2 (when bold->normal) should come after the bold at position 0
+        // But there's also a reset at end of line. Find the pattern: bold chars, then reset, then normal chars
+        // Just verify the structure: ESC[1m appears, followed somewhere by ESC[0m, then more chars
+        let bold_pos = ansi.find("\x1b[1m").unwrap();
+        let content_after_bold = &ansi[bold_pos..];
+        // After bold, there should be some B chars, then a reset
+        assert!(
+            content_after_bold.contains("B") && content_after_bold.contains("\x1b[0m"),
+            "after bold, should have B chars and reset, got: {:?}",
+            content_after_bold
+        );
+    }
+
+    // ==========================================================================
+    // Stress tests for resize and large buffers
+    // ==========================================================================
+
+    #[test]
+    fn test_stress_rapid_resize() {
+        // Simulate rapid terminal resizes - should not panic or corrupt state
+        let sizes = [(80, 24), (120, 40), (1, 1), (200, 50), (40, 10), (80, 24)];
+
+        for (w, h) in sizes {
+            let mut buf = RenderBuffer::new(w, h);
+            // Fill with content
+            buf.print(0, 0, "Test content that might wrap", &Style::new());
+            buf.fill(0, 0, w, h, '.', &Style::new().dim());
+            // Generate ANSI
+            let ansi = buf.to_ansi();
+            // Should have correct number of lines
+            let line_count = ansi.matches("\r\n").count() + 1;
+            assert_eq!(
+                line_count, h as usize,
+                "buffer {}x{} should have {} lines",
+                w, h, h
+            );
+        }
+    }
+
+    #[test]
+    fn test_stress_large_buffer() {
+        // Large buffer: 500x200 = 100,000 cells
+        let mut buf = RenderBuffer::new(500, 200);
+
+        // Fill entire buffer
+        buf.fill(0, 0, 500, 200, '#', &Style::new());
+
+        // Verify corners
+        assert_eq!(buf.get(0, 0).unwrap().char, '#');
+        assert_eq!(buf.get(499, 0).unwrap().char, '#');
+        assert_eq!(buf.get(0, 199).unwrap().char, '#');
+        assert_eq!(buf.get(499, 199).unwrap().char, '#');
+
+        // Generate ANSI - should complete without panic
+        let ansi = buf.to_ansi();
+        assert!(!ansi.is_empty(), "ANSI output should not be empty");
+    }
+
+    #[test]
+    fn test_stress_many_style_transitions() {
+        // Every cell has different style - worst case for ANSI optimization
+        let mut buf = RenderBuffer::new(100, 10);
+        let colors = [
+            Color::Red,
+            Color::Green,
+            Color::Blue,
+            Color::Cyan,
+            Color::Magenta,
+            Color::Yellow,
+        ];
+
+        for y in 0..10 {
+            for x in 0..100 {
+                let color = colors[((x + y) % colors.len() as u16) as usize];
+                let c = ('A' as u8 + (x % 26) as u8) as char;
+                buf.set(x, y, c, &Style::new().fg(color));
+            }
+        }
+
+        let ansi = buf.to_ansi();
+        // Should have many escape sequences
+        let esc_count = ansi.matches("\x1b[").count();
+        assert!(
+            esc_count > 50,
+            "should have many escape sequences, got {}",
+            esc_count
+        );
+    }
+
+    #[test]
+    fn test_stress_unicode_heavy() {
+        // Buffer full of wide characters
+        let mut buf = RenderBuffer::new(100, 10);
+        let wide_chars = ['日', '本', '語', '🎵', '🎸', '🎹'];
+
+        for y in 0..10 {
+            let mut x = 0u16;
+            let mut i = 0;
+            while x < 100 {
+                let c = wide_chars[i % wide_chars.len()];
+                buf.set(x, y, c, &Style::new());
+                x += 2; // wide chars take 2 columns
+                i += 1;
+            }
+        }
+
+        let ansi = buf.to_ansi();
+        // Should contain our wide chars
+        assert!(
+            ansi.contains("日") || ansi.contains("🎵"),
+            "should contain wide chars"
+        );
+    }
+
+    #[test]
+    fn test_stress_clear_and_refill() {
+        // Repeated clear and refill - common in animations
+        let mut buf = RenderBuffer::new(80, 24);
+
+        for i in 0..100 {
+            buf.clear();
+            let pattern = if i % 2 == 0 { '.' } else { '#' };
+            buf.fill(0, 0, 80, 24, pattern, &Style::new());
+        }
+
+        // Final state should be consistent
+        let c = buf.get(40, 12).unwrap().char;
+        assert!(c == '.' || c == '#', "should have pattern char");
+    }
+
+    #[test]
+    fn test_stress_overlapping_draws() {
+        // Many overlapping draw operations
+        let mut buf = RenderBuffer::new(100, 50);
+
+        // Draw overlapping boxes
+        for i in 0..20 {
+            buf.draw_box(i * 2, i, 30, 15, &Style::new());
+        }
+
+        // Draw overlapping fills
+        for i in 0..10 {
+            buf.fill(
+                i * 5,
+                i * 2,
+                20,
+                10,
+                ('0' as u8 + i as u8) as char,
+                &Style::new(),
+            );
+        }
+
+        // Draw overlapping text
+        for y in 0..50 {
+            buf.print(0, y, "This is a test line that repeats", &Style::new());
+        }
+
+        let ansi = buf.to_ansi();
+        assert!(!ansi.is_empty());
+    }
+
+    #[test]
+    fn test_stress_draw_context_nested() {
+        // Deeply nested draw contexts
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(200, 100)));
+
+        // Create nested contexts
+        let ctx1 = LuaDrawContext::new(buffer.clone(), 10, 10, 180, 80);
+        ctx1.print(0, 0, "Level 1", &Style::new());
+
+        // Simulate sub-regions
+        for i in 0..5 {
+            let x = i * 30 + 5;
+            let y = i * 10 + 5;
+            let sub = LuaDrawContext::new(buffer.clone(), x, y, 25, 8);
+            sub.print(0, 0, &format!("Sub {}", i), &Style::new());
+            sub.with_buffer(|b| b.draw_box(x, y, 25, 8, &Style::new()));
+        }
+
+        let buf = buffer.lock().unwrap();
+        let ansi = buf.to_ansi();
+        assert!(ansi.contains("Level 1"));
+    }
+
+    #[test]
+    fn test_stress_boundary_prints() {
+        // Print operations at every boundary
+        let mut buf = RenderBuffer::new(80, 24);
+
+        // Print at x=0
+        buf.print(0, 0, "Start", &Style::new());
+        // Print ending exactly at boundary
+        buf.print(75, 0, "12345", &Style::new());
+        // Print overflowing boundary
+        buf.print(75, 1, "123456789", &Style::new());
+        // Print starting at boundary
+        buf.print(79, 2, "X", &Style::new());
+        // Print starting past boundary (should be ignored)
+        buf.print(80, 3, "Hidden", &Style::new());
+        // Print at last row
+        buf.print(0, 23, "Last row", &Style::new());
+
+        let ansi = buf.to_ansi();
+        assert!(ansi.contains("Start"));
+        assert!(ansi.contains("Last row"));
     }
 }

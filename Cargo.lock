@@ -3508,6 +3508,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tui-input",
+ "unicode-width",
  "uuid",
 ]
 

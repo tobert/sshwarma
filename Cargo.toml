@@ -69,6 +69,7 @@ nucleo-matcher = "0.3"
 
 # Terminal output formatting
 crossterm = "0.28"
+unicode-width = "0.2"
 
 # Lua scripting for HUD customization
 # send feature enables Send+Sync for Lua state (needed for async handlers)

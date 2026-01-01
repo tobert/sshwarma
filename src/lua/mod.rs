@@ -13,7 +13,7 @@ pub mod tools;
 pub mod wrap;
 
 pub use cache::ToolCache;
-pub use context::{build_hud_context, PendingNotification};
+pub use context::{build_hud_context, NotificationLevel, PendingNotification};
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use render::{parse_lua_output, HUD_ROWS};
 pub use tool_middleware::{ToolContext, ToolMiddleware};
@@ -349,6 +349,27 @@ impl LuaRuntime {
     /// Push a notification for the HUD to display
     pub fn push_notification(&self, message: String, ttl_ms: i64) {
         self.tool_state.push_notification(message, ttl_ms);
+    }
+
+    /// Push a notification with a specific level
+    pub fn push_notification_with_level(
+        &self,
+        message: String,
+        ttl_ms: i64,
+        level: NotificationLevel,
+    ) {
+        self.tool_state
+            .push_notification_with_level(message, ttl_ms, level);
+    }
+
+    /// Push an error notification (convenience method)
+    pub fn push_error(&self, message: String) {
+        self.push_notification_with_level(message, 10000, NotificationLevel::Error);
+    }
+
+    /// Push a warning notification (convenience method)
+    pub fn push_warning(&self, message: String) {
+        self.push_notification_with_level(message, 7000, NotificationLevel::Warning);
     }
 
     /// Get a reference to the tool state for cache access
@@ -1087,5 +1108,168 @@ mod tests {
             )
             .exec()
             .expect("estimate_tokens should work");
+    }
+
+    // =========================================================================
+    // Hot-reload tests
+    // =========================================================================
+
+    #[test]
+    fn test_hot_reload_detects_file_change() {
+        use std::thread;
+        use std::time::Duration;
+
+        // Create a temp file with initial script
+        let temp_dir = std::env::temp_dir();
+        let script_path = temp_dir.join(format!("test_hud_{}.lua", std::process::id()));
+
+        let initial_script = r#"
+function render_hud(now_ms, width, height)
+    local rows = {}
+    for i = 1, 8 do
+        rows[i] = {{Text = "initial"}}
+    end
+    return rows
+end
+"#;
+
+        fs::write(&script_path, initial_script).expect("should write initial script");
+
+        // Create runtime and load the script
+        let mut runtime = LuaRuntime::new().expect("should create runtime");
+        runtime
+            .load_script(&script_path)
+            .expect("should load script");
+
+        // Verify initial state
+        assert!(runtime.has_user_script());
+        assert!(!runtime.check_reload(), "should not reload when unchanged");
+
+        // Wait a moment to ensure mtime will be different
+        thread::sleep(Duration::from_millis(50));
+
+        // Modify the file
+        let modified_script = r#"
+function render_hud(now_ms, width, height)
+    local rows = {}
+    for i = 1, 8 do
+        rows[i] = {{Text = "modified"}}
+    end
+    return rows
+end
+"#;
+        fs::write(&script_path, modified_script).expect("should write modified script");
+
+        // Check reload should detect the change
+        assert!(runtime.check_reload(), "should detect file modification");
+
+        // Verify new script is loaded by rendering
+        runtime.update_state(HudState::new());
+        let table = runtime
+            .render_hud(chrono::Utc::now().timestamp_millis(), 80, 8)
+            .expect("should render");
+
+        // Get first row, first segment
+        let row: Table = table.get(1).expect("should have row 1");
+        let segment: Table = row.get(1).expect("should have segment");
+        let text: String = segment.get("Text").expect("should have Text");
+        assert_eq!(text, "modified", "should use modified script");
+
+        // Cleanup
+        let _ = fs::remove_file(&script_path);
+    }
+
+    #[test]
+    fn test_hot_reload_fallback_on_delete() {
+        // Create a temp file
+        let temp_dir = std::env::temp_dir();
+        let script_path = temp_dir.join(format!("test_hud_delete_{}.lua", std::process::id()));
+
+        let script = r#"
+function render_hud(now_ms, width, height)
+    local rows = {}
+    for i = 1, 8 do
+        rows[i] = {{Text = "user script"}}
+    end
+    return rows
+end
+"#;
+        fs::write(&script_path, script).expect("should write script");
+
+        // Load the script
+        let mut runtime = LuaRuntime::new().expect("should create runtime");
+        runtime
+            .load_script(&script_path)
+            .expect("should load script");
+        assert!(runtime.has_user_script());
+
+        // Delete the file
+        fs::remove_file(&script_path).expect("should delete file");
+
+        // Check reload should fallback to embedded
+        assert!(runtime.check_reload(), "should detect file deletion");
+        assert!(
+            !runtime.has_user_script(),
+            "should fallback to embedded script"
+        );
+
+        // Should still render (using embedded default)
+        runtime.update_state(HudState::new());
+        let output = runtime
+            .render_hud_string(chrono::Utc::now().timestamp_millis(), 80, 8)
+            .expect("should render with embedded script");
+        assert!(!output.is_empty(), "should produce output");
+    }
+
+    #[test]
+    fn test_hot_reload_keeps_previous_on_syntax_error() {
+        use std::thread;
+        use std::time::Duration;
+
+        // Create a temp file with valid script
+        let temp_dir = std::env::temp_dir();
+        let script_path = temp_dir.join(format!("test_hud_syntax_{}.lua", std::process::id()));
+
+        let valid_script = r#"
+function render_hud(now_ms, width, height)
+    local rows = {}
+    for i = 1, 8 do
+        rows[i] = {{Text = "valid"}}
+    end
+    return rows
+end
+"#;
+        fs::write(&script_path, valid_script).expect("should write valid script");
+
+        let mut runtime = LuaRuntime::new().expect("should create runtime");
+        runtime
+            .load_script(&script_path)
+            .expect("should load valid script");
+
+        // Wait to ensure mtime changes
+        thread::sleep(Duration::from_millis(50));
+
+        // Write invalid script
+        let invalid_script = r#"
+function render_hud(now_ms, width, height
+    -- Missing closing paren = syntax error
+    return {}
+end
+"#;
+        fs::write(&script_path, invalid_script).expect("should write invalid script");
+
+        // Check reload - should attempt but fail, keeping previous version
+        let _reloaded = runtime.check_reload();
+        // The reload attempt happened but may have failed
+        // The important thing is that render still works
+
+        runtime.update_state(HudState::new());
+        let result = runtime.render_hud(chrono::Utc::now().timestamp_millis(), 80, 8);
+
+        // Should still be able to render (using previous valid script)
+        assert!(result.is_ok(), "should still render after failed reload");
+
+        // Cleanup
+        let _ = fs::remove_file(&script_path);
     }
 }

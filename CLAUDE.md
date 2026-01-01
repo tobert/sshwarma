@@ -290,7 +290,17 @@ src/
 │   ├── mod.rs            # ParsedInput enum (Command, Mention, Chat, Empty)
 │   └── commands.rs       # Command dispatch and help text
 │
-├── display/              # Terminal rendering
+├── db/                   # Database layer (new Row/Buffer architecture)
+│   ├── mod.rs            # Database struct, connection, migrations
+│   ├── agents.rs         # Agent, AgentSession, AgentAuth CRUD
+│   ├── buffers.rs        # Buffer CRUD (room_chat, thinking, tool_output)
+│   ├── rows.rs           # Row CRUD, tags, reactions, links, fractional indexing
+│   ├── rooms.rs          # Room, room_kv operations
+│   ├── rules.rs          # Room rules (match-action triggers)
+│   ├── scripts.rs        # Lua scripts storage
+│   └── view.rs           # View stack, scroll state per agent
+│
+├── display/              # Terminal rendering (legacy, being replaced)
 │   ├── mod.rs            # DisplayBuffer: manages render state
 │   ├── ledger.rs         # Append-only conversation log, placeholder tracking
 │   ├── renderer.rs       # Formats entries to terminal with ANSI codes
@@ -301,14 +311,25 @@ src/
 │       ├── renderer.rs   # Calls Lua to render HUD
 │       └── spinner.rs    # Spinner animation frames
 │
+├── ui/                   # New Lua-driven UI system
+│   ├── mod.rs            # UI module exports
+│   ├── layout.rs         # Region constraint resolver (anchors, percentages)
+│   ├── render.rs         # RenderBuffer, DrawContext, widgets (gauge, sparkline)
+│   ├── input.rs          # Key handling, InputBuffer, completion system
+│   └── scroll.rs         # ScrollState, ViewStack, tail/pinned modes
+│
+├── rules.rs              # Room rules engine (glob matching, tick triggers)
+│
 ├── lua/                  # Lua scripting for HUD and context
 │   ├── mod.rs            # LuaRuntime: state management, script loading, hot-reload
-│   ├── context.rs        # Build HudContext to pass to Lua
+│   ├── context.rs        # Build HudContext, NotificationLevel, PendingNotification
+│   ├── data.rs           # Buffer/Row Lua bindings (RowSet, filter, map, reduce)
 │   ├── render.rs         # Parse Lua output into terminal segments
-│   ├── tools.rs          # Register Lua callbacks (hud_state, kv_*, mcp_*)
+│   ├── tools.rs          # Register Lua callbacks (hud_state, kv_*, mcp_*, notify)
 │   ├── wrap.rs           # Context composition via wrap.lua
 │   ├── cache.rs          # ToolCache: KV store for background→render data sharing
-│   └── mcp_bridge.rs     # Async MCP bridge: sync Lua ↔ async MCP calls
+│   ├── mcp_bridge.rs     # Async MCP bridge: sync Lua ↔ async MCP calls
+│   └── tool_middleware.rs # Lua middleware for MCP tool calls
 │
 ├── embedded/             # Compiled-in resources
 │   ├── hud.lua           # Default HUD script
@@ -328,10 +349,14 @@ src/
 ├── llm.rs                # LLM client with rig (streaming, tool calling)
 ├── internal_tools.rs     # rig-compatible tools for models (look, say, join, etc.)
 │
-├── mcp.rs                # MCP client: connect to external servers, call tools
+├── mcp/                  # MCP client subsystem
+│   ├── mod.rs            # McpManager: connection pool, tool dispatch
+│   ├── backoff.rs        # Exponential backoff for reconnection
+│   ├── events.rs         # Connection events, broadcast channels
+│   └── manager.rs        # Background connection lifecycle
+│
 ├── mcp_server.rs         # MCP server: expose sshwarma to Claude Code
 │
-├── db.rs                 # SQLite: users, pubkeys, rooms, messages, artifacts
 ├── ansi.rs               # ANSI escape sequence parser
 ├── line_editor.rs        # Readline-style input with completion
 ├── comm.rs               # Broadcast utilities
@@ -340,6 +365,102 @@ src/
 src/bin/
 └── sshwarma-admin.rs     # CLI for user management
 ```
+
+## New UI System (WIP Integration)
+
+The new Lua-driven UI system provides immediate-mode rendering with region-based layout.
+Currently, the HUD uses this system. Full chat rendering integration is in progress.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    SSH Handler                          │
+│                        │                                │
+│   ┌───────────────────┴───────────────────┐            │
+│   │          LuaRuntime                    │            │
+│   │  ┌─────────────────────────────────┐  │            │
+│   │  │  render_hud() ──► HUD output    │  │            │
+│   │  │  compose_context() ──► LLM ctx  │  │            │
+│   │  │  check_reload() ──► hot-reload  │  │            │
+│   │  └─────────────────────────────────┘  │            │
+│   └───────────────────────────────────────┘            │
+│                        │                                │
+│   ┌───────────────────┴───────────────────┐            │
+│   │          RenderBuffer                  │            │
+│   │  ┌─────────────────────────────────┐  │            │
+│   │  │  DrawContext with clipping      │  │            │
+│   │  │  print(), fill(), box(), gauge()│  │            │
+│   │  │  to_ansi() ──► terminal output  │  │            │
+│   │  └─────────────────────────────────┘  │            │
+│   └───────────────────────────────────────┘            │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Data Flow: Row/Buffer System
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Database (SQLite)                                      │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ agents ──► buffers ──► rows                     │   │
+│  │            │            ├── row_tags            │   │
+│  │            │            ├── row_reactions       │   │
+│  │            │            └── row_links           │   │
+│  │            │                                    │   │
+│  │            └── room_rules ──► lua_scripts      │   │
+│  └─────────────────────────────────────────────────┘   │
+│                         │                               │
+│   ┌─────────────────────┴─────────────────────────┐    │
+│   │  Lua Bindings (lua/data.rs)                   │    │
+│   │  ┌─────────────────────────────────────────┐  │    │
+│   │  │ Buffer:rows() ──► RowSet                │  │    │
+│   │  │ RowSet:filter(), :map(), :reduce()      │  │    │
+│   │  │ RowSet:with_tag(), :since(), :last()    │  │    │
+│   │  │ Row:children(), :parent(), :add_tag()   │  │    │
+│   │  └─────────────────────────────────────────┘  │    │
+│   └────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Integration Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `ui/layout.rs` | Ready | Region constraint system, tested |
+| `ui/render.rs` | Ready | RenderBuffer, DrawContext, widgets |
+| `ui/input.rs` | Ready | InputBuffer, completion, Lua bindings |
+| `ui/scroll.rs` | Ready | ScrollState, ViewStack, Lua bindings |
+| `db/rows.rs` | Ready | Row CRUD, tags, fractional indexing |
+| `db/buffers.rs` | Ready | Buffer CRUD, tombstoning |
+| `db/agents.rs` | Ready | Unified agent model |
+| `db/rules.rs` | Ready | Match-action rules |
+| `lua/data.rs` | Ready | Buffer/Row Lua bindings |
+| `rules.rs` | Ready | Glob matching, tick triggers |
+| HUD rendering | Active | Using LuaRuntime.render_hud() |
+| Chat rendering | Pending | Still using display/ledger.rs |
+| MCP tools | Pending | Still using LedgerEntry format |
+
+### Next Steps for Full Integration
+
+1. **Replace display/ledger.rs with db/rows.rs**
+   - Modify `ssh.rs` to write chat messages as Rows
+   - Update `mcp_server.rs` tools to use Row queries
+
+2. **Wire RenderBuffer into SSH handler**
+   - Create a top-level layout (chat region + HUD region)
+   - Route keyboard events through `ui/input.rs`
+   - Use `ui/scroll.rs` for chat navigation
+
+3. **Enable room rules**
+   - Load rules from `db/rules.rs` on room entry
+   - Execute tick handlers in background loop
+   - Execute row handlers on message arrival
+
+4. **Delete legacy modules**
+   - `display/ledger.rs`
+   - `display/renderer.rs`
+   - Move HUD state into new system
 
 ## Dependencies
 

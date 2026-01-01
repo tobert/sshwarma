@@ -5,26 +5,25 @@
 
 use anyhow::Result;
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        StreamableHttpService,
-        session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpService,
     },
+    ServerHandler,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use std::time::Duration;
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
 use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::{ModelBackend, ModelHandle, ModelRegistry};
 use sshwarma::world::World;
+use std::time::Duration;
 
 // ============================================================================
 // Test MCP Server
@@ -162,11 +161,16 @@ async fn test_mcp_server_ping() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("test", &mcp_url);
-    manager.wait_for_connected("test", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("test", Duration::from_secs(5))
+        .await?;
 
     // Verify ping tool exists
     let tools = manager.list_tools().await;
-    assert!(tools.iter().any(|t| t.name == "ping"), "ping tool should exist");
+    assert!(
+        tools.iter().any(|t| t.name == "ping"),
+        "ping tool should exist"
+    );
 
     // Call ping
     let result = manager.call_tool("ping", serde_json::json!({})).await?;
@@ -183,10 +187,14 @@ async fn test_mcp_server_echo() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("test", &mcp_url);
-    manager.wait_for_connected("test", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("test", Duration::from_secs(5))
+        .await?;
 
     // Call echo
-    let result = manager.call_tool("echo", serde_json::json!({"message": "hello world"})).await?;
+    let result = manager
+        .call_tool("echo", serde_json::json!({"message": "hello world"}))
+        .await?;
     assert_eq!(result.content, "echo: hello world");
     assert!(!result.is_error);
 
@@ -200,15 +208,21 @@ async fn test_mcp_server_add() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("test", &mcp_url);
-    manager.wait_for_connected("test", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("test", Duration::from_secs(5))
+        .await?;
 
     // Call add
-    let result = manager.call_tool("add", serde_json::json!({"a": 17, "b": 25})).await?;
+    let result = manager
+        .call_tool("add", serde_json::json!({"a": 17, "b": 25}))
+        .await?;
     assert_eq!(result.content, "42");
     assert!(!result.is_error);
 
     // Test negative numbers
-    let result = manager.call_tool("add", serde_json::json!({"a": -10, "b": 5})).await?;
+    let result = manager
+        .call_tool("add", serde_json::json!({"a": -10, "b": 5}))
+        .await?;
     assert_eq!(result.content, "-5");
 
     manager.remove("test");
@@ -221,7 +235,9 @@ async fn test_mcp_tool_listing() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("test", &mcp_url);
-    manager.wait_for_connected("test", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("test", Duration::from_secs(5))
+        .await?;
 
     let tools = manager.list_tools().await;
 
@@ -235,7 +251,11 @@ async fn test_mcp_tool_listing() -> Result<()> {
 
     // All should have descriptions
     for tool in &tools {
-        assert!(!tool.description.is_empty(), "tool {} should have description", tool.name);
+        assert!(
+            !tool.description.is_empty(),
+            "tool {} should have description",
+            tool.name
+        );
     }
 
     manager.remove("test");
@@ -248,10 +268,14 @@ async fn test_mcp_unknown_tool() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("test", &mcp_url);
-    manager.wait_for_connected("test", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("test", Duration::from_secs(5))
+        .await?;
 
     // Try to call non-existent tool
-    let result = manager.call_tool("nonexistent", serde_json::json!({})).await;
+    let result = manager
+        .call_tool("nonexistent", serde_json::json!({}))
+        .await;
     assert!(result.is_err());
 
     manager.remove("test");
@@ -289,7 +313,9 @@ async fn test_mock_llm_chat_with_context() -> Result<()> {
         ("assistant".to_string(), "previous response".to_string()),
     ];
 
-    let response = llm.chat_with_context(model, "system prompt", &history, "current message").await?;
+    let response = llm
+        .chat_with_context(model, "system prompt", &history, "current message")
+        .await?;
     assert_eq!(response, "[mock]: current message");
 
     Ok(())
@@ -341,8 +367,12 @@ async fn test_multiple_mcp_connections() -> Result<()> {
     // Connect to both
     manager.add("server1", &url1);
     manager.add("server2", &url2);
-    manager.wait_for_connected("server1", Duration::from_secs(5)).await?;
-    manager.wait_for_connected("server2", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("server1", Duration::from_secs(5))
+        .await?;
+    manager
+        .wait_for_connected("server2", Duration::from_secs(5))
+        .await?;
 
     // Should have tools from both (6 total, 3 from each)
     let tools = manager.list_tools().await;
@@ -418,9 +448,13 @@ async fn test_sshwarma_mcp_list_rooms_empty() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
-    let result = manager.call_tool("list_rooms", serde_json::json!({})).await?;
+    let result = manager
+        .call_tool("list_rooms", serde_json::json!({}))
+        .await?;
     assert!(result.content.contains("No rooms exist yet"));
     assert!(!result.is_error);
 
@@ -434,18 +468,27 @@ async fn test_sshwarma_mcp_create_room() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create a room
-    let result = manager.call_tool("create_room", serde_json::json!({
-        "name": "test-room",
-        "description": "A test room"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "create_room",
+            serde_json::json!({
+                "name": "test-room",
+                "description": "A test room"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Created room 'test-room'"));
     assert!(!result.is_error);
 
     // List rooms should now show it
-    let result = manager.call_tool("list_rooms", serde_json::json!({})).await?;
+    let result = manager
+        .call_tool("list_rooms", serde_json::json!({}))
+        .await?;
     assert!(result.content.contains("test-room"));
 
     manager.remove("sshwarma");
@@ -458,9 +501,13 @@ async fn test_sshwarma_mcp_list_models() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
-    let result = manager.call_tool("list_models", serde_json::json!({})).await?;
+    let result = manager
+        .call_tool("list_models", serde_json::json!({}))
+        .await?;
     assert!(result.content.contains("test"));
     assert!(result.content.contains("Test Model"));
     assert!(!result.is_error);
@@ -475,13 +522,20 @@ async fn test_sshwarma_mcp_ask_model() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Ask the mock model
-    let result = manager.call_tool("ask_model", serde_json::json!({
-        "model": "test",
-        "message": "What is 2+2?"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "ask_model",
+            serde_json::json!({
+                "model": "test",
+                "message": "What is 2+2?"
+            }),
+        )
+        .await?;
     // Mock model echoes with prefix
     assert!(result.content.contains("test:"));
     assert!(result.content.contains("What is 2+2?"));
@@ -497,7 +551,9 @@ async fn test_sshwarma_mcp_tool_listing() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     let tools = manager.list_tools().await;
 
@@ -520,32 +576,54 @@ async fn test_sshwarma_mcp_error_cases() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Say to non-existent room
-    let result = manager.call_tool("say", serde_json::json!({
-        "room": "no-such-room",
-        "message": "Hello"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "say",
+            serde_json::json!({
+                "room": "no-such-room",
+                "message": "Hello"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("does not exist"));
 
     // Get history from non-existent room
-    let result = manager.call_tool("get_history", serde_json::json!({
-        "room": "no-such-room"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "get_history",
+            serde_json::json!({
+                "room": "no-such-room"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("No messages"));
 
     // Ask unknown model
-    let result = manager.call_tool("ask_model", serde_json::json!({
-        "model": "unknown-model",
-        "message": "Hello"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "ask_model",
+            serde_json::json!({
+                "model": "unknown-model",
+                "message": "Hello"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Unknown model"));
 
     // Create room with invalid name
-    let result = manager.call_tool("create_room", serde_json::json!({
-        "name": "invalid name with spaces!"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "create_room",
+            serde_json::json!({
+                "name": "invalid name with spaces!"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("can only contain"));
 
     manager.remove("sshwarma");
@@ -562,23 +640,37 @@ async fn test_sshwarma_mcp_set_vibe() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create a room
-    manager.call_tool("create_room", serde_json::json!({"name": "vibes-room"})).await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "vibes-room"}))
+        .await?;
 
     // Set vibe
-    let result = manager.call_tool("set_vibe", serde_json::json!({
-        "room": "vibes-room",
-        "vibe": "Chill lofi beats, late night coding session"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "set_vibe",
+            serde_json::json!({
+                "room": "vibes-room",
+                "vibe": "Chill lofi beats, late night coding session"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Set vibe"));
     assert!(!result.is_error);
 
     // Get room context should show vibe
-    let result = manager.call_tool("room_context", serde_json::json!({
-        "room": "vibes-room"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "room_context",
+            serde_json::json!({
+                "room": "vibes-room"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Chill lofi"));
     assert!(result.content.contains("Vibe"));
 
@@ -592,45 +684,74 @@ async fn test_sshwarma_mcp_journal() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create a room
-    manager.call_tool("create_room", serde_json::json!({"name": "journal-room"})).await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "journal-room"}))
+        .await?;
 
     // Add journal entries
-    let result = manager.call_tool("journal_write", serde_json::json!({
-        "room": "journal-room",
-        "kind": "note",
-        "content": "Started working on the beat"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "journal_write",
+            serde_json::json!({
+                "room": "journal-room",
+                "kind": "note",
+                "content": "Started working on the beat"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Added note"));
     assert!(!result.is_error);
 
-    manager.call_tool("journal_write", serde_json::json!({
-        "room": "journal-room",
-        "kind": "decision",
-        "content": "Using 120 BPM for the track"
-    })).await?;
+    manager
+        .call_tool(
+            "journal_write",
+            serde_json::json!({
+                "room": "journal-room",
+                "kind": "decision",
+                "content": "Using 120 BPM for the track"
+            }),
+        )
+        .await?;
 
-    manager.call_tool("journal_write", serde_json::json!({
-        "room": "journal-room",
-        "kind": "milestone",
-        "content": "First draft complete!"
-    })).await?;
+    manager
+        .call_tool(
+            "journal_write",
+            serde_json::json!({
+                "room": "journal-room",
+                "kind": "milestone",
+                "content": "First draft complete!"
+            }),
+        )
+        .await?;
 
     // Read all journal entries
-    let result = manager.call_tool("journal_read", serde_json::json!({
-        "room": "journal-room"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "journal_read",
+            serde_json::json!({
+                "room": "journal-room"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Started working"));
     assert!(result.content.contains("120 BPM"));
     assert!(result.content.contains("First draft"));
 
     // Filter by kind
-    let result = manager.call_tool("journal_read", serde_json::json!({
-        "room": "journal-room",
-        "kind": "decision"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "journal_read",
+            serde_json::json!({
+                "room": "journal-room",
+                "kind": "decision"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("120 BPM"));
     assert!(!result.content.contains("Started working"));
 
@@ -644,49 +765,78 @@ async fn test_sshwarma_mcp_asset_binding() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create a room
-    manager.call_tool("create_room", serde_json::json!({"name": "asset-room"})).await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "asset-room"}))
+        .await?;
 
     // Bind an asset
-    let result = manager.call_tool("asset_bind", serde_json::json!({
-        "room": "asset-room",
-        "artifact_id": "abc123hash",
-        "role": "drums",
-        "notes": "808 kick pattern"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "asset_bind",
+            serde_json::json!({
+                "room": "asset-room",
+                "artifact_id": "abc123hash",
+                "role": "drums",
+                "notes": "808 kick pattern"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Bound 'abc123hash'"));
     assert!(result.content.contains("drums"));
     assert!(!result.is_error);
 
     // Look up the asset
-    let result = manager.call_tool("asset_lookup", serde_json::json!({
-        "room": "asset-room",
-        "role": "drums"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "asset_lookup",
+            serde_json::json!({
+                "room": "asset-room",
+                "role": "drums"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("abc123hash"));
     assert!(result.content.contains("808 kick pattern"));
 
     // Room context should show bound assets
-    let result = manager.call_tool("room_context", serde_json::json!({
-        "room": "asset-room"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "room_context",
+            serde_json::json!({
+                "room": "asset-room"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("drums"));
     assert!(result.content.contains("abc123hash"));
 
     // Unbind the asset
-    let result = manager.call_tool("asset_unbind", serde_json::json!({
-        "room": "asset-room",
-        "role": "drums"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "asset_unbind",
+            serde_json::json!({
+                "room": "asset-room",
+                "role": "drums"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Unbound 'drums'"));
 
     // Asset should no longer be found
-    let result = manager.call_tool("asset_lookup", serde_json::json!({
-        "room": "asset-room",
-        "role": "drums"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "asset_lookup",
+            serde_json::json!({
+                "room": "asset-room",
+                "role": "drums"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("No asset bound"));
 
     manager.remove("sshwarma");
@@ -699,33 +849,54 @@ async fn test_sshwarma_mcp_exits() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create two rooms
-    manager.call_tool("create_room", serde_json::json!({"name": "lobby"})).await?;
-    manager.call_tool("create_room", serde_json::json!({"name": "studio"})).await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "lobby"}))
+        .await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "studio"}))
+        .await?;
 
     // Create bidirectional exit
-    let result = manager.call_tool("add_exit", serde_json::json!({
-        "room": "lobby",
-        "direction": "north",
-        "target": "studio"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "add_exit",
+            serde_json::json!({
+                "room": "lobby",
+                "direction": "north",
+                "target": "studio"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("north"));
     assert!(result.content.contains("south"));
     assert!(!result.is_error);
 
     // Check lobby exits
-    let result = manager.call_tool("room_context", serde_json::json!({
-        "room": "lobby"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "room_context",
+            serde_json::json!({
+                "room": "lobby"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("north"));
     assert!(result.content.contains("studio"));
 
     // Check studio exits (should have south back to lobby)
-    let result = manager.call_tool("room_context", serde_json::json!({
-        "room": "studio"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "room_context",
+            serde_json::json!({
+                "room": "studio"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("south"));
     assert!(result.content.contains("lobby"));
 
@@ -739,34 +910,58 @@ async fn test_sshwarma_mcp_fork_room() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create source room with context
-    manager.call_tool("create_room", serde_json::json!({"name": "original"})).await?;
-    manager.call_tool("set_vibe", serde_json::json!({
-        "room": "original",
-        "vibe": "Experimental ambient soundscape"
-    })).await?;
-    manager.call_tool("asset_bind", serde_json::json!({
-        "room": "original",
-        "artifact_id": "pad123",
-        "role": "pad",
-        "notes": "Main atmospheric pad"
-    })).await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "original"}))
+        .await?;
+    manager
+        .call_tool(
+            "set_vibe",
+            serde_json::json!({
+                "room": "original",
+                "vibe": "Experimental ambient soundscape"
+            }),
+        )
+        .await?;
+    manager
+        .call_tool(
+            "asset_bind",
+            serde_json::json!({
+                "room": "original",
+                "artifact_id": "pad123",
+                "role": "pad",
+                "notes": "Main atmospheric pad"
+            }),
+        )
+        .await?;
 
     // Fork the room
-    let result = manager.call_tool("fork_room", serde_json::json!({
-        "source": "original",
-        "new_name": "variation-1"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "fork_room",
+            serde_json::json!({
+                "source": "original",
+                "new_name": "variation-1"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Forked 'variation-1'"));
     assert!(result.content.contains("Inherited"));
     assert!(!result.is_error);
 
     // Check forked room has inherited context
-    let result = manager.call_tool("room_context", serde_json::json!({
-        "room": "variation-1"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "room_context",
+            serde_json::json!({
+                "room": "variation-1"
+            }),
+        )
+        .await?;
     assert!(result.content.contains("Experimental ambient"));
     assert!(result.content.contains("pad"));
     assert!(result.content.contains("pad123"));
@@ -782,45 +977,79 @@ async fn test_sshwarma_mcp_room_context_full() -> Result<()> {
 
     let manager = McpManager::new();
     manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
 
     // Create a room with rich context
-    manager.call_tool("create_room", serde_json::json!({"name": "rich-room"})).await?;
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "rich-room"}))
+        .await?;
 
     // Add vibe
-    manager.call_tool("set_vibe", serde_json::json!({
-        "room": "rich-room",
-        "vibe": "Deep house groove, 124 BPM"
-    })).await?;
+    manager
+        .call_tool(
+            "set_vibe",
+            serde_json::json!({
+                "room": "rich-room",
+                "vibe": "Deep house groove, 124 BPM"
+            }),
+        )
+        .await?;
 
     // Add assets
-    manager.call_tool("asset_bind", serde_json::json!({
-        "room": "rich-room",
-        "artifact_id": "kick001",
-        "role": "kick"
-    })).await?;
-    manager.call_tool("asset_bind", serde_json::json!({
-        "room": "rich-room",
-        "artifact_id": "bass002",
-        "role": "bassline"
-    })).await?;
+    manager
+        .call_tool(
+            "asset_bind",
+            serde_json::json!({
+                "room": "rich-room",
+                "artifact_id": "kick001",
+                "role": "kick"
+            }),
+        )
+        .await?;
+    manager
+        .call_tool(
+            "asset_bind",
+            serde_json::json!({
+                "room": "rich-room",
+                "artifact_id": "bass002",
+                "role": "bassline"
+            }),
+        )
+        .await?;
 
     // Add journal entries
-    manager.call_tool("journal_write", serde_json::json!({
-        "room": "rich-room",
-        "kind": "note",
-        "content": "Working on the groove"
-    })).await?;
-    manager.call_tool("journal_write", serde_json::json!({
-        "room": "rich-room",
-        "kind": "decision",
-        "content": "Keep the bassline minimal"
-    })).await?;
+    manager
+        .call_tool(
+            "journal_write",
+            serde_json::json!({
+                "room": "rich-room",
+                "kind": "note",
+                "content": "Working on the groove"
+            }),
+        )
+        .await?;
+    manager
+        .call_tool(
+            "journal_write",
+            serde_json::json!({
+                "room": "rich-room",
+                "kind": "decision",
+                "content": "Keep the bassline minimal"
+            }),
+        )
+        .await?;
 
     // Get full context
-    let result = manager.call_tool("room_context", serde_json::json!({
-        "room": "rich-room"
-    })).await?;
+    let result = manager
+        .call_tool(
+            "room_context",
+            serde_json::json!({
+                "room": "rich-room"
+            }),
+        )
+        .await?;
 
     // Should have all sections
     assert!(result.content.contains("# Room: rich-room"));
