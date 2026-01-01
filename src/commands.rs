@@ -5,6 +5,22 @@ use crate::lua::WrapState;
 use crate::model::{ModelBackend, ModelHandle};
 use crate::ops;
 use crate::ssh::SshHandler;
+use opentelemetry::KeyValue;
+use tracing::instrument;
+
+/// Get or create the command counter
+fn command_counter() -> opentelemetry::metrics::Counter<u64> {
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("sshwarma")
+                .u64_counter("sshwarma.commands.total")
+                .with_description("Total number of slash commands executed")
+                .build()
+        })
+        .clone()
+}
 
 /// Result of a command execution
 pub struct CommandResult {
@@ -38,6 +54,7 @@ impl CommandResult {
 }
 
 impl SshHandler {
+    #[instrument(name = "cmd.dispatch", skip(self), fields(input.len = input.len()))]
     pub async fn handle_input(&mut self, input: &str) -> CommandResult {
         let input = input.trim();
 
@@ -45,6 +62,9 @@ impl SshHandler {
             let parts: Vec<&str> = input[1..].splitn(2, ' ').collect();
             let cmd = parts.first().unwrap_or(&"");
             let args = parts.get(1).copied().unwrap_or("");
+
+            // Record command metric
+            command_counter().add(1, &[KeyValue::new("command", cmd.to_string())]);
 
             match *cmd {
                 "help" => CommandResult::normal(self.cmd_help()),
@@ -182,6 +202,7 @@ MCP:
         }
     }
 
+    #[instrument(name = "cmd.join", skip(self), fields(room.target = args.trim()))]
     async fn cmd_join(&mut self, args: &str) -> String {
         let target = args.trim();
         if target.is_empty() {
@@ -348,10 +369,12 @@ MCP:
         }
     }
 
+    #[instrument(name = "cmd.mention", skip(self, input), fields(model.name))]
     async fn cmd_mention(&mut self, input: &str) -> String {
         let input = input.trim_start_matches('@');
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let model_name = parts.first().unwrap_or(&"");
+        tracing::Span::current().record("model.name", model_name);
         let message = parts.get(1).copied().unwrap_or("").trim();
 
         if message.is_empty() {
@@ -488,10 +511,14 @@ MCP:
         }
     }
 
+    #[instrument(name = "cmd.run", skip(self), fields(tool.name))]
     async fn cmd_run(&self, args: &str) -> String {
         let parts: Vec<&str> = args.splitn(2, ' ').collect();
         let tool_name = match parts.first() {
-            Some(name) if !name.is_empty() => *name,
+            Some(name) if !name.is_empty() => {
+                tracing::Span::current().record("tool.name", *name);
+                *name
+            }
             _ => {
                 return "Usage: /run <tool> [json args]\r\nExample: /run orpheus_generate {\"temperature\": 1.0}".to_string()
             }

@@ -163,6 +163,10 @@ fn init_telemetry() -> Result<()> {
         let service_name = std::env::var("OTEL_SERVICE_NAME")
             .unwrap_or_else(|_| "sshwarma".to_string());
 
+        let resource = opentelemetry_sdk::Resource::new(vec![
+            opentelemetry::KeyValue::new("service.name", service_name.clone()),
+        ]);
+
         // Build OTLP span exporter
         let exporter = SpanExporter::builder()
             .with_tonic()
@@ -173,18 +177,37 @@ fn init_telemetry() -> Result<()> {
         // Create tracer provider with batch export
         let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-            .with_resource(opentelemetry_sdk::Resource::new(vec![
-                opentelemetry::KeyValue::new("service.name", service_name.clone()),
-            ]))
+            .with_resource(resource.clone())
             .build();
 
         let tracer = tracer_provider.tracer("sshwarma");
 
-        // Set global provider
+        // Set global tracer provider
         opentelemetry::global::set_tracer_provider(tracer_provider);
 
-        // Log after subscriber is set up would be ideal, but we need to return the layer
-        // The info! below will work once the subscriber is initialized
+        // Initialize metrics provider with OTLP export
+        use opentelemetry_otlp::MetricExporter;
+
+        let metrics_exporter = MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(&endpoint)
+            .build()
+            .context("failed to build OTLP metrics exporter")?;
+
+        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
+            metrics_exporter,
+            opentelemetry_sdk::runtime::Tokio,
+        )
+        .with_interval(std::time::Duration::from_secs(10))
+        .build();
+
+        let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(resource)
+            .build();
+
+        opentelemetry::global::set_meter_provider(meter_provider);
+
         eprintln!("OTLP export enabled: {} -> {}", service_name, endpoint);
         Some(tracing_opentelemetry::layer().with_tracer(tracer))
     } else {

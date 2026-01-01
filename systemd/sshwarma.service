@@ -1,5 +1,5 @@
 [Unit]
-Description=sshwarma SSH partyline for humans and models
+Description=sshwarma SSH MUD for humans and models
 Documentation=https://github.com/tobert/sshwarma
 
 [Service]
@@ -14,6 +14,11 @@ TimeoutStopSec=30
 #   Config: ~/.config/sshwarma/ (models.toml, lua scripts)
 # Override with: SSHWARMA_DB, SSHWARMA_HOST_KEY, SSHWARMA_MODELS_CONFIG
 Environment=RUST_LOG=info
+
+# OpenTelemetry OTLP export (uncomment to enable)
+# Traces and metrics are exported to the configured endpoint
+#Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+#Environment=OTEL_SERVICE_NAME=sshwarma
 
 [Install]
 WantedBy=default.target

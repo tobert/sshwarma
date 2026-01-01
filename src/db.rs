@@ -6,6 +6,7 @@ use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::display::{EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction};
@@ -399,6 +400,7 @@ impl Database {
     }
 
     /// Record a message
+    #[instrument(name = "db.add_message", skip(self, content), fields(db.room = room))]
     pub fn add_message(
         &self,
         room: &str,
@@ -448,6 +450,7 @@ impl Database {
     // =========================================================================
 
     /// Add a ledger entry to the database
+    #[instrument(name = "db.add_ledger_entry", skip(self, entry), fields(db.room = room))]
     pub fn add_ledger_entry(&self, room: &str, entry: &LedgerEntry) -> Result<i64> {
         let conn = self.conn()?;
         let timestamp = entry.timestamp.to_rfc3339();
@@ -509,6 +512,7 @@ impl Database {
     }
 
     /// Get recent ledger entries for a room
+    #[instrument(name = "db.recent_entries", skip(self), fields(db.room = room, db.limit = limit))]
     pub fn recent_entries(&self, room: &str, limit: usize) -> Result<Vec<LedgerEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

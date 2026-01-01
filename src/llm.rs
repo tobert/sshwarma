@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use futures::StreamExt;
+use opentelemetry::KeyValue;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::{CompletionClient, Nothing, ProviderClient};
 use rig::completion::{Chat, Message, Prompt};
@@ -13,6 +14,35 @@ use tokio::sync::mpsc;
 use tracing::instrument;
 
 use crate::model::{ModelBackend, ModelHandle};
+
+/// Get or create the LLM request counter
+fn llm_request_counter() -> opentelemetry::metrics::Counter<u64> {
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("sshwarma")
+                .u64_counter("sshwarma.llm.requests.total")
+                .with_description("Total number of LLM requests")
+                .build()
+        })
+        .clone()
+}
+
+/// Get or create the LLM latency histogram
+fn llm_latency_histogram() -> opentelemetry::metrics::Histogram<f64> {
+    static HISTOGRAM: std::sync::OnceLock<opentelemetry::metrics::Histogram<f64>> =
+        std::sync::OnceLock::new();
+    HISTOGRAM
+        .get_or_init(|| {
+            opentelemetry::global::meter("sshwarma")
+                .f64_histogram("sshwarma.llm.duration_seconds")
+                .with_description("LLM request duration in seconds")
+                .with_unit("s")
+                .build()
+        })
+        .clone()
+}
 
 use rmcp::model::Tool;
 
@@ -541,9 +571,18 @@ impl LlmClient {
         tx: mpsc::Sender<StreamChunk>,
         max_turns: usize,
     ) -> Result<()> {
+        let start = std::time::Instant::now();
+        let attrs = [
+            KeyValue::new("model", model.short_name.clone()),
+            KeyValue::new("backend", model.backend.variant_name()),
+        ];
+
+        // Record request start
+        llm_request_counter().add(1, &attrs);
+
         // Macro to process streaming items - avoids code duplication across providers
         macro_rules! process_stream {
-            ($stream:expr, $tx:expr) => {{
+            ($stream:expr, $tx:expr, $start:expr, $attrs:expr) => {{
                 while let Some(item) = $stream.next().await {
                     match item {
                         Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
@@ -571,11 +610,13 @@ impl LlmClient {
                         Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
                         Ok(_) => {} // Handle future non-exhaustive variants
                         Err(e) => {
+                            llm_latency_histogram().record($start.elapsed().as_secs_f64(), $attrs);
                             let _ = $tx.send(StreamChunk::Error(e.to_string())).await;
                             return Ok(());
                         }
                     }
                 }
+                llm_latency_histogram().record($start.elapsed().as_secs_f64(), $attrs);
                 let _ = $tx.send(StreamChunk::Done).await;
                 Ok(())
             }};
@@ -586,6 +627,7 @@ impl LlmClient {
             let response = format!("{}: {}", prefix, message);
             let _ = tx.send(StreamChunk::Text(response)).await;
             let _ = tx.send(StreamChunk::Done).await;
+            llm_latency_histogram().record(start.elapsed().as_secs_f64(), &attrs);
             return Ok(());
         }
 
@@ -605,7 +647,7 @@ impl LlmClient {
                     .multi_turn(max_turns)
                     .await;
 
-                process_stream!(stream, tx)
+                process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::LlamaCpp { endpoint, model: model_id } => {
@@ -628,7 +670,7 @@ impl LlmClient {
                     .multi_turn(max_turns)
                     .await;
 
-                process_stream!(stream, tx)
+                process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::OpenAI { model: model_id } => {
@@ -646,7 +688,7 @@ impl LlmClient {
                     .multi_turn(max_turns)
                     .await;
 
-                process_stream!(stream, tx)
+                process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::Anthropic { model: model_id } => {
@@ -664,7 +706,7 @@ impl LlmClient {
                     .multi_turn(max_turns)
                     .await;
 
-                process_stream!(stream, tx)
+                process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::Gemini { .. } => {

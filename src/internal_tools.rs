@@ -11,6 +11,7 @@ use rig::wasm_compat::WasmBoxedFuture;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
+use tracing::debug;
 
 use crate::lua::LuaRuntime;
 use crate::ops;
@@ -458,6 +459,7 @@ impl ToolDyn for SshwarmaSay {
 
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
+            debug!(tool = "sshwarma_say", room = %self.ctx.room, "tool call");
             let parsed: SayArgs =
                 serde_json::from_str(&args).map_err(ToolError::JsonError)?;
 
@@ -564,6 +566,7 @@ macro_rules! journal_tool {
 
             fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
                 Box::pin(async move {
+                    debug!(tool = $tool_name, room = %self.ctx.room, "tool call");
                     let parsed: JournalEntryArgs =
                         serde_json::from_str(&args).map_err(ToolError::JsonError)?;
 
@@ -709,6 +712,7 @@ impl ToolDyn for SshwarmaJoin {
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let parsed: JoinArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+            debug!(tool = "sshwarma_join", from = %self.ctx.room, to = %parsed.room, "navigation");
 
             let summary = ops::join(
                 &self.ctx.state,
@@ -751,6 +755,7 @@ impl ToolDyn for SshwarmaLeave {
 
     fn call(&self, _args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
+            debug!(tool = "sshwarma_leave", from = %self.ctx.room, "navigation");
             ops::leave(&self.ctx.state, &self.ctx.username, &self.ctx.room)
                 .await
                 .map_err(anyhow_to_tool_error)?;
@@ -799,6 +804,7 @@ impl ToolDyn for SshwarmaGo {
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let parsed: GoArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+            debug!(tool = "sshwarma_go", from = %self.ctx.room, direction = %parsed.direction, "navigation");
 
             let summary = ops::go(
                 &self.ctx.state,
@@ -852,6 +858,7 @@ impl ToolDyn for SshwarmaCreate {
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let parsed: CreateArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+            debug!(tool = "sshwarma_create", room = %parsed.name, "room creation");
 
             let summary = ops::create_room(
                 &self.ctx.state,
@@ -906,6 +913,7 @@ impl ToolDyn for SshwarmaFork {
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let parsed: ForkArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+            debug!(tool = "sshwarma_fork", from = %self.ctx.room, to = %parsed.name, "room fork");
 
             let summary = ops::fork_room(
                 &self.ctx.state,
