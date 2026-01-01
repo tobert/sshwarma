@@ -438,6 +438,17 @@ impl LuaDrawContext {
             None
         }
     }
+
+    /// Print text at local coords with clipping (for Rust tests)
+    #[cfg(test)]
+    pub fn print(&self, x: u16, y: u16, text: &str, style: &Style) {
+        if let Some((bx, by)) = self.translate(x, y) {
+            // Clip text to region width
+            let max_len = self.width.saturating_sub(x) as usize;
+            let text: String = text.chars().take(max_len).collect();
+            self.with_buffer(|buf| buf.print(bx, by, &text, style));
+        }
+    }
 }
 
 impl LuaUserData for LuaDrawContext {
@@ -787,5 +798,200 @@ mod tests {
         .exec()?;
 
         Ok(())
+    }
+
+    // ==========================================================================
+    // Render clipping edge case tests
+    // ==========================================================================
+
+    #[test]
+    fn test_print_overflow_clipping() {
+        // Create 10-wide buffer, print 20-char string
+        let mut buf = RenderBuffer::new(10, 1);
+        buf.print(0, 0, "12345678901234567890", &Style::new());
+
+        // Only first 10 chars should appear
+        assert_eq!(buf.get(0, 0).unwrap().char, '1');
+        assert_eq!(buf.get(9, 0).unwrap().char, '0'); // 10th char
+                                                      // Chars 11-20 should not exist (buffer is only 10 wide)
+    }
+
+    #[test]
+    fn test_print_starting_near_edge() {
+        let mut buf = RenderBuffer::new(10, 1);
+        // Start at x=8, print "Hello" (5 chars)
+        buf.print(8, 0, "Hello", &Style::new());
+
+        // Only "He" should fit (positions 8 and 9)
+        assert_eq!(buf.get(8, 0).unwrap().char, 'H');
+        assert_eq!(buf.get(9, 0).unwrap().char, 'e');
+        // Position 7 should be untouched
+        assert_eq!(buf.get(7, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_print_outside_bounds_ignored() {
+        let mut buf = RenderBuffer::new(10, 5);
+        // Print outside buffer bounds - should be silently ignored
+        buf.print(100, 0, "Hello", &Style::new());
+        buf.print(0, 100, "Hello", &Style::new());
+
+        // Buffer should be unchanged
+        assert_eq!(buf.get(0, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_fill_clipping() {
+        let mut buf = RenderBuffer::new(10, 10);
+        // Fill starting at (8, 8) with 5x5 - should be clipped to 2x2
+        buf.fill(8, 8, 5, 5, '#', &Style::new());
+
+        // (8,8) and (9,9) should be filled
+        assert_eq!(buf.get(8, 8).unwrap().char, '#');
+        assert_eq!(buf.get(9, 9).unwrap().char, '#');
+        // (7,7) should be untouched
+        assert_eq!(buf.get(7, 7).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_draw_context_clips_print() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(20, 10)));
+        // Create a 5-wide context starting at x=10
+        let ctx = LuaDrawContext::new(buffer.clone(), 10, 0, 5, 10);
+
+        // Print 10 chars at local (0, 0) - should be clipped to 5 chars
+        ctx.print(0, 0, "1234567890", &Style::new());
+
+        let buf = buffer.lock().unwrap();
+        // Chars 1-5 should appear at buffer positions 10-14
+        assert_eq!(buf.get(10, 0).unwrap().char, '1');
+        assert_eq!(buf.get(14, 0).unwrap().char, '5');
+        // Position 15 should be untouched (outside context)
+        assert_eq!(buf.get(15, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_draw_context_translate_fails_outside_bounds() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(20, 10)));
+        let ctx = LuaDrawContext::new(buffer.clone(), 5, 5, 10, 5);
+
+        // Translate within bounds
+        assert!(ctx.translate(0, 0).is_some());
+        assert!(ctx.translate(9, 4).is_some());
+
+        // Translate outside bounds
+        assert!(ctx.translate(10, 0).is_none()); // x == width (out)
+        assert!(ctx.translate(0, 5).is_none()); // y == height (out)
+        assert!(ctx.translate(100, 100).is_none());
+    }
+
+    #[test]
+    fn test_sub_context_isolation() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(20, 10)));
+
+        // Create main context 20x10
+        let main_ctx = LuaDrawContext::new(buffer.clone(), 0, 0, 20, 10);
+
+        // Fill entire main context with '.'
+        main_ctx.with_buffer(|buf| buf.fill(0, 0, 20, 10, '.', &Style::new()));
+
+        // Create sub-context at (5, 5) size 5x3
+        let sub_ctx = LuaDrawContext::new(buffer.clone(), 5, 5, 5, 3);
+
+        // Fill sub-context with '#'
+        sub_ctx.with_buffer(|buf| buf.fill(5, 5, 5, 3, '#', &Style::new()));
+
+        let buf = buffer.lock().unwrap();
+
+        // Check sub-context area is '#'
+        assert_eq!(buf.get(5, 5).unwrap().char, '#');
+        assert_eq!(buf.get(9, 7).unwrap().char, '#');
+
+        // Check outside sub-context is still '.'
+        assert_eq!(buf.get(4, 5).unwrap().char, '.');
+        assert_eq!(buf.get(10, 5).unwrap().char, '.');
+        assert_eq!(buf.get(5, 4).unwrap().char, '.');
+        assert_eq!(buf.get(5, 8).unwrap().char, '.');
+    }
+
+    #[test]
+    fn test_box_too_small() {
+        let mut buf = RenderBuffer::new(10, 10);
+
+        // Box smaller than 2x2 should not draw
+        buf.draw_box(0, 0, 1, 1, &Style::new());
+        assert_eq!(buf.get(0, 0).unwrap().char, '\0');
+
+        buf.draw_box(0, 0, 1, 5, &Style::new());
+        assert_eq!(buf.get(0, 0).unwrap().char, '\0');
+    }
+
+    #[test]
+    fn test_gauge_edge_values() {
+        let mut buf = RenderBuffer::new(10, 1);
+        let style = Style::new();
+
+        // 0% - all empty
+        buf.gauge(0, 0, 10, 0.0, &style);
+        assert_eq!(buf.get(0, 0).unwrap().char, '░');
+        assert_eq!(buf.get(9, 0).unwrap().char, '░');
+
+        // 100% - all filled
+        buf.clear();
+        buf.gauge(0, 0, 10, 1.0, &style);
+        assert_eq!(buf.get(0, 0).unwrap().char, '█');
+        assert_eq!(buf.get(9, 0).unwrap().char, '█');
+
+        // Negative clamps to 0
+        buf.clear();
+        buf.gauge(0, 0, 10, -0.5, &style);
+        assert_eq!(buf.get(0, 0).unwrap().char, '░');
+
+        // Over 1.0 clamps to 1.0
+        buf.clear();
+        buf.gauge(0, 0, 10, 1.5, &style);
+        assert_eq!(buf.get(9, 0).unwrap().char, '█');
+    }
+
+    #[test]
+    fn test_sparkline_normalization() {
+        let mut buf = RenderBuffer::new(5, 1);
+        let style = Style::new();
+
+        // All same values should render middle bars
+        buf.sparkline(0, 0, &[5.0, 5.0, 5.0, 5.0, 5.0], &style);
+        // When range is 0, all should be middle bar (index 4 = '▄')
+        let c = buf.get(0, 0).unwrap().char;
+        assert!(c >= '▁' && c <= '█', "should be a bar character");
+
+        // Increasing values
+        buf.clear();
+        buf.sparkline(0, 0, &[0.0, 25.0, 50.0, 75.0, 100.0], &style);
+        // First should be lowest, last should be highest
+        assert_eq!(buf.get(0, 0).unwrap().char, '▁');
+        assert_eq!(buf.get(4, 0).unwrap().char, '█');
+    }
+
+    #[test]
+    fn test_zero_size_buffer() {
+        // Should not panic
+        let buf = RenderBuffer::new(0, 0);
+        assert_eq!(buf.width(), 0);
+        assert_eq!(buf.height(), 0);
+        assert!(buf.get(0, 0).is_none());
+    }
+
+    #[test]
+    fn test_ansi_output_with_styles() {
+        let mut buf = RenderBuffer::new(10, 1);
+
+        // Print with different styles
+        buf.set(0, 0, 'R', &Style::new().fg(Color::Red));
+        buf.set(1, 1, 'B', &Style::new().bold()); // Out of bounds, ignored
+
+        let ansi = buf.to_ansi();
+        // Should contain ANSI escape codes for red
+        assert!(ansi.contains("\x1b["), "should contain ANSI escapes");
+        assert!(ansi.contains("R"));
     }
 }

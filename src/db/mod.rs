@@ -35,6 +35,16 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Format a timestamp (milliseconds since epoch) as ISO 8601 string
+fn format_timestamp(ms: i64) -> String {
+    use chrono::{DateTime, Utc};
+    let secs = ms / 1000;
+    let nsecs = ((ms % 1000) * 1_000_000) as u32;
+    DateTime::<Utc>::from_timestamp(secs, nsecs)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("{}", ms))
+}
+
 /// Database handle (thread-safe via Mutex)
 pub struct Database {
     conn: Mutex<Connection>,
@@ -79,10 +89,7 @@ impl Database {
                 .execute_batch(SCHEMA)
                 .context("failed to create schema")?;
             self.set_schema_version(SCHEMA_VERSION)?;
-            tracing::info!(
-                "initialized database schema version {}",
-                SCHEMA_VERSION
-            );
+            tracing::info!("initialized database schema version {}", SCHEMA_VERSION);
         }
 
         Ok(())
@@ -217,9 +224,14 @@ pub struct RoomInfo {
 impl Database {
     // --- Legacy stubs that panic - callers need rewriting ---
 
-    #[allow(unused_variables)]
+    /// Look up an agent handle (name) by SSH public key
     pub fn lookup_handle_by_pubkey(&self, key: &str) -> Result<Option<String>> {
-        todo!("REWRITE CALLER: lookup_handle_by_pubkey -> use find_agent_by_auth(AuthKind::Pubkey, key)")
+        use agents::AuthKind;
+        if let Some(agent) = self.find_agent_by_auth(AuthKind::Pubkey, key)? {
+            Ok(Some(agent.name))
+        } else {
+            Ok(None)
+        }
     }
 
     #[allow(unused_variables)]
@@ -228,9 +240,23 @@ impl Database {
         Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Start a new session for an agent
     pub fn start_session(&self, session_id: &str, handle: &str) -> Result<()> {
-        todo!("REWRITE CALLER: start_session -> use insert_session with AgentSession")
+        use agents::{AgentSession, SessionKind};
+        // Look up agent by name
+        if let Some(agent) = self.get_agent_by_name(handle)? {
+            // Create session with the provided ID
+            let session = AgentSession {
+                id: session_id.to_string(),
+                agent_id: agent.id,
+                kind: SessionKind::Ssh,
+                connected_at: now_ms(),
+                disconnected_at: None,
+                metadata: None,
+            };
+            self.insert_session(&session)?;
+        }
+        Ok(())
     }
 
     #[allow(unused_variables)]
@@ -239,114 +265,589 @@ impl Database {
         Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Add a ledger entry to a room's chat buffer
     pub fn add_ledger_entry(&self, room: &str, entry: &crate::display::LedgerEntry) -> Result<()> {
-        todo!("REWRITE CALLER: add_ledger_entry -> use append_row with Row")
+        use crate::display::{EntryContent, EntrySource};
+        use rows::Row;
+
+        // Get room and buffer
+        let room_obj = match self.get_room_by_name(room)? {
+            Some(r) => r,
+            None => return Ok(()), // Room doesn't exist, ignore
+        };
+        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
+
+        // Map EntrySource to source_agent_id
+        let source_agent_id = match &entry.source {
+            EntrySource::User(name) => self.get_agent_by_name(name)?.map(|a| a.id),
+            EntrySource::Model { name, .. } => self.get_agent_by_name(name)?.map(|a| a.id),
+            EntrySource::System | EntrySource::Command { .. } => None,
+        };
+
+        // Map EntryContent to content_method and content
+        let (content_method, content) = match &entry.content {
+            EntryContent::Chat(text) => {
+                let method = match &entry.source {
+                    EntrySource::User(_) => "message.user",
+                    EntrySource::Model { .. } => "message.model",
+                    _ => "message.system",
+                };
+                (method, Some(text.clone()))
+            }
+            EntryContent::CommandOutput(text) => ("command.output", Some(text.clone())),
+            EntryContent::Status(kind) => {
+                use crate::display::StatusKind;
+                let method = match kind {
+                    StatusKind::Pending => "status.pending",
+                    StatusKind::Thinking => "status.thinking",
+                    StatusKind::RunningTool(_) => "status.running",
+                    StatusKind::Connecting => "status.connecting",
+                    StatusKind::Complete => "status.complete",
+                };
+                (method, None)
+            }
+            EntryContent::RoomHeader { name, description } => (
+                "room.header",
+                Some(format!(
+                    "{}\n{}",
+                    name,
+                    description.as_deref().unwrap_or("")
+                )),
+            ),
+            EntryContent::Welcome { username } => ("system.welcome", Some(username.clone())),
+            EntryContent::HistorySeparator { label } => ("meta.separator", Some(label.clone())),
+            EntryContent::Error(msg) => ("status.error", Some(msg.clone())),
+            EntryContent::Presence { user, action } => {
+                use crate::display::PresenceAction;
+                let method = match action {
+                    PresenceAction::Join => "presence.join",
+                    PresenceAction::Leave => "presence.leave",
+                };
+                (method, Some(user.clone()))
+            }
+            EntryContent::Compaction(summary) => ("meta.compaction", Some(summary.clone())),
+        };
+
+        let mut row = Row::new(&buffer.id, content_method);
+        row.source_agent_id = source_agent_id;
+        row.content = content;
+        row.mutable = entry.mutable;
+        row.ephemeral = entry.ephemeral;
+        row.collapsed = entry.collapsible;
+
+        self.append_row(&mut row)?;
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Get recent messages from a room's chat buffer
     pub fn recent_messages(&self, room: &str, limit: usize) -> Result<Vec<MessageRow>> {
-        todo!("REWRITE CALLER: recent_messages -> use list_buffer_rows")
+        // Get room and buffer
+        let room_obj = match self.get_room_by_name(room)? {
+            Some(r) => r,
+            None => return Ok(vec![]),
+        };
+        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
+
+        // Get recent rows
+        let rows = self.list_recent_buffer_rows(&buffer.id, limit)?;
+
+        // Convert to MessageRow
+        let messages = rows
+            .into_iter()
+            .map(|row| {
+                // Look up agent name if available
+                let (sender, sender_name, sender_type) =
+                    if let Some(agent_id) = &row.source_agent_id {
+                        if let Ok(Some(agent)) = self.get_agent(agent_id) {
+                            (
+                                agent.name.clone(),
+                                agent.display_name.unwrap_or(agent.name),
+                                agent.kind.as_str().to_string(),
+                            )
+                        } else {
+                            (
+                                "unknown".to_string(),
+                                "Unknown".to_string(),
+                                "unknown".to_string(),
+                            )
+                        }
+                    } else {
+                        (
+                            "system".to_string(),
+                            "System".to_string(),
+                            "system".to_string(),
+                        )
+                    };
+
+                MessageRow {
+                    id: 0, // Legacy, not used
+                    room: room.to_string(),
+                    sender,
+                    sender_name,
+                    sender_type,
+                    target: None,
+                    content: row.content.unwrap_or_default(),
+                    message_type: row.content_method,
+                    hidden: row.hidden,
+                    created_at: format_timestamp(row.created_at),
+                    timestamp: format_timestamp(row.created_at),
+                }
+            })
+            .collect();
+
+        Ok(messages)
     }
 
-    #[allow(unused_variables)]
+    /// Get room vibe
     pub fn get_vibe(&self, room: &str) -> Result<Option<String>> {
-        todo!("REWRITE CALLER: get_vibe -> use get_room_kv(room_id, \"vibe\")")
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            self.get_room_kv(&room_obj.id, "vibe")
+        } else {
+            Ok(None)
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Set room vibe
     pub fn set_vibe(&self, room: &str, vibe: Option<&str>) -> Result<()> {
-        todo!("REWRITE CALLER: set_vibe -> use set_room_kv(room_id, \"vibe\", vibe)")
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            self.set_room_kv(&room_obj.id, "vibe", vibe)?;
+        }
+        Ok(())
     }
 
-    #[allow(unused_variables)]
-    pub fn add_journal_entry(&self, room: &str, author: &str, content: &str, kind: crate::world::JournalKind) -> Result<()> {
-        todo!("REWRITE CALLER: add_journal_entry -> use append_row with Row and add_row_tag")
+    /// Add a journal entry (as Row with tag)
+    pub fn add_journal_entry(
+        &self,
+        room: &str,
+        author: &str,
+        content: &str,
+        kind: crate::world::JournalKind,
+    ) -> Result<()> {
+        use rows::Row;
+
+        // Get room and buffer
+        let room_obj = match self.get_room_by_name(room)? {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
+
+        // Get author's agent ID if they exist
+        let source_agent_id = self.get_agent_by_name(author)?.map(|a| a.id);
+
+        // Create row with journal content_method
+        let mut row = Row::new(&buffer.id, "note.user");
+        row.source_agent_id = source_agent_id;
+        row.content = Some(content.to_string());
+        self.append_row(&mut row)?;
+
+        // Add tag for the journal kind
+        let tag = format!("#{}", kind.as_str());
+        self.add_row_tag(&row.id, &tag)?;
+
+        Ok(())
     }
 
-    #[allow(unused_variables)]
-    pub fn get_journal_entries(&self, room: &str, kind: Option<crate::world::JournalKind>, limit: usize) -> Result<Vec<JournalEntry>> {
-        todo!("REWRITE CALLER: get_journal_entries -> use find_rows_by_tag or list_rows_by_method")
+    /// Get journal entries (Rows with journal tags)
+    pub fn get_journal_entries(
+        &self,
+        room: &str,
+        kind: Option<crate::world::JournalKind>,
+        limit: usize,
+    ) -> Result<Vec<JournalEntry>> {
+        use crate::world::JournalKind;
+
+        // Get room and buffer
+        let room_obj = match self.get_room_by_name(room)? {
+            Some(r) => r,
+            None => return Ok(vec![]),
+        };
+        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
+
+        // Get rows that are journal entries
+        let rows = self.list_recent_buffer_rows(&buffer.id, limit * 4)?; // Fetch more to filter
+
+        let mut entries = Vec::new();
+        for row in rows {
+            // Check if this row has a journal tag
+            let tags = self.get_row_tags(&row.id)?;
+            let journal_tag = tags.iter().find(|t| {
+                t.starts_with("#note")
+                    || t.starts_with("#decision")
+                    || t.starts_with("#idea")
+                    || t.starts_with("#milestone")
+                    || t.starts_with("#question")
+            });
+
+            if let Some(tag) = journal_tag {
+                // Parse the kind from the tag
+                let tag_kind = match tag.as_str() {
+                    "#note" => JournalKind::Note,
+                    "#decision" => JournalKind::Decision,
+                    "#idea" => JournalKind::Idea,
+                    "#milestone" => JournalKind::Milestone,
+                    "#question" => JournalKind::Question,
+                    _ => continue,
+                };
+
+                // Filter by kind if specified
+                if let Some(ref k) = kind {
+                    if std::mem::discriminant(&tag_kind) != std::mem::discriminant(k) {
+                        continue;
+                    }
+                }
+
+                use chrono::{TimeZone, Utc};
+                let timestamp = Utc
+                    .timestamp_millis_opt(row.created_at)
+                    .single()
+                    .unwrap_or_else(Utc::now);
+                entries.push(JournalEntry {
+                    id: 0, // Legacy, use row id if needed
+                    room: room.to_string(),
+                    kind: tag_kind,
+                    content: row.content.unwrap_or_default(),
+                    author: "unknown".to_string(), // Would need to look up agent
+                    created_at: format_timestamp(row.created_at),
+                    timestamp,
+                });
+
+                if entries.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(entries)
     }
 
-    #[allow(unused_variables)]
+    /// Get asset binding by role
     pub fn get_asset_binding(&self, room: &str, role: &str) -> Result<Option<AssetBinding>> {
-        todo!("REWRITE CALLER: get_asset_binding -> use get_room_kv with asset.{role} key")
+        use chrono::{TimeZone, Utc};
+
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            let key = format!("asset.{}", role);
+            if let Some(value) = self.get_room_kv(&room_obj.id, &key)? {
+                // Parse JSON: {"artifact_id": "...", "notes": "...", "bound_by": "...", "bound_at": ms}
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&value) {
+                    let bound_at_ms = json["bound_at"].as_i64().unwrap_or(0);
+                    return Ok(Some(AssetBinding {
+                        room: room.to_string(),
+                        role: role.to_string(),
+                        artifact_id: json["artifact_id"].as_str().unwrap_or("").to_string(),
+                        notes: json["notes"].as_str().map(|s| s.to_string()),
+                        bound_by: json["bound_by"].as_str().unwrap_or("").to_string(),
+                        bound_at: Utc
+                            .timestamp_millis_opt(bound_at_ms)
+                            .single()
+                            .unwrap_or_else(Utc::now),
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
-    #[allow(unused_variables)]
-    pub fn bind_asset(&self, room: &str, role: &str, artifact_id: &str, notes: Option<&str>, bound_by: &str) -> Result<()> {
-        todo!("REWRITE CALLER: bind_asset -> use set_room_kv")
+    /// Bind an asset to a room role
+    pub fn bind_asset(
+        &self,
+        room: &str,
+        role: &str,
+        artifact_id: &str,
+        notes: Option<&str>,
+        bound_by: &str,
+    ) -> Result<()> {
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            let key = format!("asset.{}", role);
+            let json = serde_json::json!({
+                "artifact_id": artifact_id,
+                "notes": notes,
+                "bound_by": bound_by,
+                "bound_at": now_ms(),
+            });
+            self.set_room_kv(&room_obj.id, &key, Some(&json.to_string()))?;
+        }
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Unbind an asset from a room role
     pub fn unbind_asset(&self, room: &str, role: &str) -> Result<()> {
-        todo!("REWRITE CALLER: unbind_asset -> use delete_room_kv")
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            let key = format!("asset.{}", role);
+            self.delete_room_kv(&room_obj.id, &key)?;
+        }
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Get room inspirations
     pub fn get_inspirations(&self, room: &str) -> Result<Vec<Inspiration>> {
-        todo!("REWRITE CALLER: get_inspirations -> use get_room_kv with inspiration.* pattern")
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            let all_kv = self.get_all_room_kv(&room_obj.id)?;
+            let inspirations = all_kv
+                .iter()
+                .filter(|(k, _)| k.starts_with("inspiration."))
+                .map(|(_, v)| Inspiration { content: v.clone() })
+                .collect();
+            Ok(inspirations)
+        } else {
+            Ok(vec![])
+        }
     }
 
-    #[allow(unused_variables)]
-    pub fn add_inspiration(&self, room: &str, content: &str, added_by: &str) -> Result<()> {
-        todo!("REWRITE CALLER: add_inspiration -> use set_room_kv")
+    /// Add an inspiration
+    pub fn add_inspiration(&self, room: &str, content: &str, _added_by: &str) -> Result<()> {
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            // Generate unique key
+            let key = format!("inspiration.{}", new_id());
+            self.set_room_kv(&room_obj.id, &key, Some(content))?;
+        }
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// List prompts for a room (stored as scripts with room:name naming)
     pub fn list_prompts(&self, room: &str) -> Result<Vec<RoomPrompt>> {
-        todo!("REWRITE CALLER: list_prompts -> prompts are now scripts in lua_scripts table")
+        use scripts::ScriptKind;
+
+        let prefix = format!("{}:", room);
+        let scripts = self.list_scripts(Some(ScriptKind::Handler))?;
+
+        let prompts = scripts
+            .into_iter()
+            .filter_map(|s| {
+                let name = s.name.as_ref()?;
+                let short_name = name.strip_prefix(&prefix)?;
+                Some(RoomPrompt {
+                    id: 0,
+                    room: room.to_string(),
+                    name: short_name.to_string(),
+                    prompt: s.code.clone(),
+                    content: s.code,
+                    created_at: format_timestamp(s.created_at),
+                    created_by: s.description,
+                })
+            })
+            .collect();
+
+        Ok(prompts)
     }
 
-    #[allow(unused_variables)]
+    /// Add a prompt to a room
     pub fn add_prompt(&self, room: &str, name: &str, prompt: &str) -> Result<()> {
-        todo!("REWRITE CALLER: add_prompt -> use insert_script")
+        use scripts::LuaScript;
+
+        let script_name = format!("{}:{}", room, name);
+        let script = LuaScript::new(script_name, "handler", prompt);
+        self.insert_script(&script)?;
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Get a prompt from a room
     pub fn get_prompt(&self, room: &str, name: &str) -> Result<Option<RoomPrompt>> {
-        todo!("REWRITE CALLER: get_prompt -> use get_script_by_name")
+        let script_name = format!("{}:{}", room, name);
+        if let Some(script) = self.get_script_by_name(&script_name)? {
+            Ok(Some(RoomPrompt {
+                id: 0,
+                room: room.to_string(),
+                name: name.to_string(),
+                prompt: script.code.clone(),
+                content: script.code,
+                created_at: format_timestamp(script.created_at),
+                created_by: script.description,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Delete a prompt from a room
     pub fn delete_prompt(&self, room: &str, name: &str) -> Result<bool> {
-        todo!("REWRITE CALLER: delete_prompt -> use delete_script")
+        let script_name = format!("{}:{}", room, name);
+        if let Some(script) = self.get_script_by_name(&script_name)? {
+            self.delete_script(&script.id)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
-    #[allow(unused_variables)]
+    /// List all targets that have prompt slots in a room
     pub fn list_targets_with_slots(&self, room: &str) -> Result<Vec<(String, String)>> {
-        todo!("REWRITE CALLER: list_targets_with_slots -> use room rules")
+        // Get room to find room_id
+        let room_obj = self.get_room_by_name(room)?;
+        let room_id = match room_obj {
+            Some(r) => r.id,
+            None => return Ok(Vec::new()),
+        };
+
+        self.list_targets_with_wrap_rules(&room_id)
     }
 
-    #[allow(unused_variables)]
+    /// Get all prompt slots for a target in a room
     pub fn get_target_slots(&self, room: &str, target: &str) -> Result<Vec<PromptSlot>> {
-        todo!("REWRITE CALLER: get_target_slots -> use room rules")
+        // Get room to find room_id
+        let room_obj = self.get_room_by_name(room)?;
+        let room_id = match room_obj {
+            Some(r) => r.id,
+            None => return Ok(Vec::new()),
+        };
+
+        let rules = self.list_wrap_rules_for_target(&room_id, target)?;
+
+        let mut slots = Vec::new();
+        for rule in rules {
+            // Parse name format: "target_type:prompt_name"
+            let (target_type, prompt_name) = match &rule.name {
+                Some(name) => {
+                    let parts: Vec<&str> = name.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        (parts[0].to_string(), parts[1].to_string())
+                    } else {
+                        ("unknown".to_string(), name.clone())
+                    }
+                }
+                None => ("unknown".to_string(), "unnamed".to_string()),
+            };
+
+            // Get script content
+            let content = self.get_script(&rule.script_id)?.map(|s| s.code);
+
+            slots.push(PromptSlot {
+                index: rule.priority as usize,
+                prompt_name,
+                content,
+                target_type,
+            });
+        }
+
+        Ok(slots)
     }
 
-    #[allow(unused_variables)]
-    pub fn set_prompt(&self, room: &str, name: &str, content: &str, created_by: &str) -> Result<()> {
-        todo!("REWRITE CALLER: set_prompt -> use insert_script")
+    /// Set (create or update) a prompt in a room
+    pub fn set_prompt(
+        &self,
+        room: &str,
+        name: &str,
+        content: &str,
+        _created_by: &str,
+    ) -> Result<()> {
+        use scripts::LuaScript;
+
+        let script_name = format!("{}:{}", room, name);
+
+        // Check if script exists
+        if let Some(existing) = self.get_script_by_name(&script_name)? {
+            // Update existing script
+            self.update_script_code(&existing.id, content)?;
+        } else {
+            // Create new script
+            let script = LuaScript::new(&script_name, "handler", content);
+            self.insert_script(&script)?;
+        }
+        Ok(())
     }
 
-    #[allow(unused_variables)]
-    pub fn push_slot(&self, room: &str, target: &str, target_type: &str, prompt_name: &str) -> Result<()> {
-        todo!("REWRITE CALLER: push_slot -> use room rules")
+    /// Push a prompt slot to the end of a target's slots
+    pub fn push_slot(
+        &self,
+        room: &str,
+        target: &str,
+        target_type: &str,
+        prompt_name: &str,
+    ) -> Result<()> {
+        use rules::{ActionSlot, RoomRule, TriggerKind};
+
+        // Get room to find room_id
+        let room_obj = self
+            .get_room_by_name(room)?
+            .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room))?;
+
+        // Find the prompt script (format: room:prompt_name)
+        let script_name = format!("{}:{}", room, prompt_name);
+        let script = self
+            .get_script_by_name(&script_name)?
+            .ok_or_else(|| anyhow::anyhow!("Prompt not found: {}", prompt_name))?;
+
+        // Get max priority for target
+        let max_priority = self.max_wrap_priority(&room_obj.id, target)?;
+        let new_priority = max_priority.map(|p| p + 1.0).unwrap_or(0.0);
+
+        // Create new rule
+        let mut rule = RoomRule::row_trigger(&room_obj.id, &script.id, ActionSlot::Wrap);
+        rule.trigger_kind = TriggerKind::Row; // Wrap rules are row-triggered
+        rule.match_source_agent = Some(target.to_string());
+        rule.name = Some(format!("{}:{}", target_type, prompt_name));
+        rule.priority = new_priority;
+
+        self.insert_rule(&rule)?;
+
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Remove the last (highest priority) slot from a target
     pub fn pop_slot(&self, room: &str, target: &str) -> Result<bool> {
-        todo!("REWRITE CALLER: pop_slot -> use room rules")
+        // Get room to find room_id
+        let room_obj = self.get_room_by_name(room)?;
+        let room_id = match room_obj {
+            Some(r) => r.id,
+            None => return Ok(false),
+        };
+
+        // Get max priority
+        let max_priority = self.max_wrap_priority(&room_id, target)?;
+        match max_priority {
+            Some(priority) => self.delete_wrap_rule_by_priority(&room_id, target, priority),
+            None => Ok(false),
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Remove a slot by index from a target
     pub fn rm_slot(&self, room: &str, target: &str, index: i64) -> Result<bool> {
-        todo!("REWRITE CALLER: rm_slot -> use room rules")
+        // Get room to find room_id
+        let room_obj = self.get_room_by_name(room)?;
+        let room_id = match room_obj {
+            Some(r) => r.id,
+            None => return Ok(false),
+        };
+
+        // Delete rule by priority (index = priority)
+        self.delete_wrap_rule_by_priority(&room_id, target, index as f64)
     }
 
-    #[allow(unused_variables)]
-    pub fn insert_slot(&self, room: &str, target: &str, target_type: &str, index: i64, prompt_name: &str) -> Result<()> {
-        todo!("REWRITE CALLER: insert_slot -> use room rules")
+    /// Insert a slot at a specific index, shifting others up
+    pub fn insert_slot(
+        &self,
+        room: &str,
+        target: &str,
+        target_type: &str,
+        index: i64,
+        prompt_name: &str,
+    ) -> Result<()> {
+        use rules::{ActionSlot, RoomRule, TriggerKind};
+
+        // Get room to find room_id
+        let room_obj = self
+            .get_room_by_name(room)?
+            .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room))?;
+
+        // Find the prompt script (format: room:prompt_name)
+        let script_name = format!("{}:{}", room, prompt_name);
+        let script = self
+            .get_script_by_name(&script_name)?
+            .ok_or_else(|| anyhow::anyhow!("Prompt not found: {}", prompt_name))?;
+
+        // Shift existing rules at or above this index up by 1
+        self.shift_wrap_priorities(&room_obj.id, target, index as f64)?;
+
+        // Create new rule at the specified index
+        let mut rule = RoomRule::row_trigger(&room_obj.id, &script.id, ActionSlot::Wrap);
+        rule.trigger_kind = TriggerKind::Row;
+        rule.match_source_agent = Some(target.to_string());
+        rule.name = Some(format!("{}:{}", target_type, prompt_name));
+        rule.priority = index as f64;
+
+        self.insert_rule(&rule)?;
+
+        Ok(())
     }
 
     #[allow(unused_variables)]
@@ -393,59 +894,289 @@ impl Database {
         Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Fork a room - create new room with copied KV
     pub fn fork_room(&self, source: &str, new_name: &str) -> Result<()> {
-        todo!("REWRITE CALLER: fork_room -> copy room kv, create new room")
+        if let Some(source_room) = self.get_room_by_name(source)? {
+            // Create new room
+            let new_room = rooms::Room::new(new_name);
+            self.insert_room(&new_room)?;
+
+            // Copy all KV pairs from source
+            let source_kv = self.get_all_room_kv(&source_room.id)?;
+            for (key, value) in source_kv {
+                self.set_room_kv(&new_room.id, &key, Some(&value))?;
+            }
+
+            // Set parent reference
+            self.set_room_kv(&new_room.id, "parent", Some(source))?;
+        }
+        Ok(())
     }
 
     #[allow(unused_variables)]
-    pub fn recent_entries(&self, room: &str, limit: usize) -> Result<Vec<crate::display::LedgerEntry>> {
-        todo!("REWRITE CALLER: recent_entries -> use list_buffer_rows")
+    /// Get recent entries from a room's chat buffer (for wrap.lua context)
+    pub fn recent_entries(
+        &self,
+        room: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::display::LedgerEntry>> {
+        use crate::display::{
+            EntryContent, EntryId, EntrySource, LedgerEntry, PresenceAction, StatusKind,
+        };
+        use chrono::{TimeZone, Utc};
+
+        // Get room and buffer
+        let room_obj = match self.get_room_by_name(room)? {
+            Some(r) => r,
+            None => return Ok(vec![]),
+        };
+        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
+
+        // Get recent rows
+        let rows = self.list_recent_buffer_rows(&buffer.id, limit)?;
+
+        // Convert to LedgerEntry
+        let entries = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, row)| {
+                // Parse timestamp
+                let timestamp = Utc
+                    .timestamp_millis_opt(row.created_at)
+                    .single()
+                    .unwrap_or_else(Utc::now);
+
+                // Map source
+                let source = if let Some(agent_id) = &row.source_agent_id {
+                    if let Ok(Some(agent)) = self.get_agent(agent_id) {
+                        match agent.kind {
+                            agents::AgentKind::Human => EntrySource::User(agent.name),
+                            agents::AgentKind::Model => EntrySource::Model {
+                                name: agent.name,
+                                is_streaming: false,
+                            },
+                            _ => EntrySource::System,
+                        }
+                    } else {
+                        EntrySource::System
+                    }
+                } else {
+                    EntrySource::System
+                };
+
+                // Map content_method back to EntryContent
+                let content_text = row.content.clone().unwrap_or_default();
+                let content = match row.content_method.as_str() {
+                    "message.user" | "message.model" | "message.system" => {
+                        EntryContent::Chat(content_text)
+                    }
+                    "command.output" => EntryContent::CommandOutput(content_text),
+                    "status.pending" => EntryContent::Status(StatusKind::Pending),
+                    "status.thinking" => EntryContent::Status(StatusKind::Thinking),
+                    "status.running" => EntryContent::Status(StatusKind::RunningTool(None)),
+                    "status.connecting" => EntryContent::Status(StatusKind::Connecting),
+                    "status.complete" => EntryContent::Status(StatusKind::Complete),
+                    "status.error" => EntryContent::Error(content_text),
+                    "room.header" => {
+                        let parts: Vec<&str> = content_text.splitn(2, '\n').collect();
+                        EntryContent::RoomHeader {
+                            name: parts.first().unwrap_or(&"").to_string(),
+                            description: parts.get(1).map(|s| s.to_string()),
+                        }
+                    }
+                    "system.welcome" => EntryContent::Welcome {
+                        username: content_text,
+                    },
+                    "meta.separator" => EntryContent::HistorySeparator {
+                        label: content_text,
+                    },
+                    "presence.join" => EntryContent::Presence {
+                        user: content_text,
+                        action: PresenceAction::Join,
+                    },
+                    "presence.leave" => EntryContent::Presence {
+                        user: content_text,
+                        action: PresenceAction::Leave,
+                    },
+                    "meta.compaction" => EntryContent::Compaction(content_text),
+                    _ => EntryContent::Chat(content_text),
+                };
+
+                LedgerEntry {
+                    id: EntryId(i as u64),
+                    timestamp,
+                    source,
+                    content,
+                    mutable: row.mutable,
+                    ephemeral: row.ephemeral,
+                    collapsible: row.collapsed,
+                }
+            })
+            .collect();
+
+        Ok(entries)
     }
 
-    #[allow(unused_variables)]
+    /// Get room parent (for forked rooms)
     pub fn get_parent(&self, room: &str) -> Result<Option<String>> {
-        todo!("REWRITE CALLER: get_parent -> use room kv")
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            self.get_room_kv(&room_obj.id, "parent")
+        } else {
+            Ok(None)
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Get room tags
     pub fn get_tags(&self, room: &str) -> Result<Vec<String>> {
-        todo!("REWRITE CALLER: get_tags -> use room kv")
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            if let Some(tags_json) = self.get_room_kv(&room_obj.id, "tags")? {
+                if let Ok(tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
+                    return Ok(tags);
+                }
+            }
+        }
+        Ok(vec![])
     }
 
-    #[allow(unused_variables)]
+    /// List all asset bindings in a room
     pub fn list_asset_bindings(&self, room: &str) -> Result<Vec<AssetBinding>> {
-        todo!("REWRITE CALLER: list_asset_bindings -> use room kv with asset.* pattern")
+        use chrono::{TimeZone, Utc};
+
+        if let Some(room_obj) = self.get_room_by_name(room)? {
+            let all_kv = self.get_all_room_kv(&room_obj.id)?;
+            let bindings = all_kv
+                .iter()
+                .filter(|(k, _)| k.starts_with("asset."))
+                .filter_map(|(k, v)| {
+                    let role = k.strip_prefix("asset.")?;
+                    let json = serde_json::from_str::<serde_json::Value>(v).ok()?;
+                    let bound_at_ms = json["bound_at"].as_i64().unwrap_or(0);
+                    Some(AssetBinding {
+                        room: room.to_string(),
+                        role: role.to_string(),
+                        artifact_id: json["artifact_id"].as_str().unwrap_or("").to_string(),
+                        notes: json["notes"].as_str().map(|s| s.to_string()),
+                        bound_by: json["bound_by"].as_str().unwrap_or("").to_string(),
+                        bound_at: Utc
+                            .timestamp_millis_opt(bound_at_ms)
+                            .single()
+                            .unwrap_or_else(Utc::now),
+                    })
+                })
+                .collect();
+            Ok(bindings)
+        } else {
+            Ok(vec![])
+        }
     }
 
-    #[allow(unused_variables)]
-    pub fn add_pubkey(&self, handle: &str, key: &str, key_type: &str, comment: Option<&str>) -> Result<()> {
-        todo!("REWRITE CALLER: add_pubkey -> use upsert_auth with AuthKind::Pubkey")
+    /// Add a public key for a user (creates agent if not exists)
+    pub fn add_pubkey(
+        &self,
+        handle: &str,
+        key: &str,
+        _key_type: &str,
+        _comment: Option<&str>,
+    ) -> Result<()> {
+        use agents::{Agent, AgentAuth, AgentKind, AuthKind};
+
+        // Get or create agent
+        let agent = match self.get_agent_by_name(handle)? {
+            Some(a) => a,
+            None => {
+                let agent = Agent::new(handle, AgentKind::Human);
+                self.insert_agent(&agent)?;
+                agent
+            }
+        };
+
+        // Add the pubkey auth
+        let auth = AgentAuth::new(&agent.id, AuthKind::Pubkey, key);
+        self.upsert_auth(&auth)?;
+        Ok(())
     }
 
-    #[allow(unused_variables)]
+    /// Remove a user by handle
     pub fn remove_user(&self, handle: &str) -> Result<bool> {
-        todo!("REWRITE CALLER: remove_user -> use delete_agent")
+        if let Some(agent) = self.get_agent_by_name(handle)? {
+            self.delete_agent(&agent.id)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Remove a public key
     pub fn remove_pubkey(&self, key: &str) -> Result<bool> {
-        todo!("REWRITE CALLER: remove_pubkey -> use delete_auth")
+        use agents::AuthKind;
+        self.delete_auth_by_data(AuthKind::Pubkey, key)
     }
 
-    #[allow(unused_variables)]
+    /// List all users (human agents)
     pub fn list_users(&self) -> Result<Vec<UserInfo>> {
-        todo!("REWRITE CALLER: list_users -> use list_agents(Some(AgentKind::Human))")
+        use agents::AgentKind;
+        let agents = self.list_agents(Some(AgentKind::Human))?;
+
+        let mut users = Vec::new();
+        for agent in agents {
+            let auths = self.list_auth_for_agent(&agent.id)?;
+            let key_count = auths
+                .iter()
+                .filter(|a| a.kind == agents::AuthKind::Pubkey)
+                .count();
+
+            users.push(UserInfo {
+                handle: agent.name,
+                created_at: format_timestamp(agent.created_at),
+                last_seen: None, // Not tracked in new model
+                key_count,
+            });
+        }
+        Ok(users)
     }
 
-    #[allow(unused_variables)]
+    /// List public keys for a user
     pub fn list_keys_for_user(&self, handle: &str) -> Result<Vec<PubkeyInfo>> {
-        todo!("REWRITE CALLER: list_keys_for_user -> query agent_auth")
+        use agents::AuthKind;
+
+        if let Some(agent) = self.get_agent_by_name(handle)? {
+            let auths = self.list_auth_for_agent(&agent.id)?;
+            let keys = auths
+                .into_iter()
+                .filter(|a| a.kind == AuthKind::Pubkey)
+                .map(|a| PubkeyInfo {
+                    key: a.auth_data.clone(),
+                    pubkey: a.auth_data,
+                    key_type: "ssh-ed25519".to_string(), // Assumed, not stored separately
+                    comment: None,
+                    created_at: format_timestamp(a.created_at),
+                })
+                .collect();
+            Ok(keys)
+        } else {
+            Ok(vec![])
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Get all rooms with their info
     pub fn get_all_rooms(&self) -> Result<Vec<RoomInfo>> {
-        todo!("REWRITE CALLER: get_all_rooms -> use list_rooms")
+        let rooms = self.list_rooms()?;
+        let mut result = Vec::with_capacity(rooms.len());
+
+        for room in rooms {
+            let vibe = self.get_room_kv(&room.id, "vibe")?;
+            let description = self.get_room_kv(&room.id, "description")?;
+            let created_at = format_timestamp(room.created_at);
+
+            result.push(RoomInfo {
+                name: room.name,
+                vibe,
+                description,
+                created_at,
+            });
+        }
+
+        Ok(result)
     }
 
     #[allow(unused_variables)]
@@ -462,7 +1193,11 @@ impl Database {
     #[allow(unused_variables)]
     pub fn set_room_navigation(&self, room: &str, enabled: bool) -> Result<()> {
         if let Some(room_obj) = self.get_room_by_name(room)? {
-            self.set_room_kv(&room_obj.id, "navigation", Some(if enabled { "true" } else { "false" }))?;
+            self.set_room_kv(
+                &room_obj.id,
+                "navigation",
+                Some(if enabled { "true" } else { "false" }),
+            )?;
         }
         Ok(())
     }

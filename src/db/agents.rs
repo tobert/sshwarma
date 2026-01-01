@@ -594,6 +594,49 @@ impl Database {
         .context("failed to delete auth")?;
         Ok(())
     }
+
+    /// Delete auth by auth_data value (e.g., pubkey fingerprint)
+    /// Returns true if a row was deleted
+    pub fn delete_auth_by_data(&self, kind: AuthKind, auth_data: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let rows = conn
+            .execute(
+                "DELETE FROM agent_auth WHERE auth_kind = ?1 AND auth_data = ?2",
+                params![kind.as_str(), auth_data],
+            )
+            .context("failed to delete auth by data")?;
+        Ok(rows > 0)
+    }
+
+    /// List all auth credentials for an agent
+    pub fn list_auth_for_agent(&self, agent_id: &str) -> Result<Vec<AgentAuth>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT agent_id, auth_kind, auth_data, created_at
+            FROM agent_auth WHERE agent_id = ?1
+            ORDER BY created_at
+            "#,
+            )
+            .context("failed to prepare auth list query")?;
+
+        let auths = stmt
+            .query(params![agent_id])?
+            .mapped(|row| {
+                let kind_str: String = row.get(1)?;
+                Ok(AgentAuth {
+                    agent_id: row.get(0)?,
+                    kind: AuthKind::parse(&kind_str).unwrap_or(AuthKind::Local),
+                    auth_data: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to list auth")?;
+
+        Ok(auths)
+    }
 }
 
 #[cfg(test)]

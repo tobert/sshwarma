@@ -294,6 +294,39 @@ impl Database {
         Ok(rows)
     }
 
+    /// List recent top-level rows in a buffer, ordered by position (most recent last)
+    pub fn list_recent_buffer_rows(&self, buffer_id: &str, limit: usize) -> Result<Vec<Row>> {
+        let conn = self.conn()?;
+        // Get the last N rows by position (subquery to reverse order)
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT id, buffer_id, parent_row_id, position,
+                   source_agent_id, source_session_id,
+                   content_method, content_format, content_meta, content,
+                   collapsed, ephemeral, mutable, pinned, hidden,
+                   token_count, cost_usd, latency_ms,
+                   created_at, updated_at, finalized_at
+            FROM (
+                SELECT * FROM rows
+                WHERE buffer_id = ?1 AND parent_row_id IS NULL
+                ORDER BY position DESC
+                LIMIT ?2
+            )
+            ORDER BY position
+            "#,
+            )
+            .context("failed to prepare recent rows query")?;
+
+        let rows = stmt
+            .query(params![buffer_id, limit as i64])?
+            .mapped(Self::row_from_sqlite)
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to list recent rows")?;
+
+        Ok(rows)
+    }
+
     /// List child rows of a parent, ordered by position
     pub fn list_child_rows(&self, parent_row_id: &str) -> Result<Vec<Row>> {
         let conn = self.conn()?;

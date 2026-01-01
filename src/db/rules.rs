@@ -265,6 +265,134 @@ impl Database {
         Ok(rules)
     }
 
+    /// List wrap rules for a specific target agent in a room
+    pub fn list_wrap_rules_for_target(
+        &self,
+        room_id: &str,
+        target_agent: &str,
+    ) -> Result<Vec<RoomRule>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT id, room_id, name, enabled, priority,
+                   trigger_kind, match_content_method, match_source_agent, match_tag, match_buffer_type,
+                   interval_ms, tick_divisor, script_id, action_slot, created_at
+            FROM room_rules
+            WHERE room_id = ?1 AND enabled = 1 AND action_slot = 'wrap' AND match_source_agent = ?2
+            ORDER BY priority
+            "#,
+            )
+            .context("failed to prepare wrap rules query")?;
+
+        let rules = stmt
+            .query(params![room_id, target_agent])?
+            .mapped(Self::rule_from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to list wrap rules")?;
+
+        Ok(rules)
+    }
+
+    /// List all unique targets with wrap rules in a room
+    pub fn list_targets_with_wrap_rules(&self, room_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT DISTINCT match_source_agent, name
+            FROM room_rules
+            WHERE room_id = ?1 AND enabled = 1 AND action_slot = 'wrap' AND match_source_agent IS NOT NULL
+            ORDER BY match_source_agent
+            "#,
+            )
+            .context("failed to prepare targets query")?;
+
+        let mut results = Vec::new();
+        let mut rows = stmt.query(params![room_id])?;
+        let mut seen = std::collections::HashSet::new();
+
+        while let Some(row) = rows.next()? {
+            let target: String = row.get(0)?;
+            let name: Option<String> = row.get(1)?;
+
+            if seen.contains(&target) {
+                continue;
+            }
+            seen.insert(target.clone());
+
+            // Extract target_type from name (format: "target_type:prompt_name")
+            let target_type = name
+                .as_ref()
+                .and_then(|n| n.split(':').next())
+                .unwrap_or("unknown")
+                .to_string();
+
+            results.push((target, target_type));
+        }
+
+        Ok(results)
+    }
+
+    /// Get the highest priority value for a target's wrap rules
+    pub fn max_wrap_priority(&self, room_id: &str, target_agent: &str) -> Result<Option<f64>> {
+        let conn = self.conn()?;
+        let priority: Option<f64> = conn
+            .query_row(
+                r#"
+            SELECT MAX(priority)
+            FROM room_rules
+            WHERE room_id = ?1 AND action_slot = 'wrap' AND match_source_agent = ?2
+            "#,
+                params![room_id, target_agent],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to get max priority")?
+            .flatten();
+
+        Ok(priority)
+    }
+
+    /// Shift priorities up for rules at or above a given priority
+    pub fn shift_wrap_priorities(
+        &self,
+        room_id: &str,
+        target_agent: &str,
+        from_priority: f64,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            r#"
+            UPDATE room_rules
+            SET priority = priority + 1
+            WHERE room_id = ?1 AND action_slot = 'wrap' AND match_source_agent = ?2 AND priority >= ?3
+            "#,
+            params![room_id, target_agent, from_priority],
+        )
+        .context("failed to shift priorities")?;
+        Ok(())
+    }
+
+    /// Delete wrap rule by priority (index)
+    pub fn delete_wrap_rule_by_priority(
+        &self,
+        room_id: &str,
+        target_agent: &str,
+        priority: f64,
+    ) -> Result<bool> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            r#"
+            DELETE FROM room_rules
+            WHERE room_id = ?1 AND action_slot = 'wrap' AND match_source_agent = ?2 AND priority = ?3
+            "#,
+            params![room_id, target_agent, priority],
+        )
+        .context("failed to delete wrap rule")?;
+        Ok(affected > 0)
+    }
+
     /// List rules by trigger kind
     pub fn list_rules_by_trigger(&self, room_id: &str, kind: TriggerKind) -> Result<Vec<RoomRule>> {
         let conn = self.conn()?;
