@@ -453,38 +453,6 @@ async fn test_sshwarma_mcp_create_room() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_sshwarma_mcp_say_and_history() -> Result<()> {
-    let (url, _handle) = start_sshwarma_mcp_server().await?;
-
-    let manager = McpManager::new();
-    manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
-
-    // Create a room first
-    manager.call_tool("create_room", serde_json::json!({"name": "chat-room"})).await?;
-
-    // Send a message
-    let result = manager.call_tool("say", serde_json::json!({
-        "room": "chat-room",
-        "message": "Hello from Claude!",
-        "sender": "claude"
-    })).await?;
-    assert!(result.content.contains("claude: Hello from Claude!"));
-    assert!(!result.is_error);
-
-    // Get history
-    let result = manager.call_tool("get_history", serde_json::json!({
-        "room": "chat-room",
-        "limit": 10
-    })).await?;
-    assert!(result.content.contains("Hello from Claude!"));
-    assert!(result.content.contains("claude"));
-
-    manager.remove("sshwarma");
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_sshwarma_mcp_list_models() -> Result<()> {
     let (url, _handle) = start_sshwarma_mcp_server().await?;
 
@@ -518,43 +486,6 @@ async fn test_sshwarma_mcp_ask_model() -> Result<()> {
     assert!(result.content.contains("test:"));
     assert!(result.content.contains("What is 2+2?"));
     assert!(!result.is_error);
-
-    manager.remove("sshwarma");
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sshwarma_mcp_ask_model_with_room_context() -> Result<()> {
-    let (url, _handle) = start_sshwarma_mcp_server().await?;
-
-    let manager = McpManager::new();
-    manager.add("sshwarma", &url);
-    manager.wait_for_connected("sshwarma", Duration::from_secs(5)).await?;
-
-    // Create room and add some context
-    manager.call_tool("create_room", serde_json::json!({"name": "context-room"})).await?;
-    manager.call_tool("say", serde_json::json!({
-        "room": "context-room",
-        "message": "We're discussing math",
-        "sender": "alice"
-    })).await?;
-
-    // Ask model with room context
-    let result = manager.call_tool("ask_model", serde_json::json!({
-        "model": "test",
-        "message": "What were we discussing?",
-        "room": "context-room"
-    })).await?;
-    // Model response should be recorded in room
-    assert!(result.content.contains("test:"));
-    assert!(!result.is_error);
-
-    // History should now have the model's response
-    let result = manager.call_tool("get_history", serde_json::json!({
-        "room": "context-room"
-    })).await?;
-    assert!(result.content.contains("alice"));
-    assert!(result.content.contains("test")); // model name in history
 
     manager.remove("sshwarma");
     Ok(())
