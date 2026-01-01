@@ -28,10 +28,52 @@ use crate::lua::tools::register_tools;
 use crate::paths;
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
+use opentelemetry::KeyValue;
 use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
+
+/// Counter for Lua script errors
+fn lua_error_counter() -> opentelemetry::metrics::Counter<u64> {
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("sshwarma")
+                .u64_counter("lua_errors")
+                .with_description("Count of Lua script errors by type")
+                .build()
+        })
+        .clone()
+}
+
+/// Record a Lua error with context
+fn record_lua_error(error_type: &str, error_msg: &str) {
+    lua_error_counter().add(
+        1,
+        &[
+            KeyValue::new("error_type", error_type.to_string()),
+            KeyValue::new("error_class", classify_lua_error(error_msg).to_string()),
+        ],
+    );
+    tracing::error!(error_type = error_type, "Lua error: {}", error_msg);
+}
+
+/// Classify Lua errors for grouping in metrics
+fn classify_lua_error(msg: &str) -> &'static str {
+    if msg.contains("attempt to index") || msg.contains("attempt to call") {
+        "nil_access"
+    } else if msg.contains("stack overflow") {
+        "stack_overflow"
+    } else if msg.contains("syntax error") || msg.contains("unexpected") {
+        "syntax"
+    } else if msg.contains("timeout") {
+        "timeout"
+    } else {
+        "runtime"
+    }
+}
 
 /// Embedded default HUD script
 const DEFAULT_HUD_SCRIPT: &str = include_str!("../embedded/hud.lua");
@@ -338,13 +380,19 @@ impl LuaRuntime {
     /// Lua table with 8 rows of segments
     pub fn render_hud(&self, now_ms: i64, width: u16, height: u16) -> Result<Table> {
         let globals = self.lua.globals();
-        let render_fn: mlua::Function = globals
-            .get("render_hud")
-            .map_err(|e| anyhow::anyhow!("render_hud function not found: {}", e))?;
+        let render_fn: mlua::Function = globals.get("render_hud").map_err(|e| {
+            let msg = format!("render_hud function not found: {}", e);
+            record_lua_error("render_hud_missing", &msg);
+            anyhow::anyhow!("{}", msg)
+        })?;
 
         let result: Table = render_fn
             .call((now_ms, width as i64, height as i64))
-            .map_err(|e| anyhow::anyhow!("render_hud call failed: {}", e))?;
+            .map_err(|e| {
+                let msg = format!("render_hud call failed: {}", e);
+                record_lua_error("render_hud", &msg);
+                anyhow::anyhow!("{}", msg)
+            })?;
 
         Ok(result)
     }
@@ -596,8 +644,11 @@ impl LuaRuntime {
             .ok_or_else(|| anyhow::anyhow!("background is not a function"))?
             .clone();
 
-        func.call::<()>(tick)
-            .map_err(|e| anyhow::anyhow!("background() call failed: {}", e))?;
+        func.call::<()>(tick).map_err(|e| {
+            let msg = format!("background() call failed: {}", e);
+            record_lua_error("background", &msg);
+            anyhow::anyhow!("{}", msg)
+        })?;
 
         Ok(())
     }
