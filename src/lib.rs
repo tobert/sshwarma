@@ -21,6 +21,7 @@ pub mod model;
 pub mod ops;
 pub mod paths;
 pub mod player;
+pub mod rules;
 pub mod ssh;
 pub mod state;
 pub mod ui;
