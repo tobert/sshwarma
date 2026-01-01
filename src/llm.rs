@@ -77,8 +77,14 @@ pub fn normalize_schema_for_llamacpp(tool: &Tool) -> Tool {
 
                 // If this looks like a schema (has "description" but no "type"), add "type": "object"
                 // This fixes schemars output for serde_json::Value fields
-                if cleaned.contains_key("description") && !cleaned.contains_key("type") && !cleaned.contains_key("$ref") {
-                    cleaned.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+                if cleaned.contains_key("description")
+                    && !cleaned.contains_key("type")
+                    && !cleaned.contains_key("$ref")
+                {
+                    cleaned.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("object".to_string()),
+                    );
                 }
 
                 serde_json::Value::Object(cleaned)
@@ -90,9 +96,8 @@ pub fn normalize_schema_for_llamacpp(tool: &Tool) -> Tool {
         }
     }
 
-    let schema_value = serde_json::Value::Object(
-        tool.input_schema.as_ref().clone().into_iter().collect()
-    );
+    let schema_value =
+        serde_json::Value::Object(tool.input_schema.as_ref().clone().into_iter().collect());
     let cleaned = normalize(&schema_value);
     let cleaned_map: serde_json::Map<String, serde_json::Value> = match cleaned {
         serde_json::Value::Object(m) => m,
@@ -154,14 +159,14 @@ impl LlmClient {
     /// - OLLAMA_API_BASE_URL for Ollama endpoint (default: http://localhost:11434)
     pub fn new() -> Result<Self> {
         // OpenAI client (optional - only if API key present)
-        let openai = std::env::var("OPENAI_API_KEY").ok().map(|_| {
-            openai::Client::from_env()
-        });
+        let openai = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|_| openai::Client::from_env());
 
         // Anthropic client (optional)
-        let anthropic = std::env::var("ANTHROPIC_API_KEY").ok().map(|_| {
-            anthropic::Client::from_env()
-        });
+        let anthropic = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|_| anthropic::Client::from_env());
 
         // Ollama client - default to localhost
         let ollama_endpoint = std::env::var("OLLAMA_API_BASE_URL")
@@ -172,7 +177,7 @@ impl LlmClient {
                 .api_key(Nothing)
                 .base_url(&ollama_endpoint)
                 .build()
-                .expect("failed to build ollama client")
+                .expect("failed to build ollama client"),
         );
 
         Ok(Self {
@@ -185,20 +190,20 @@ impl LlmClient {
 
     /// Create a client with a custom Ollama endpoint
     pub fn with_ollama_endpoint(endpoint: &str) -> Result<Self> {
-        let openai = std::env::var("OPENAI_API_KEY").ok().map(|_| {
-            openai::Client::from_env()
-        });
+        let openai = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|_| openai::Client::from_env());
 
-        let anthropic = std::env::var("ANTHROPIC_API_KEY").ok().map(|_| {
-            anthropic::Client::from_env()
-        });
+        let anthropic = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|_| anthropic::Client::from_env());
 
         let ollama = Some(
             ollama::Client::builder()
                 .api_key(Nothing)
                 .base_url(endpoint)
                 .build()
-                .expect("failed to build ollama client")
+                .expect("failed to build ollama client"),
         );
 
         Ok(Self {
@@ -244,22 +249,28 @@ impl LlmClient {
         let chat_history = history_to_messages(history);
 
         match &model.backend {
-            ModelBackend::Ollama { model: model_id, .. } => {
-                let client = self.ollama.as_ref()
+            ModelBackend::Ollama {
+                model: model_id, ..
+            } => {
+                let client = self
+                    .ollama
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
-                let response = agent.chat(message, chat_history).await
+                let response = agent
+                    .chat(message, chat_history)
+                    .await
                     .map_err(|e| anyhow::anyhow!("ollama error: {}", e))?;
 
                 Ok(response)
             }
 
-            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+            ModelBackend::LlamaCpp {
+                endpoint,
+                model: model_id,
+            } => {
                 // llama.cpp uses OpenAI-compatible API
                 let client: openai::Client = openai::Client::builder()
                     .api_key("not-needed")
@@ -267,42 +278,41 @@ impl LlmClient {
                     .build()
                     .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
-                let response = agent.chat(message, chat_history).await
+                let response = agent
+                    .chat(message, chat_history)
+                    .await
                     .map_err(|e| anyhow::anyhow!("llamacpp error: {}", e))?;
 
                 Ok(response)
             }
 
             ModelBackend::OpenAI { model: model_id } => {
-                let client = self.openai.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured - set OPENAI_API_KEY"))?;
+                let client = self.openai.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("OpenAI client not configured - set OPENAI_API_KEY")
+                })?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
-                let response = agent.chat(message, chat_history).await
+                let response = agent
+                    .chat(message, chat_history)
+                    .await
                     .map_err(|e| anyhow::anyhow!("openai error: {}", e))?;
 
                 Ok(response)
             }
 
             ModelBackend::Anthropic { model: model_id } => {
-                let client = self.anthropic.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured - set ANTHROPIC_API_KEY"))?;
+                let client = self.anthropic.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Anthropic client not configured - set ANTHROPIC_API_KEY")
+                })?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
-                let response = agent.chat(message, chat_history).await
+                let response = agent
+                    .chat(message, chat_history)
+                    .await
                     .map_err(|e| anyhow::anyhow!("anthropic error: {}", e))?;
 
                 Ok(response)
@@ -313,9 +323,7 @@ impl LlmClient {
                 Err(anyhow::anyhow!("Gemini not yet supported with rig"))
             }
 
-            ModelBackend::Mock { prefix } => {
-                Ok(format!("{}: {}", prefix, message))
-            }
+            ModelBackend::Mock { prefix } => Ok(format!("{}: {}", prefix, message)),
         }
     }
 
@@ -338,8 +346,12 @@ impl LlmClient {
         }
 
         match &model.backend {
-            ModelBackend::Ollama { model: model_id, .. } => {
-                let client = self.ollama.as_ref()
+            ModelBackend::Ollama {
+                model: model_id, ..
+            } => {
+                let client = self
+                    .ollama
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
 
                 let agent = client
@@ -357,7 +369,10 @@ impl LlmClient {
                 Ok(response)
             }
 
-            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+            ModelBackend::LlamaCpp {
+                endpoint,
+                model: model_id,
+            } => {
                 // llama.cpp uses OpenAI Chat Completions API (not Responses API)
                 let base_url = format!("{}/v1", endpoint);
                 let client: openai::CompletionsClient = openai::CompletionsClient::builder()
@@ -382,7 +397,9 @@ impl LlmClient {
             }
 
             ModelBackend::OpenAI { model: model_id } => {
-                let client = self.openai.as_ref()
+                let client = self
+                    .openai
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
 
                 let agent = client
@@ -401,7 +418,9 @@ impl LlmClient {
             }
 
             ModelBackend::Anthropic { model: model_id } => {
-                let client = self.anthropic.as_ref()
+                let client = self
+                    .anthropic
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
 
                 let agent = client
@@ -423,9 +442,7 @@ impl LlmClient {
                 Err(anyhow::anyhow!("Gemini not yet supported with rig"))
             }
 
-            ModelBackend::Mock { prefix } => {
-                Ok(format!("{}: {}", prefix, message))
-            }
+            ModelBackend::Mock { prefix } => Ok(format!("{}: {}", prefix, message)),
         }
     }
 
@@ -457,8 +474,12 @@ impl LlmClient {
         }
 
         match &model.backend {
-            ModelBackend::Ollama { model: model_id, .. } => {
-                let client = self.ollama.as_ref()
+            ModelBackend::Ollama {
+                model: model_id, ..
+            } => {
+                let client = self
+                    .ollama
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
 
                 let agent = client
@@ -474,7 +495,10 @@ impl LlmClient {
                     .map_err(|e| anyhow::anyhow!("ollama error: {}", e))
             }
 
-            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+            ModelBackend::LlamaCpp {
+                endpoint,
+                model: model_id,
+            } => {
                 // llama.cpp uses OpenAI Chat Completions API (not Responses API)
                 let base_url = format!("{}/v1", endpoint);
                 let client: openai::CompletionsClient = openai::CompletionsClient::builder()
@@ -506,7 +530,9 @@ impl LlmClient {
             }
 
             ModelBackend::OpenAI { model: model_id } => {
-                let client = self.openai.as_ref()
+                let client = self
+                    .openai
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
 
                 let agent = client
@@ -523,7 +549,9 @@ impl LlmClient {
             }
 
             ModelBackend::Anthropic { model: model_id } => {
-                let client = self.anthropic.as_ref()
+                let client = self
+                    .anthropic
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
 
                 let agent = client
@@ -543,9 +571,7 @@ impl LlmClient {
                 Err(anyhow::anyhow!("Gemini not yet supported with rig"))
             }
 
-            ModelBackend::Mock { prefix } => {
-                Ok(format!("{}: {}", prefix, message))
-            }
+            ModelBackend::Mock { prefix } => Ok(format!("{}: {}", prefix, message)),
         }
     }
 
@@ -585,24 +611,22 @@ impl LlmClient {
             ($stream:expr, $tx:expr, $start:expr, $attrs:expr) => {{
                 while let Some(item) = $stream.next().await {
                     match item {
-                        Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
-                            match content {
-                                StreamedAssistantContent::Text(Text { text }) => {
-                                    let _ = $tx.send(StreamChunk::Text(text)).await;
-                                }
-                                StreamedAssistantContent::ToolCall(tool_call) => {
-                                    let _ = $tx.send(StreamChunk::ToolCall(
-                                        tool_call.function.name.clone()
-                                    )).await;
-                                }
-                                StreamedAssistantContent::ToolCallDelta { .. } => {}
-                                StreamedAssistantContent::Reasoning(_) => {}
-                                StreamedAssistantContent::ReasoningDelta { .. } => {}
-                                StreamedAssistantContent::Final(_) => {}
+                        Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
+                            StreamedAssistantContent::Text(Text { text }) => {
+                                let _ = $tx.send(StreamChunk::Text(text)).await;
                             }
-                        }
+                            StreamedAssistantContent::ToolCall(tool_call) => {
+                                let _ = $tx
+                                    .send(StreamChunk::ToolCall(tool_call.function.name.clone()))
+                                    .await;
+                            }
+                            StreamedAssistantContent::ToolCallDelta { .. } => {}
+                            StreamedAssistantContent::Reasoning(_) => {}
+                            StreamedAssistantContent::ReasoningDelta { .. } => {}
+                            StreamedAssistantContent::Final(_) => {}
+                        },
                         Ok(MultiTurnStreamItem::StreamUserItem(
-                            StreamedUserContent::ToolResult(result)
+                            StreamedUserContent::ToolResult(result),
                         )) => {
                             let summary = format!("{}: done", result.id);
                             let _ = $tx.send(StreamChunk::ToolResult(summary)).await;
@@ -632,8 +656,12 @@ impl LlmClient {
         }
 
         match &model.backend {
-            ModelBackend::Ollama { model: model_id, .. } => {
-                let client = self.ollama.as_ref()
+            ModelBackend::Ollama {
+                model: model_id, ..
+            } => {
+                let client = self
+                    .ollama
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
 
                 let agent = client
@@ -642,15 +670,15 @@ impl LlmClient {
                     .tool_server_handle(tool_server_handle)
                     .build();
 
-                let mut stream = agent
-                    .stream_prompt(message)
-                    .multi_turn(max_turns)
-                    .await;
+                let mut stream = agent.stream_prompt(message).multi_turn(max_turns).await;
 
                 process_stream!(stream, tx, start, &attrs)
             }
 
-            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+            ModelBackend::LlamaCpp {
+                endpoint,
+                model: model_id,
+            } => {
                 // llama.cpp uses OpenAI Chat Completions API (not Responses API)
                 let base_url = format!("{}/v1", endpoint);
                 let client: openai::CompletionsClient = openai::CompletionsClient::builder()
@@ -665,16 +693,15 @@ impl LlmClient {
                     .tool_server_handle(tool_server_handle)
                     .build();
 
-                let mut stream = agent
-                    .stream_prompt(message)
-                    .multi_turn(max_turns)
-                    .await;
+                let mut stream = agent.stream_prompt(message).multi_turn(max_turns).await;
 
                 process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::OpenAI { model: model_id } => {
-                let client = self.openai.as_ref()
+                let client = self
+                    .openai
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
 
                 let agent = client
@@ -683,16 +710,15 @@ impl LlmClient {
                     .tool_server_handle(tool_server_handle)
                     .build();
 
-                let mut stream = agent
-                    .stream_prompt(message)
-                    .multi_turn(max_turns)
-                    .await;
+                let mut stream = agent.stream_prompt(message).multi_turn(max_turns).await;
 
                 process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::Anthropic { model: model_id } => {
-                let client = self.anthropic.as_ref()
+                let client = self
+                    .anthropic
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
 
                 let agent = client
@@ -701,16 +727,15 @@ impl LlmClient {
                     .tool_server_handle(tool_server_handle)
                     .build();
 
-                let mut stream = agent
-                    .stream_prompt(message)
-                    .multi_turn(max_turns)
-                    .await;
+                let mut stream = agent.stream_prompt(message).multi_turn(max_turns).await;
 
                 process_stream!(stream, tx, start, &attrs)
             }
 
             ModelBackend::Gemini { .. } => {
-                let _ = tx.send(StreamChunk::Error("Gemini not yet supported".to_string())).await;
+                let _ = tx
+                    .send(StreamChunk::Error("Gemini not yet supported".to_string()))
+                    .await;
                 Ok(())
             }
 
@@ -722,7 +747,6 @@ impl LlmClient {
             }
         }
     }
-
 
     /// Stream a chat response (no tools)
     ///
@@ -779,14 +803,15 @@ impl LlmClient {
         let chat_history = history_to_messages(history);
 
         match &model.backend {
-            ModelBackend::Ollama { model: model_id, .. } => {
-                let client = self.ollama.as_ref()
+            ModelBackend::Ollama {
+                model: model_id, ..
+            } => {
+                let client = self
+                    .ollama
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Ollama client not configured"))?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
                 let mut stream = agent
                     .stream_prompt(message)
@@ -796,7 +821,10 @@ impl LlmClient {
                 process_simple_stream!(stream, tx)
             }
 
-            ModelBackend::LlamaCpp { endpoint, model: model_id } => {
+            ModelBackend::LlamaCpp {
+                endpoint,
+                model: model_id,
+            } => {
                 // llama.cpp uses OpenAI-compatible API
                 let client: openai::Client = openai::Client::builder()
                     .api_key("not-needed")
@@ -804,10 +832,7 @@ impl LlmClient {
                     .build()
                     .map_err(|e| anyhow::anyhow!("failed to create llamacpp client: {}", e))?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
                 let mut stream = agent
                     .stream_prompt(message)
@@ -818,13 +843,12 @@ impl LlmClient {
             }
 
             ModelBackend::OpenAI { model: model_id } => {
-                let client = self.openai.as_ref()
+                let client = self
+                    .openai
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
                 let mut stream = agent
                     .stream_prompt(message)
@@ -835,13 +859,12 @@ impl LlmClient {
             }
 
             ModelBackend::Anthropic { model: model_id } => {
-                let client = self.anthropic.as_ref()
+                let client = self
+                    .anthropic
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Anthropic client not configured"))?;
 
-                let agent = client
-                    .agent(model_id)
-                    .preamble(system_prompt)
-                    .build();
+                let agent = client.agent(model_id).preamble(system_prompt).build();
 
                 let mut stream = agent
                     .stream_prompt(message)
@@ -852,7 +875,9 @@ impl LlmClient {
             }
 
             ModelBackend::Gemini { .. } => {
-                let _ = tx.send(StreamChunk::Error("Gemini not yet supported".to_string())).await;
+                let _ = tx
+                    .send(StreamChunk::Error("Gemini not yet supported".to_string()))
+                    .await;
                 Ok(())
             }
 
@@ -866,7 +891,11 @@ impl LlmClient {
     }
 
     /// Generate flavor text for room descriptions
-    pub async fn generate_flavor(&self, model: &ModelHandle, context: &FlavorContext) -> Result<String> {
+    pub async fn generate_flavor(
+        &self,
+        model: &ModelHandle,
+        context: &FlavorContext,
+    ) -> Result<String> {
         let prompt = format!(
             "Generate a brief, evocative 2-3 sentence description of this collaborative space. \
              Be creative but grounded. No fantasy elements.\n\n\

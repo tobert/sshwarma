@@ -75,7 +75,11 @@ pub async fn rooms(state: &SharedState) -> Result<Vec<RoomInfo>> {
 }
 
 /// Get room history
-pub async fn history(state: &SharedState, room_name: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+pub async fn history(
+    state: &SharedState,
+    room_name: &str,
+    limit: usize,
+) -> Result<Vec<HistoryEntry>> {
     let messages = state.db.recent_messages(room_name, limit)?;
 
     Ok(messages
@@ -147,18 +151,17 @@ pub async fn get_room_navigation(state: &SharedState, room_name: &str) -> Result
 }
 
 /// Set navigation enabled for room
-pub async fn set_room_navigation(state: &SharedState, room_name: &str, enabled: bool) -> Result<()> {
+pub async fn set_room_navigation(
+    state: &SharedState,
+    room_name: &str,
+    enabled: bool,
+) -> Result<()> {
     state.db.set_room_navigation(room_name, enabled)?;
     Ok(())
 }
 
 /// Say something to the room
-pub async fn say(
-    state: &SharedState,
-    room_name: &str,
-    sender: &str,
-    message: &str,
-) -> Result<()> {
+pub async fn say(state: &SharedState, room_name: &str, sender: &str, message: &str) -> Result<()> {
     use crate::display::{EntryContent, EntrySource, LedgerEntry};
     use chrono::Utc;
 
@@ -222,7 +225,9 @@ pub async fn add_journal(
         JournalKind::Milestone => crate::world::JournalKind::Milestone,
     };
 
-    state.db.add_journal_entry(room_name, author, content, db_kind)?;
+    state
+        .db
+        .add_journal_entry(room_name, author, content, db_kind)?;
     Ok(())
 }
 
@@ -318,7 +323,9 @@ pub async fn bind_asset(
     artifact_id: &str,
     bound_by: &str,
 ) -> Result<()> {
-    state.db.bind_asset(room_name, role, artifact_id, None, bound_by)?;
+    state
+        .db
+        .bind_asset(room_name, role, artifact_id, None, bound_by)?;
     Ok(())
 }
 
@@ -502,7 +509,11 @@ pub async fn go(
                 Err(anyhow!(
                     "No exit '{}'. Available: {}",
                     direction,
-                    available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    available
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ))
             }
         }

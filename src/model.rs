@@ -40,31 +40,17 @@ impl Default for ModelHandle {
 #[derive(Debug, Clone)]
 pub enum ModelBackend {
     /// Ollama API (requires actual Ollama server)
-    Ollama {
-        endpoint: String,
-        model: String,
-    },
+    Ollama { endpoint: String, model: String },
     /// llama.cpp server via OpenAI-compatible API
-    LlamaCpp {
-        endpoint: String,
-        model: String,
-    },
+    LlamaCpp { endpoint: String, model: String },
     /// OpenAI API
-    OpenAI {
-        model: String,
-    },
+    OpenAI { model: String },
     /// Anthropic Claude API
-    Anthropic {
-        model: String,
-    },
+    Anthropic { model: String },
     /// Google Gemini API
-    Gemini {
-        model: String,
-    },
+    Gemini { model: String },
     /// Mock backend for testing - echoes input with prefix
-    Mock {
-        prefix: String,
-    },
+    Mock { prefix: String },
 }
 
 impl ModelBackend {
@@ -118,7 +104,10 @@ impl ModelRegistry {
     }
 
     /// Convert a ModelConfig to a ModelHandle
-    fn model_from_config(config: &ModelConfig, default_ollama_endpoint: &str) -> Option<ModelHandle> {
+    fn model_from_config(
+        config: &ModelConfig,
+        default_ollama_endpoint: &str,
+    ) -> Option<ModelHandle> {
         let backend = match config.backend.as_str() {
             "ollama" => {
                 let endpoint = config

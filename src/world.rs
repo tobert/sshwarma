@@ -194,14 +194,19 @@ impl Room {
     }
 
     /// Add an entry to the room's ledger
-    pub fn add_entry(&mut self, source: EntrySource, content: EntryContent) -> crate::display::EntryId {
+    pub fn add_entry(
+        &mut self,
+        source: EntrySource,
+        content: EntryContent,
+    ) -> crate::display::EntryId {
         self.ledger.push(source, content)
     }
 
     /// Load ledger entries from DB (call once when room is first accessed)
     pub fn load_entries_from_db(&mut self, entries: &[crate::display::LedgerEntry]) {
         for entry in entries {
-            self.ledger.push(entry.source.clone(), entry.content.clone());
+            self.ledger
+                .push(entry.source.clone(), entry.content.clone());
         }
     }
 
@@ -217,7 +222,8 @@ impl Room {
                 "system" => EntrySource::System,
                 _ => EntrySource::User(msg.sender_name.clone()),
             };
-            self.ledger.push(source, EntryContent::Chat(msg.content.clone()));
+            self.ledger
+                .push(source, EntryContent::Chat(msg.content.clone()));
         }
     }
 }

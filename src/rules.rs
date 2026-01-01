@@ -2,8 +2,8 @@
 //!
 //! Matches rows against rules and executes Lua scripts in the appropriate slots.
 
-use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
 use crate::db::rows::Row;
+use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
 use crate::db::Database;
 use anyhow::Result;
 use mlua::prelude::*;
@@ -304,7 +304,11 @@ impl RulesEngine {
     }
 
     /// Get all matches for a specific action slot
-    pub fn matches_for_slot<'a>(&self, matches: &'a [RuleMatch], slot: ActionSlot) -> Vec<&'a RuleMatch> {
+    pub fn matches_for_slot<'a>(
+        &self,
+        matches: &'a [RuleMatch],
+        slot: ActionSlot,
+    ) -> Vec<&'a RuleMatch> {
         matches
             .iter()
             .filter(|m| m.rule.action_slot == slot)
@@ -335,9 +339,7 @@ impl LuaRulesEngine {
 impl LuaUserData for LuaRulesEngine {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
         // rules:tick() -> current_tick
-        methods.add_method("tick", |_lua, this, ()| {
-            Ok(this.engine.tick() as i64)
-        });
+        methods.add_method("tick", |_lua, this, ()| Ok(this.engine.tick() as i64));
 
         // rules:current_tick() -> tick
         methods.add_method("current_tick", |_lua, this, ()| {
