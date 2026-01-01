@@ -57,7 +57,7 @@ impl SshHandler {
             completer: CompletionEngine::new(state),
             completions: Vec::new(),
             completion_index: 0,
-            session_state: Arc::new(Mutex::new(SessionState::new(80))),
+            session_state: Arc::new(Mutex::new(SessionState::new(80, 24))),
             update_tx,
             update_rx: Some(update_rx),
             session_handle: None,
@@ -77,6 +77,10 @@ impl SshHandler {
         // Create Lua runtime (automatically loads user-specific script)
         let runtime = LuaRuntime::new_for_user(Some(username))
             .expect("failed to create lua runtime");
+
+        // Set shared state so sshwarma.call() has access to DB/MCP
+        runtime.tool_state().set_shared_state(Some(self.state.clone()));
+
         let runtime = Arc::new(Mutex::new(runtime));
         self.lua_runtime = Some(runtime.clone());
 

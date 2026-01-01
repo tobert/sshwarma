@@ -12,6 +12,7 @@ use crate::lua::mcp_bridge::McpBridge;
 use crate::lua::tool_middleware::ToolMiddleware;
 use crate::model::ModelHandle;
 use crate::state::SharedState;
+use crate::ui::{LuaArea, LuaDrawContext, Rect, RenderBuffer};
 use crate::world::JournalKind;
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::{Arc, RwLock};
@@ -1162,6 +1163,140 @@ fn lua_to_json(value: &Value) -> LuaResult<serde_json::Value> {
         }
         _ => Ok(serde_json::Value::Null), // Functions, userdata, etc. become null
     }
+}
+
+/// Register the unified `sshwarma.call(name, args)` interface
+///
+/// This provides a single entry point for all tool calls:
+/// - Lua handlers take priority (registered via sshwarma.register)
+/// - Builtins (status, time, room, etc.) are next
+/// - MCP tools are fallback
+pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
+    use crate::lua::registry::{ToolContext, ToolRegistry};
+
+    let sshwarma = lua.create_table()?;
+
+    // Store Lua handlers in a table
+    let lua_handlers: Table = lua.create_table()?;
+    lua.set_named_registry_value("sshwarma_handlers", lua_handlers)?;
+
+    // Create the tool registry
+    let registry = std::sync::Arc::new(ToolRegistry::new());
+
+    // sshwarma.call(name, args) -> result
+    let call_fn = {
+        let state = state.clone();
+        let registry = registry.clone();
+        lua.create_function(move |lua, (name, args): (String, Value)| {
+            // 1. Check for Lua handler first
+            let handlers: Table = lua.named_registry_value("sshwarma_handlers")?;
+            if let Ok(handler) = handlers.get::<mlua::Function>(name.as_str()) {
+                // Call Lua handler
+                return handler.call::<Value>(args);
+            }
+
+            // 2. Try builtin tool
+            if registry.has(&name) {
+                // Build context from current state
+                let hud = state.hud_state();
+                let shared = state.shared_state();
+                let session = state.session_context();
+
+                let ctx = if let Some(ref shared) = shared {
+                    let mut ctx = ToolContext::new(shared);
+                    ctx = ctx.with_hud(hud);
+                    if let Some(ref sess) = session {
+                        ctx = ctx.with_user(sess.username.clone());
+                        if let Some(ref room) = sess.room_name {
+                            ctx = ctx.with_room(room.clone());
+                        }
+                    }
+                    ctx
+                } else {
+                    // Minimal context without SharedState
+                    ToolContext {
+                        db: std::sync::Arc::new(crate::db::Database::in_memory().map_err(|e| {
+                            mlua::Error::external(format!("db error: {}", e))
+                        })?),
+                        mcp: std::sync::Arc::new(crate::mcp::McpManager::new()),
+                        hud_state: Some(hud),
+                        username: session.as_ref().map(|s| s.username.clone()),
+                        room: session.as_ref().and_then(|s| s.room_name.clone()),
+                    }
+                };
+
+                let json_args = lua_to_json(&args)?;
+                match registry.call(&name, &ctx, json_args) {
+                    Ok(result) => return json_to_lua(lua, &result),
+                    Err(e) => {
+                        return Err(mlua::Error::external(format!("tool error: {}", e)));
+                    }
+                }
+            }
+
+            // 3. Tool not found
+            Err(mlua::Error::external(format!("unknown tool: {}", name)))
+        })?
+    };
+    sshwarma.set("call", call_fn)?;
+
+    // sshwarma.register(name, handler) - register Lua handler
+    let register_fn = lua.create_function(|lua, (name, handler): (String, mlua::Function)| {
+        let handlers: Table = lua.named_registry_value("sshwarma_handlers")?;
+        handlers.set(name, handler)?;
+        Ok(())
+    })?;
+    sshwarma.set("register", register_fn)?;
+
+    // sshwarma.list() - list available tools
+    let list_fn = {
+        let registry = registry.clone();
+        lua.create_function(move |lua, ()| {
+            let builtins = registry.list();
+            let table = lua.create_table()?;
+            for (i, name) in builtins.iter().enumerate() {
+                table.set(i + 1, name.as_str())?;
+            }
+            Ok(table)
+        })?
+    };
+    sshwarma.set("list", list_fn)?;
+
+    // =========================================
+    // UI Primitives (return UserData, not JSON)
+    // =========================================
+
+    // sshwarma.screen(width, height) -> LuaArea
+    // Creates an area representing the full terminal
+    let screen_fn = lua.create_function(|_lua, (width, height): (u16, u16)| {
+        Ok(LuaArea {
+            rect: Rect::full(width, height),
+            name: "screen".to_string(),
+        })
+    })?;
+    sshwarma.set("screen", screen_fn)?;
+
+    // sshwarma.buffer(width, height) -> LuaDrawContext
+    // Creates a new render buffer and returns a draw context for the full area
+    let buffer_fn = lua.create_function(|_lua, (width, height): (u16, u16)| {
+        let buffer = Arc::new(std::sync::Mutex::new(RenderBuffer::new(width, height)));
+        Ok(LuaDrawContext::new(buffer, 0, 0, width, height))
+    })?;
+    sshwarma.set("buffer", buffer_fn)?;
+
+    // sshwarma.area(x, y, width, height) -> LuaArea
+    // Creates an area with explicit bounds
+    let area_fn = lua.create_function(|_lua, (x, y, w, h): (u16, u16, u16, u16)| {
+        Ok(LuaArea {
+            rect: Rect::new(x, y, w, h),
+            name: "area".to_string(),
+        })
+    })?;
+    sshwarma.set("area", area_fn)?;
+
+    lua.globals().set("sshwarma", sshwarma)?;
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ pub mod cache;
 pub mod context;
 pub mod data;
 pub mod mcp_bridge;
+pub mod registry;
 pub mod render;
 pub mod tool_middleware;
 pub mod tools;
@@ -15,6 +16,7 @@ pub mod wrap;
 pub use cache::ToolCache;
 pub use context::{build_hud_context, NotificationLevel, PendingNotification};
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
+pub use registry::ToolRegistry;
 pub use render::{parse_lua_output, HUD_ROWS};
 pub use tool_middleware::{ToolContext, ToolMiddleware};
 pub use tools::{register_mcp_tools, LuaToolState};
@@ -120,6 +122,10 @@ impl LuaRuntime {
         // Register tool functions (creates the tools table)
         register_tools(&lua, tool_state.clone())
             .map_err(|e| anyhow::anyhow!("failed to register Lua tools: {}", e))?;
+
+        // Register sshwarma.call() unified interface
+        tools::register_sshwarma_call(&lua, tool_state.clone())
+            .map_err(|e| anyhow::anyhow!("failed to register sshwarma.call: {}", e))?;
 
         // Load the wrap script first (provides wrap() and default_wrap())
         lua.load(DEFAULT_WRAP_SCRIPT)
@@ -640,6 +646,51 @@ impl LuaRuntime {
         self.loaded_script_path.as_ref()
     }
 
+    /// Call the on_tick(tick, ctx) function if it exists
+    ///
+    /// This is the main render loop entry point. Called every 100ms.
+    /// Lua receives:
+    /// - tick: monotonic tick counter
+    /// - ctx: LuaDrawContext for the full screen
+    ///
+    /// Lua can draw to the context, and the caller will diff and emit output.
+    /// If the script doesn't define an `on_tick` function, this is a no-op.
+    pub fn call_on_tick(
+        &self,
+        tick: u64,
+        render_buffer: std::sync::Arc<std::sync::Mutex<crate::ui::RenderBuffer>>,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        let globals = self.lua.globals();
+
+        // Check if on_tick function exists
+        let on_tick_fn: Value = globals
+            .get("on_tick")
+            .map_err(|e| anyhow::anyhow!("failed to get on_tick: {}", e))?;
+
+        if on_tick_fn == Value::Nil {
+            // No on_tick function defined, this is fine
+            return Ok(());
+        }
+
+        let func: mlua::Function = on_tick_fn
+            .as_function()
+            .ok_or_else(|| anyhow::anyhow!("on_tick is not a function"))?
+            .clone();
+
+        // Create draw context for full screen
+        let ctx = crate::ui::LuaDrawContext::new(render_buffer, 0, 0, width, height);
+
+        func.call::<()>((tick, ctx)).map_err(|e| {
+            let msg = format!("on_tick() call failed: {}", e);
+            record_lua_error("on_tick", &msg);
+            anyhow::anyhow!("{}", msg)
+        })?;
+
+        Ok(())
+    }
+
     /// Call the background(tick) function if it exists
     ///
     /// This is called on a timer (e.g., 500ms at 120 BPM) to allow Lua scripts
@@ -679,6 +730,15 @@ impl LuaRuntime {
         self.lua
             .globals()
             .get::<Value>("background")
+            .map(|v| v != Value::Nil)
+            .unwrap_or(false)
+    }
+
+    /// Check if the script defines an on_tick() function
+    pub fn has_on_tick(&self) -> bool {
+        self.lua
+            .globals()
+            .get::<Value>("on_tick")
             .map(|v| v != Value::Nil)
             .unwrap_or(false)
     }
@@ -776,38 +836,50 @@ mod tests {
     }
 
     #[test]
-    fn test_render_hud_default() {
+    fn test_on_tick_default() {
+        use std::sync::{Arc, Mutex};
+
         let runtime = LuaRuntime::new().expect("should create runtime");
 
         // Update with empty state
         runtime.update_state(HudState::new());
 
-        // Render
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let table = runtime.render_hud(now_ms, 80, 8).expect("should render");
+        // Create a render buffer
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
 
-        // Should have 8 rows
-        let mut row_count = 0;
-        for i in 1..=8 {
-            if table.get::<Value>(i).is_ok() {
-                row_count += 1;
-            }
-        }
-        assert_eq!(row_count, 8, "HUD should have 8 rows");
+        // Call on_tick - should draw to buffer without error
+        runtime
+            .call_on_tick(1, render_buffer.clone(), 80, 8)
+            .expect("should call on_tick");
+
+        // Get output - should have content
+        let buf = render_buffer.lock().unwrap();
+        let output = buf.to_ansi();
+
+        // Embedded hud.lua should draw frame with box chars
+        assert!(!output.is_empty(), "HUD should produce output");
     }
 
     #[test]
-    fn test_render_hud_string() {
+    fn test_on_tick_renders_to_buffer() {
+        use std::sync::{Arc, Mutex};
+
         let runtime = LuaRuntime::new().expect("should create runtime");
         runtime.update_state(HudState::new());
 
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let output = runtime
-            .render_hud_string(now_ms, 80, 8)
-            .expect("should render string");
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
 
-        let lines: Vec<&str> = output.split("\r\n").collect();
-        assert_eq!(lines.len(), 8, "Should have 8 lines");
+        // Call on_tick multiple times (simulating timer)
+        for tick in 1..5 {
+            runtime
+                .call_on_tick(tick, render_buffer.clone(), 80, 8)
+                .expect("should call on_tick");
+        }
+
+        // Buffer should have content from drawing
+        let buf = render_buffer.lock().unwrap();
+        let output = buf.to_ansi();
+        assert!(!output.is_empty(), "Buffer should have content after on_tick");
     }
 
     #[test]

@@ -333,15 +333,33 @@ impl RenderBuffer {
         }
     }
 
-    /// Render buffer to ANSI string
+    /// Render buffer to ANSI string (uses newlines between rows)
     pub fn to_ansi(&self) -> String {
+        self.to_ansi_impl(None)
+    }
+
+    /// Render buffer to ANSI string with absolute cursor positioning
+    ///
+    /// Uses ESC[row;colH to position each line, avoiding newlines that could
+    /// cause scrolling when rendering at the bottom of the terminal.
+    pub fn to_ansi_at(&self, start_row: u16) -> String {
+        self.to_ansi_impl(Some(start_row))
+    }
+
+    /// Internal renderer - if start_row is Some, use absolute positioning
+    fn to_ansi_impl(&self, start_row: Option<u16>) -> String {
         use crossterm::style::{ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
         use crossterm::Command;
 
         let mut output = String::new();
 
         for y in 0..self.height {
-            if y > 0 {
+            // Position cursor for this line
+            if let Some(base_row) = start_row {
+                // Absolute positioning: ESC[row;1H (1-indexed)
+                output.push_str(&format!("\x1b[{};1H", base_row + y + 1));
+            } else if y > 0 {
+                // Relative: newline
                 output.push_str("\r\n");
             }
 
@@ -953,6 +971,32 @@ mod tests {
         assert!(ansi.contains("Hello"));
         assert!(ansi.contains("World"));
         assert!(ansi.contains("\r\n"));
+    }
+
+    #[test]
+    fn test_to_ansi_at_uses_absolute_positioning() {
+        let mut buf = RenderBuffer::new(5, 3);
+        buf.print(0, 0, "Line0", &Style::new());
+        buf.print(0, 1, "Line1", &Style::new());
+        buf.print(0, 2, "Line2", &Style::new());
+
+        let ansi = buf.to_ansi_at(16); // Start at row 16
+
+        // Should contain absolute positioning sequences (ESC[row;1H)
+        // Row 16 -> ESC[17;1H (1-indexed)
+        // Row 17 -> ESC[18;1H
+        // Row 18 -> ESC[19;1H
+        assert!(ansi.contains("\x1b[17;1H"), "Should have cursor move to row 17");
+        assert!(ansi.contains("\x1b[18;1H"), "Should have cursor move to row 18");
+        assert!(ansi.contains("\x1b[19;1H"), "Should have cursor move to row 19");
+
+        // Should NOT contain newlines (which would cause scrolling at bottom)
+        assert!(!ansi.contains("\r\n"), "Should not have \\r\\n that would cause scrolling");
+
+        // Should contain the content
+        assert!(ansi.contains("Line0"));
+        assert!(ansi.contains("Line1"));
+        assert!(ansi.contains("Line2"));
     }
 
     #[test]

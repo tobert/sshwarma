@@ -3,12 +3,13 @@
 use crate::db::rows::Row;
 use crate::db::Database;
 use crate::ui::render::render_rows;
+use crate::ui::RenderBuffer;
 use anyhow::Result;
+use std::sync::{Arc, Mutex};
 
 /// Session-level state for buffer rendering
 ///
 /// Tracks what has been rendered to enable incremental updates.
-#[derive(Debug)]
 pub struct SessionState {
     /// Current room's buffer ID (None if in lobby)
     pub buffer_id: Option<String>,
@@ -16,18 +17,56 @@ pub struct SessionState {
     pub last_row_id: Option<String>,
     /// Terminal width
     pub width: usize,
+    /// Terminal height
+    pub height: usize,
     /// Lines rendered since last prompt
     pub lines_since_prompt: usize,
+    /// Render buffer for UI (shared with Lua draw contexts)
+    pub render_buffer: Arc<Mutex<RenderBuffer>>,
+    /// Previous render buffer for diffing
+    prev_buffer: RenderBuffer,
+    /// Dirty flag - set when UI needs redraw
+    pub dirty: bool,
 }
 
 impl SessionState {
-    pub fn new(width: usize) -> Self {
+    pub fn new(width: usize, height: usize) -> Self {
         Self {
             buffer_id: None,
             last_row_id: None,
             width,
+            height,
             lines_since_prompt: 0,
+            render_buffer: Arc::new(Mutex::new(RenderBuffer::new(width as u16, height as u16))),
+            prev_buffer: RenderBuffer::new(width as u16, height as u16),
+            dirty: true, // Start dirty to force initial render
         }
+    }
+
+    /// Get the shared render buffer for Lua draw contexts
+    pub fn get_render_buffer(&self) -> Arc<Mutex<RenderBuffer>> {
+        self.render_buffer.clone()
+    }
+
+    /// Mark the UI as needing a redraw
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Check if dirty and clear the flag
+    pub fn take_dirty(&mut self) -> bool {
+        let was_dirty = self.dirty;
+        self.dirty = false;
+        was_dirty
+    }
+
+    /// Resize the render buffers
+    pub fn resize(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+        self.render_buffer = Arc::new(Mutex::new(RenderBuffer::new(width as u16, height as u16)));
+        self.prev_buffer = RenderBuffer::new(width as u16, height as u16);
+        self.dirty = true;
     }
 
     /// Set current room buffer
@@ -114,10 +153,12 @@ mod tests {
 
     #[test]
     fn test_session_state_new() {
-        let state = SessionState::new(80);
+        let state = SessionState::new(80, 24);
         assert_eq!(state.width, 80);
+        assert_eq!(state.height, 24);
         assert!(state.buffer_id.is_none());
         assert!(state.last_row_id.is_none());
+        assert!(state.dirty); // Starts dirty
     }
 
     #[test]
