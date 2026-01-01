@@ -236,19 +236,21 @@ impl Database {
 
         // Migration 1: Add enable_navigation column to room_context
         if current_version < 1 {
-            let conn = self.conn()?;
-            // Check if column already exists (for databases created before versioning)
-            let has_column: bool = conn
-                .prepare("SELECT enable_navigation FROM room_context LIMIT 0")
-                .is_ok();
+            {
+                let conn = self.conn()?;
+                // Check if column already exists (for databases created before versioning)
+                let has_column: bool = conn
+                    .prepare("SELECT enable_navigation FROM room_context LIMIT 0")
+                    .is_ok();
 
-            if !has_column {
-                conn.execute(
-                    "ALTER TABLE room_context ADD COLUMN enable_navigation INTEGER DEFAULT 1",
-                    [],
-                )?;
-                tracing::info!("migration 1: added enable_navigation column to room_context");
-            }
+                if !has_column {
+                    conn.execute(
+                        "ALTER TABLE room_context ADD COLUMN enable_navigation INTEGER DEFAULT 1",
+                        [],
+                    )?;
+                    tracing::info!("migration 1: added enable_navigation column to room_context");
+                }
+            } // conn lock released here
             self.set_schema_version(1)?;
         }
 

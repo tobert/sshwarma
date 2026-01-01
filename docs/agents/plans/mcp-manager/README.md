@@ -1,7 +1,7 @@
 # MCP Connection Manager
 
 **Location:** `src/mcp/` (refactor from `src/mcp.rs`)
-**Status:** Design Complete
+**Status:** ✅ Implementation Complete
 
 ---
 
@@ -28,12 +28,12 @@ This enables reliable MCP connections that don't block startup and gracefully ha
 
 ## Success Metrics
 
-- [ ] Server starts even when MCP servers are down
-- [ ] Connections retry with exponential backoff (100ms → 3s cap)
-- [ ] HUD shows connection status changes
-- [ ] `startup.lua` with `mcp_add` calls works
-- [ ] All existing functionality preserved
-- [ ] Tests pass
+- [x] Server starts even when MCP servers are down
+- [x] Connections retry with exponential backoff (100ms → 3s cap)
+- [x] HUD shows connection status changes (via events)
+- [x] `startup.lua` with `mcp_add` calls works
+- [x] All existing functionality preserved
+- [x] Tests pass (22 MCP tests)
 
 ## Execution Flow
 
