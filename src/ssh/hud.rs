@@ -4,7 +4,10 @@
 //!
 //! Lua defines on_tick(tick, ctx) and draws directly to a buffer.
 //! Output is only sent when the buffer content changes.
+//!
+//! Also executes room rules on tick/interval triggers.
 
+use crate::db::rules::ActionSlot;
 use crate::display::hud::{HudState, HUD_HEIGHT};
 use crate::lua::LuaRuntime;
 use crate::state::SharedState;
@@ -80,10 +83,55 @@ async fn hud_refresh_task(
 
         // Run Lua background function every 500ms (tick % 5)
         if tick % 5 == 0 {
-            let lua = lua_runtime.lock().await;
             let background_tick = tick / 5;
-            if let Err(e) = lua.call_background(background_tick) {
-                tracing::debug!("lua background error: {}", e);
+
+            // Run user's background() function
+            {
+                let lua = lua_runtime.lock().await;
+                if let Err(e) = lua.call_background(background_tick) {
+                    tracing::debug!("lua background error: {}", e);
+                }
+            }
+
+            // Execute room rules (tick and interval triggers)
+            let room_name = {
+                let hud = hud_state.lock().await;
+                hud.room_name.clone()
+            };
+
+            if let Some(ref room_id) = room_name {
+                // Advance rules engine tick counter
+                state.rules.tick();
+
+                // Execute tick-triggered rules
+                if let Ok(matches) = state.rules.match_tick(&state.db, room_id) {
+                    for rule_match in matches {
+                        if rule_match.rule.action_slot == ActionSlot::Background {
+                            execute_rule_script(
+                                &lua_runtime,
+                                &state,
+                                &rule_match.rule.script_id,
+                                background_tick,
+                            )
+                            .await;
+                        }
+                    }
+                }
+
+                // Execute interval-triggered rules
+                if let Ok(matches) = state.rules.match_interval(&state.db, room_id) {
+                    for rule_match in matches {
+                        if rule_match.rule.action_slot == ActionSlot::Background {
+                            execute_rule_script(
+                                &lua_runtime,
+                                &state,
+                                &rule_match.rule.script_id,
+                                background_tick,
+                            )
+                            .await;
+                        }
+                    }
+                }
             }
         }
 
@@ -120,5 +168,33 @@ async fn hud_refresh_task(
                 break;
             }
         }
+    }
+}
+
+/// Execute a rule script by loading it from the database
+async fn execute_rule_script(
+    lua_runtime: &Arc<TokioMutex<LuaRuntime>>,
+    state: &Arc<SharedState>,
+    script_id: &str,
+    tick: u64,
+) {
+    // Load script from database
+    let script = match state.db.get_script(script_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::warn!("rule script not found: {}", script_id);
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("failed to load rule script {}: {}", script_id, e);
+            return;
+        }
+    };
+
+    // Execute the script
+    let lua = lua_runtime.lock().await;
+    let script_name = script.name.as_deref().unwrap_or(script_id);
+    if let Err(e) = lua.execute_rule_script(&script.code, script_name, tick) {
+        tracing::debug!("rule script '{}' error: {}", script_name, e);
     }
 }

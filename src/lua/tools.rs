@@ -1308,6 +1308,7 @@ mod tests {
     use crate::llm::LlmClient;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelRegistry};
+    use crate::rules::RulesEngine;
     use crate::state::SharedState;
     use crate::world::{Inspiration, JournalEntry, JournalKind, World};
     use chrono::Utc;
@@ -1350,6 +1351,7 @@ mod tests {
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
                 mcp: Arc::new(McpManager::new()),
+                rules: Arc::new(RulesEngine::new()),
             });
 
             Ok(Self {

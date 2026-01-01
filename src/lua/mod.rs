@@ -678,6 +678,64 @@ impl LuaRuntime {
         Ok(())
     }
 
+    /// Execute a rule script's handler function
+    ///
+    /// Rule scripts are stored in the database and define a `handle(tick, state)`
+    /// function that receives the tick number and room state.
+    ///
+    /// Returns the result of the handler as a Lua value for processing
+    /// (e.g., for notify slots that return notification tables).
+    pub fn execute_rule_script(
+        &self,
+        script_code: &str,
+        script_name: &str,
+        tick: u64,
+    ) -> Result<Option<Table>> {
+        // Load and execute the script to define the handle function
+        self.lua
+            .load(script_code)
+            .set_name(format!("rule:{}", script_name))
+            .exec()
+            .map_err(|e| {
+                let msg = format!("failed to load rule script '{}': {}", script_name, e);
+                record_lua_error("rule_load", &msg);
+                anyhow::anyhow!("{}", msg)
+            })?;
+
+        // Get the handle function
+        let globals = self.lua.globals();
+        let handle_fn: Value = globals
+            .get("handle")
+            .map_err(|e| anyhow::anyhow!("failed to get handle: {}", e))?;
+
+        if handle_fn == Value::Nil {
+            debug!("rule script '{}' does not define handle()", script_name);
+            return Ok(None);
+        }
+
+        let func: mlua::Function = handle_fn
+            .as_function()
+            .ok_or_else(|| anyhow::anyhow!("handle is not a function"))?
+            .clone();
+
+        // Call handle(tick, state) where state is nil for now
+        // TODO: pass room state table
+        let result: Value = func.call((tick, Value::Nil)).map_err(|e| {
+            let msg = format!("rule handle() failed for '{}': {}", script_name, e);
+            record_lua_error("rule_handle", &msg);
+            anyhow::anyhow!("{}", msg)
+        })?;
+
+        // Clean up the handle function so it doesn't pollute globals for next script
+        globals.set("handle", Value::Nil)?;
+
+        // Return table result if present (used for notify slots)
+        match result {
+            Value::Table(t) => Ok(Some(t)),
+            _ => Ok(None),
+        }
+    }
+
     /// Check if the script defines a background() function
     pub fn has_background(&self) -> bool {
         self.lua
@@ -711,6 +769,7 @@ mod tests {
     use crate::llm::LlmClient;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
+    use crate::rules::RulesEngine;
     use crate::state::SharedState;
     use crate::world::World;
     use std::sync::Arc;
@@ -749,6 +808,7 @@ mod tests {
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
                 mcp: Arc::new(McpManager::new()),
+                rules: Arc::new(RulesEngine::new()),
             });
 
             Ok(Self {

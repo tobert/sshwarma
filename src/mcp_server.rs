@@ -22,6 +22,7 @@ use crate::db::Database;
 use crate::llm::LlmClient;
 use crate::lua::{LuaRuntime, WrapState};
 use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
+use crate::rules::RulesEngine;
 use crate::state::SharedState;
 use crate::world::{JournalKind, World};
 use tokio::sync::RwLock;
@@ -783,6 +784,7 @@ impl SshwarmaMcpServer {
             llm: self.state.llm.clone(),
             models: self.state.models.clone(),
             mcp: Arc::new(crate::mcp::McpManager::new()),
+            rules: Arc::new(RulesEngine::new()),
         });
 
         let wrap_state = WrapState {
