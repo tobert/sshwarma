@@ -2,7 +2,9 @@
 //!
 //! Converts Rust HudState into Lua-compatible tables.
 
-use crate::display::hud::{HudState, McpConnectionState, ParticipantKind, ParticipantStatus, Presence};
+use crate::display::hud::{
+    HudState, McpConnectionState, ParticipantKind, ParticipantStatus, Presence,
+};
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
 /// Build a Lua table representing the HUD context
@@ -119,7 +121,10 @@ pub struct PendingNotification {
 }
 
 /// Build notifications array for Lua
-pub fn build_notifications_table(lua: &Lua, notifications: &[PendingNotification]) -> LuaResult<Table> {
+pub fn build_notifications_table(
+    lua: &Lua,
+    notifications: &[PendingNotification],
+) -> LuaResult<Table> {
     let arr = lua.create_table()?;
 
     for (i, n) in notifications.iter().enumerate() {
@@ -144,7 +149,9 @@ mod tests {
         state.room_name = Some("test_room".to_string());
         state.add_user("alice".to_string());
         state.add_model("qwen-8b".to_string());
-        state.exits.insert("north".to_string(), "other_room".to_string());
+        state
+            .exits
+            .insert("north".to_string(), "other_room".to_string());
 
         let ctx = build_hud_context(&lua, &state).expect("should build context");
 
@@ -167,7 +174,10 @@ mod tests {
     #[test]
     fn test_status_to_strings() {
         assert_eq!(status_to_strings(&ParticipantStatus::Idle), ("idle", None));
-        assert_eq!(status_to_strings(&ParticipantStatus::Thinking), ("thinking", None));
+        assert_eq!(
+            status_to_strings(&ParticipantStatus::Thinking),
+            ("thinking", None)
+        );
         assert_eq!(
             status_to_strings(&ParticipantStatus::RunningTool("sample".to_string())),
             ("running_tool", Some("sample".to_string()))

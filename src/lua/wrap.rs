@@ -82,4 +82,3 @@ pub fn compose_context(lua: &Lua, target_tokens: usize) -> Result<WrapResult> {
         context,
     })
 }
-

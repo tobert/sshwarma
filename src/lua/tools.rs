@@ -181,7 +181,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             if notifications.is_empty() {
                 Ok(Value::Nil)
             } else {
-                Ok(Value::Table(build_notifications_table(lua, &notifications)?))
+                Ok(Value::Table(build_notifications_table(
+                    lua,
+                    &notifications,
+                )?))
             }
         })?
     };
@@ -414,7 +417,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                         row.set("author", sender_name)?;
                         row.set("content", text)?;
                         row.set("timestamp", entry.timestamp.timestamp_millis())?;
-                        row.set("is_model", matches!(entry.source, EntrySource::Model { .. }))?;
+                        row.set(
+                            "is_model",
+                            matches!(entry.source, EntrySource::Model { .. }),
+                        )?;
                         list.set(idx, row)?;
                         idx += 1;
                     }
@@ -836,41 +842,41 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // Increment a counter metric with auto-context (room) and optional extra labels
     let metric_counter_fn = {
         let state = state.clone();
-        lua.create_function(move |_, (name, delta, extra_labels): (String, Option<i64>, Option<Value>)| {
-            let delta = delta.unwrap_or(1) as u64;
+        lua.create_function(
+            move |_, (name, delta, extra_labels): (String, Option<i64>, Option<Value>)| {
+                let delta = delta.unwrap_or(1) as u64;
 
-            // Auto-context from HudState
-            let hud = state.hud_state();
-            let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+                // Auto-context from HudState
+                let hud = state.hud_state();
+                let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
 
-            // Build attributes
-            let mut attrs = vec![
-                opentelemetry::KeyValue::new("room", room),
-            ];
+                // Build attributes
+                let mut attrs = vec![opentelemetry::KeyValue::new("room", room)];
 
-            // Add extra labels if provided
-            if let Some(Value::Table(t)) = extra_labels {
-                for (k, v) in t.pairs::<String, Value>().flatten() {
-                    let val = match v {
-                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                        Value::Integer(i) => Some(i.to_string()),
-                        Value::Number(n) => Some(n.to_string()),
-                        Value::Boolean(b) => Some(b.to_string()),
-                        _ => None,
-                    };
-                    if let Some(val) = val {
-                        attrs.push(opentelemetry::KeyValue::new(k, val));
+                // Add extra labels if provided
+                if let Some(Value::Table(t)) = extra_labels {
+                    for (k, v) in t.pairs::<String, Value>().flatten() {
+                        let val = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let Some(val) = val {
+                            attrs.push(opentelemetry::KeyValue::new(k, val));
+                        }
                     }
                 }
-            }
 
-            // Record via OpenTelemetry metrics API
-            let meter = opentelemetry::global::meter("sshwarma.lua");
-            let counter = meter.u64_counter(name).build();
-            counter.add(delta, &attrs);
+                // Record via OpenTelemetry metrics API
+                let meter = opentelemetry::global::meter("sshwarma.lua");
+                let counter = meter.u64_counter(name).build();
+                counter.add(delta, &attrs);
 
-            Ok(())
-        })?
+                Ok(())
+            },
+        )?
     };
     tools.set("metric_counter", metric_counter_fn)?;
 
@@ -878,39 +884,39 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // Set a gauge metric value with auto-context
     let metric_gauge_fn = {
         let state = state.clone();
-        lua.create_function(move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
-            // Auto-context from HudState
-            let hud = state.hud_state();
-            let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+        lua.create_function(
+            move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
+                // Auto-context from HudState
+                let hud = state.hud_state();
+                let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
 
-            // Build attributes
-            let mut attrs = vec![
-                opentelemetry::KeyValue::new("room", room),
-            ];
+                // Build attributes
+                let mut attrs = vec![opentelemetry::KeyValue::new("room", room)];
 
-            // Add extra labels if provided
-            if let Some(Value::Table(t)) = extra_labels {
-                for (k, v) in t.pairs::<String, Value>().flatten() {
-                    let val = match v {
-                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                        Value::Integer(i) => Some(i.to_string()),
-                        Value::Number(n) => Some(n.to_string()),
-                        Value::Boolean(b) => Some(b.to_string()),
-                        _ => None,
-                    };
-                    if let Some(val) = val {
-                        attrs.push(opentelemetry::KeyValue::new(k, val));
+                // Add extra labels if provided
+                if let Some(Value::Table(t)) = extra_labels {
+                    for (k, v) in t.pairs::<String, Value>().flatten() {
+                        let val = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let Some(val) = val {
+                            attrs.push(opentelemetry::KeyValue::new(k, val));
+                        }
                     }
                 }
-            }
 
-            // Record via OpenTelemetry metrics API (using observable gauge pattern)
-            let meter = opentelemetry::global::meter("sshwarma.lua");
-            let gauge = meter.f64_gauge(name).build();
-            gauge.record(value, &attrs);
+                // Record via OpenTelemetry metrics API (using observable gauge pattern)
+                let meter = opentelemetry::global::meter("sshwarma.lua");
+                let gauge = meter.f64_gauge(name).build();
+                gauge.record(value, &attrs);
 
-            Ok(())
-        })?
+                Ok(())
+            },
+        )?
     };
     tools.set("metric_gauge", metric_gauge_fn)?;
 
@@ -918,39 +924,39 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // Record a histogram observation with auto-context
     let metric_histogram_fn = {
         let state = state.clone();
-        lua.create_function(move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
-            // Auto-context from HudState
-            let hud = state.hud_state();
-            let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+        lua.create_function(
+            move |_, (name, value, extra_labels): (String, f64, Option<Value>)| {
+                // Auto-context from HudState
+                let hud = state.hud_state();
+                let room = hud.room_name.clone().unwrap_or_else(|| "lobby".to_string());
 
-            // Build attributes
-            let mut attrs = vec![
-                opentelemetry::KeyValue::new("room", room),
-            ];
+                // Build attributes
+                let mut attrs = vec![opentelemetry::KeyValue::new("room", room)];
 
-            // Add extra labels if provided
-            if let Some(Value::Table(t)) = extra_labels {
-                for (k, v) in t.pairs::<String, Value>().flatten() {
-                    let val = match v {
-                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                        Value::Integer(i) => Some(i.to_string()),
-                        Value::Number(n) => Some(n.to_string()),
-                        Value::Boolean(b) => Some(b.to_string()),
-                        _ => None,
-                    };
-                    if let Some(val) = val {
-                        attrs.push(opentelemetry::KeyValue::new(k, val));
+                // Add extra labels if provided
+                if let Some(Value::Table(t)) = extra_labels {
+                    for (k, v) in t.pairs::<String, Value>().flatten() {
+                        let val = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let Some(val) = val {
+                            attrs.push(opentelemetry::KeyValue::new(k, val));
+                        }
                     }
                 }
-            }
 
-            // Record via OpenTelemetry metrics API
-            let meter = opentelemetry::global::meter("sshwarma.lua");
-            let histogram = meter.f64_histogram(name).build();
-            histogram.record(value, &attrs);
+                // Record via OpenTelemetry metrics API
+                let meter = opentelemetry::global::meter("sshwarma.lua");
+                let histogram = meter.f64_histogram(name).build();
+                histogram.record(value, &attrs);
 
-            Ok(())
-        })?
+                Ok(())
+            },
+        )?
     };
     tools.set("metric_histogram", metric_histogram_fn)?;
 
@@ -1193,8 +1199,10 @@ mod tests {
         async fn add_message(&self, room: &str, sender: &str, content: &str) {
             let mut world = self.world.write().await;
             if let Some(r) = world.get_room_mut(room) {
-                r.ledger
-                    .push(EntrySource::User(sender.to_string()), EntryContent::Chat(content.to_string()));
+                r.ledger.push(
+                    EntrySource::User(sender.to_string()),
+                    EntryContent::Chat(content.to_string()),
+                );
             }
         }
 
@@ -1311,22 +1319,26 @@ mod tests {
         register_tools(&lua, state).expect("should register tools");
 
         // Test kv_set and kv_get
-        lua.load(r#"
+        lua.load(
+            r#"
             tools.kv_set("test.key", {foo = "bar", count = 42})
             local val = tools.kv_get("test.key")
             assert(val.foo == "bar", "foo should be bar")
             assert(val.count == 42, "count should be 42")
-        "#)
+        "#,
+        )
         .exec()
         .expect("kv_set/kv_get should work");
 
         // Test kv_delete
-        lua.load(r#"
+        lua.load(
+            r#"
             local old = tools.kv_delete("test.key")
             assert(old.foo == "bar", "deleted value should have foo")
             local gone = tools.kv_get("test.key")
             assert(gone == nil, "key should be deleted")
-        "#)
+        "#,
+        )
         .exec()
         .expect("kv_delete should work");
     }
@@ -1591,9 +1603,7 @@ mod tests {
 
         rt.block_on(async {
             instance.create_room("testroom", None).await;
-            instance
-                .add_inspiration("testroom", "Be creative!")
-                .await;
+            instance.add_inspiration("testroom", "Be creative!").await;
         });
 
         let lua = Lua::new();

@@ -168,8 +168,7 @@ impl McpBridge {
         let now = Instant::now();
         guard.retain(|_id, state| {
             // Keep pending requests and recently completed ones
-            state.status == RequestStatus::Pending
-                || now.duration_since(state.created_at) < max_age
+            state.status == RequestStatus::Pending || now.duration_since(state.created_at) < max_age
         });
     }
 }

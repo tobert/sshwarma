@@ -172,7 +172,9 @@ mod tests {
     async fn test_cache_get_set() {
         let cache = ToolCache::new();
 
-        cache.set("test_key".to_string(), json!({"foo": "bar"})).await;
+        cache
+            .set("test_key".to_string(), json!({"foo": "bar"}))
+            .await;
 
         let result = cache.get("test_key").await;
         assert!(result.is_some());

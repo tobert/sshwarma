@@ -132,10 +132,7 @@ impl ToolMiddleware {
 
     /// Get all configured aliases
     pub fn aliases(&self) -> HashMap<String, String> {
-        self.aliases
-            .read()
-            .map(|a| a.clone())
-            .unwrap_or_default()
+        self.aliases.read().map(|a| a.clone()).unwrap_or_default()
     }
 
     /// Call on_mcp_tools hook if defined
@@ -262,13 +259,7 @@ impl ToolMiddleware {
 
         // Call hook
         let result: Value = call_with_timeout(
-            || {
-                func.call((
-                    mcp_name.to_string(),
-                    tool_name.to_string(),
-                    args_table,
-                ))
-            },
+            || func.call((mcp_name.to_string(), tool_name.to_string(), args_table)),
             Duration::from_millis(HOOK_TIMEOUT_MS),
         )?;
 
@@ -477,16 +468,13 @@ fn lua_to_tools(table: &Table) -> Result<Vec<ToolInfoExt>> {
         let source: String = tool_table.get("source").unwrap_or_default();
 
         // Get input_schema if present
-        let input_schema = tool_table
-            .get::<Value>("input_schema")
-            .ok()
-            .and_then(|v| {
-                if v == Value::Nil {
-                    None
-                } else {
-                    lua_to_json(&v).ok()
-                }
-            });
+        let input_schema = tool_table.get::<Value>("input_schema").ok().and_then(|v| {
+            if v == Value::Nil {
+                None
+            } else {
+                lua_to_json(&v).ok()
+            }
+        });
 
         tools.push(ToolInfoExt {
             name,
@@ -535,11 +523,9 @@ fn lua_to_json(value: &Value) -> mlua::Result<serde_json::Value> {
         Value::Nil => Ok(serde_json::Value::Null),
         Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
         Value::Integer(i) => Ok(serde_json::Value::Number((*i).into())),
-        Value::Number(n) => {
-            serde_json::Number::from_f64(*n)
-                .map(serde_json::Value::Number)
-                .ok_or_else(|| mlua::Error::runtime("invalid float"))
-        }
+        Value::Number(n) => serde_json::Number::from_f64(*n)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| mlua::Error::runtime("invalid float")),
         Value::String(s) => Ok(serde_json::Value::String(s.to_str()?.to_string())),
         Value::Table(table) => {
             // Check if it's an array (sequential integer keys starting at 1)
@@ -663,12 +649,14 @@ mod tests {
         lua.globals().set("tools", tools).unwrap();
 
         // Test set_tool_priority
-        lua.load(r#"
+        lua.load(
+            r#"
             tools.set_tool_priority({
                 sample = "holler",
                 web_search = "exa"
             })
-        "#)
+        "#,
+        )
         .exec()
         .unwrap();
 
@@ -682,7 +670,8 @@ mod tests {
         let mw = ToolMiddleware::new();
 
         // Define a filtering hook
-        lua.load(r#"
+        lua.load(
+            r#"
             function on_mcp_tools(mcp_name, tools, context)
                 local filtered = {}
                 for _, tool in ipairs(tools) do
@@ -692,7 +681,8 @@ mod tests {
                 end
                 return filtered
             end
-        "#)
+        "#,
+        )
         .exec()
         .unwrap();
 
@@ -720,19 +710,23 @@ mod tests {
         let mw = ToolMiddleware::new();
 
         // Define a modifying hook
-        lua.load(r#"
+        lua.load(
+            r#"
             function on_tool_call(mcp_name, tool_name, args)
                 if not args.creator then
                     args.creator = "hook_default"
                 end
                 return args
             end
-        "#)
+        "#,
+        )
         .exec()
         .unwrap();
 
         let args = serde_json::json!({"space": "orpheus"});
-        let result = mw.process_tool_call(&lua, "holler", "sample", args).unwrap();
+        let result = mw
+            .process_tool_call(&lua, "holler", "sample", args)
+            .unwrap();
 
         assert!(result.is_some());
         let modified = result.unwrap();
@@ -746,14 +740,16 @@ mod tests {
         let mw = ToolMiddleware::new();
 
         // Define a blocking hook
-        lua.load(r#"
+        lua.load(
+            r#"
             function on_tool_call(mcp_name, tool_name, args)
                 if tool_name == "blocked_tool" then
                     return nil  -- Block the call
                 end
                 return args
             end
-        "#)
+        "#,
+        )
         .exec()
         .unwrap();
 

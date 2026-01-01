@@ -212,8 +212,8 @@ impl LuaRuntime {
     ///
     /// Replaces the current script. The script must define a `render_hud` function.
     pub fn load_script(&mut self, path: &PathBuf) -> Result<()> {
-        let script =
-            fs::read_to_string(path).with_context(|| format!("failed to read script {:?}", path))?;
+        let script = fs::read_to_string(path)
+            .with_context(|| format!("failed to read script {:?}", path))?;
 
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
 
