@@ -101,7 +101,7 @@ pub fn startup_script_path() -> PathBuf {
 /// Lua runtime for HUD rendering
 ///
 /// Manages the Lua state, script loading, and hot-reloading.
-/// Provides `render_hud()` to generate HUD output from Lua.
+/// Lua scripts implement `on_tick(tick, ctx)` to render the HUD.
 pub struct LuaRuntime {
     /// The Lua interpreter state
     lua: Lua,
@@ -258,7 +258,7 @@ impl LuaRuntime {
 
     /// Load a Lua script from file
     ///
-    /// Replaces the current script. The script must define a `render_hud` function.
+    /// Replaces the current script. The script should define an `on_tick` function.
     pub fn load_script(&mut self, path: &PathBuf) -> Result<()> {
         let script = fs::read_to_string(path)
             .with_context(|| format!("failed to read script {:?}", path))?;
@@ -272,13 +272,13 @@ impl LuaRuntime {
             .exec()
             .map_err(|e| anyhow::anyhow!("failed to execute script {:?}: {}", path, e))?;
 
-        // Verify render_hud function exists
+        // Verify on_tick function exists (optional - script can define just background)
         let globals = self.lua.globals();
-        let render_hud: Value = globals
-            .get("render_hud")
-            .map_err(|e| anyhow::anyhow!("failed to get render_hud: {}", e))?;
-        if render_hud == Value::Nil {
-            anyhow::bail!("script must define a render_hud function");
+        let on_tick: Value = globals
+            .get("on_tick")
+            .map_err(|e| anyhow::anyhow!("failed to get on_tick: {}", e))?;
+        if on_tick == Value::Nil {
+            warn!("Script {:?} does not define on_tick function", path);
         }
 
         self.loaded_script_path = Some(path.clone());
@@ -347,7 +347,7 @@ impl LuaRuntime {
 
     /// Update the HUD state before rendering
     ///
-    /// Call this before `render_hud()` to provide current state.
+    /// Call this before `call_on_tick()` to provide current state.
     pub fn update_state(&self, state: HudState) {
         self.tool_state.update_hud_state(state);
     }
@@ -391,53 +391,6 @@ impl LuaRuntime {
     /// Get a reference to the Lua state
     pub fn lua(&self) -> &Lua {
         &self.lua
-    }
-
-    /// Render the HUD by calling Lua's render_hud function
-    ///
-    /// Returns the raw Lua table result. Use `parse_lua_output()` to convert
-    /// this to an ANSI-escaped string for terminal display.
-    ///
-    /// # Arguments
-    /// - `now_ms`: Current time in milliseconds (for animations)
-    /// - `width`: Terminal width
-    /// - `height`: Terminal height
-    ///
-    /// # Returns
-    /// Lua table with 8 rows of segments
-    pub fn render_hud(&self, now_ms: i64, width: u16, height: u16) -> Result<Table> {
-        let globals = self.lua.globals();
-        let render_fn: mlua::Function = globals.get("render_hud").map_err(|e| {
-            let msg = format!("render_hud function not found: {}", e);
-            record_lua_error("render_hud_missing", &msg);
-            anyhow::anyhow!("{}", msg)
-        })?;
-
-        let result: Table = render_fn
-            .call((now_ms, width as i64, height as i64))
-            .map_err(|e| {
-                let msg = format!("render_hud call failed: {}", e);
-                record_lua_error("render_hud", &msg);
-                anyhow::anyhow!("{}", msg)
-            })?;
-
-        Ok(result)
-    }
-
-    /// Render the HUD and convert to ANSI string
-    ///
-    /// Convenience method that calls `render_hud()` and then `parse_lua_output()`.
-    ///
-    /// # Arguments
-    /// - `now_ms`: Current time in milliseconds (for animations)
-    /// - `width`: Terminal width
-    /// - `height`: Terminal height
-    ///
-    /// # Returns
-    /// 8 lines joined by CRLF with ANSI color codes
-    pub fn render_hud_string(&self, now_ms: i64, width: u16, height: u16) -> Result<String> {
-        let table = self.render_hud(now_ms, width, height)?;
-        parse_lua_output(table)
     }
 
     /// Compose context for LLM interactions
@@ -1189,6 +1142,7 @@ mod tests {
 
     #[test]
     fn test_hot_reload_detects_file_change() {
+        use std::sync::{Arc, Mutex};
         use std::thread;
         use std::time::Duration;
 
@@ -1197,12 +1151,10 @@ mod tests {
         let script_path = temp_dir.join(format!("test_hud_{}.lua", std::process::id()));
 
         let initial_script = r#"
-function render_hud(now_ms, width, height)
-    local rows = {}
-    for i = 1, 8 do
-        rows[i] = {{Text = "initial"}}
-    end
-    return rows
+test_value = "initial"
+function on_tick(tick, ctx)
+    ctx:clear()
+    ctx:print(0, 0, test_value)
 end
 "#;
 
@@ -1223,12 +1175,10 @@ end
 
         // Modify the file
         let modified_script = r#"
-function render_hud(now_ms, width, height)
-    local rows = {}
-    for i = 1, 8 do
-        rows[i] = {{Text = "modified"}}
-    end
-    return rows
+test_value = "modified"
+function on_tick(tick, ctx)
+    ctx:clear()
+    ctx:print(0, 0, test_value)
 end
 "#;
         fs::write(&script_path, modified_script).expect("should write modified script");
@@ -1236,17 +1186,17 @@ end
         // Check reload should detect the change
         assert!(runtime.check_reload(), "should detect file modification");
 
-        // Verify new script is loaded by rendering
+        // Verify new script is loaded by calling on_tick
         runtime.update_state(HudState::new());
-        let table = runtime
-            .render_hud(chrono::Utc::now().timestamp_millis(), 80, 8)
-            .expect("should render");
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
+        runtime
+            .call_on_tick(1, render_buffer.clone(), 80, 8)
+            .expect("should call on_tick");
 
-        // Get first row, first segment
-        let row: Table = table.get(1).expect("should have row 1");
-        let segment: Table = row.get(1).expect("should have segment");
-        let text: String = segment.get("Text").expect("should have Text");
-        assert_eq!(text, "modified", "should use modified script");
+        // Check that buffer contains "modified"
+        let buf = render_buffer.lock().unwrap();
+        let output = buf.to_ansi();
+        assert!(output.contains("modified"), "should use modified script");
 
         // Cleanup
         let _ = fs::remove_file(&script_path);
@@ -1254,17 +1204,16 @@ end
 
     #[test]
     fn test_hot_reload_fallback_on_delete() {
+        use std::sync::{Arc, Mutex};
+
         // Create a temp file
         let temp_dir = std::env::temp_dir();
         let script_path = temp_dir.join(format!("test_hud_delete_{}.lua", std::process::id()));
 
         let script = r#"
-function render_hud(now_ms, width, height)
-    local rows = {}
-    for i = 1, 8 do
-        rows[i] = {{Text = "user script"}}
-    end
-    return rows
+function on_tick(tick, ctx)
+    ctx:clear()
+    ctx:print(0, 0, "user script")
 end
 "#;
         fs::write(&script_path, script).expect("should write script");
@@ -1288,14 +1237,19 @@ end
 
         // Should still render (using embedded default)
         runtime.update_state(HudState::new());
-        let output = runtime
-            .render_hud_string(chrono::Utc::now().timestamp_millis(), 80, 8)
-            .expect("should render with embedded script");
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
+        runtime
+            .call_on_tick(1, render_buffer.clone(), 80, 8)
+            .expect("should call on_tick with embedded script");
+
+        let buf = render_buffer.lock().unwrap();
+        let output = buf.to_ansi();
         assert!(!output.is_empty(), "should produce output");
     }
 
     #[test]
     fn test_hot_reload_keeps_previous_on_syntax_error() {
+        use std::sync::{Arc, Mutex};
         use std::thread;
         use std::time::Duration;
 
@@ -1304,12 +1258,9 @@ end
         let script_path = temp_dir.join(format!("test_hud_syntax_{}.lua", std::process::id()));
 
         let valid_script = r#"
-function render_hud(now_ms, width, height)
-    local rows = {}
-    for i = 1, 8 do
-        rows[i] = {{Text = "valid"}}
-    end
-    return rows
+function on_tick(tick, ctx)
+    ctx:clear()
+    ctx:print(0, 0, "valid")
 end
 "#;
         fs::write(&script_path, valid_script).expect("should write valid script");
@@ -1324,9 +1275,9 @@ end
 
         // Write invalid script
         let invalid_script = r#"
-function render_hud(now_ms, width, height
+function on_tick(tick, ctx
     -- Missing closing paren = syntax error
-    return {}
+    ctx:clear()
 end
 "#;
         fs::write(&script_path, invalid_script).expect("should write invalid script");
@@ -1334,10 +1285,11 @@ end
         // Check reload - should attempt but fail, keeping previous version
         let _reloaded = runtime.check_reload();
         // The reload attempt happened but may have failed
-        // The important thing is that render still works
+        // The important thing is that on_tick still works
 
         runtime.update_state(HudState::new());
-        let result = runtime.render_hud(chrono::Utc::now().timestamp_millis(), 80, 8);
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 8)));
+        let result = runtime.call_on_tick(1, render_buffer.clone(), 80, 8);
 
         // Should still be able to render (using previous valid script)
         assert!(result.is_ok(), "should still render after failed reload");
