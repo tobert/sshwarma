@@ -822,7 +822,7 @@ impl Database {
                         .unwrap_or_else(|_| Utc::now()),
                     author: row.get(2)?,
                     content: row.get(3)?,
-                    kind: JournalKind::from_str(&kind_str).unwrap_or(JournalKind::Note),
+                    kind: JournalKind::parse(&kind_str).unwrap_or(JournalKind::Note),
                 })
             })?;
             for row in rows {
@@ -842,7 +842,7 @@ impl Database {
                         .unwrap_or_else(|_| Utc::now()),
                     author: row.get(2)?,
                     content: row.get(3)?,
-                    kind: JournalKind::from_str(&kind_str).unwrap_or(JournalKind::Note),
+                    kind: JournalKind::parse(&kind_str).unwrap_or(JournalKind::Note),
                 })
             })?;
             for row in rows {
@@ -1107,13 +1107,9 @@ impl Database {
         let mut ancestry = Vec::new();
         let mut current = room.to_string();
 
-        loop {
-            if let Some(parent) = self.get_parent(&current)? {
-                ancestry.push(parent.clone());
-                current = parent;
-            } else {
-                break;
-            }
+        while let Some(parent) = self.get_parent(&current)? {
+            ancestry.push(parent.clone());
+            current = parent;
         }
 
         Ok(ancestry)

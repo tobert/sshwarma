@@ -58,8 +58,8 @@ impl SshHandler {
     pub async fn handle_input(&mut self, input: &str) -> CommandResult {
         let input = input.trim();
 
-        if input.starts_with('/') {
-            let parts: Vec<&str> = input[1..].splitn(2, ' ').collect();
+        if let Some(rest) = input.strip_prefix('/') {
+            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
             let cmd = parts.first().unwrap_or(&"");
             let args = parts.get(1).copied().unwrap_or("");
 

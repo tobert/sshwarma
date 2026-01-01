@@ -430,6 +430,7 @@ impl server::Handler for SshHandler {
 }
 
 /// Background task that watches for model responses and pushes them to the terminal
+#[allow(clippy::too_many_arguments)]
 #[instrument(name = "ssh.push_updates", skip_all)]
 async fn push_updates_task(
     handle: Handle,
@@ -543,7 +544,7 @@ async fn hud_refresh_task(
         tick_count = tick_count.wrapping_add(1);
 
         // Every 10 ticks (1 second): poll MCP status and check hot-reload
-        if tick_count % 10 == 0 {
+        if tick_count.is_multiple_of(10) {
             let mcp_connections = state.mcp.list_connections().await;
             let mut hud = hud_state.lock().await;
             hud.set_mcp_connections(
@@ -889,7 +890,7 @@ impl SshHandler {
 
         output.push_str("  ╰");
         output.push_str(&"─".repeat(40));
-        output.push_str("╯");
+        output.push('╯');
 
         // Restore cursor
         output.push_str("\x1b[u");

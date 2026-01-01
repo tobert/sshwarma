@@ -464,6 +464,42 @@ impl McpManager {
     pub async fn list_connections(&self) -> Vec<ConnectionStatus> {
         self.list()
     }
+
+    /// Wait for a connection to reach Connected state.
+    ///
+    /// Useful for tests that need to ensure a connection is ready before proceeding.
+    /// Polls the connection status at intervals until connected or timeout.
+    pub async fn wait_for_connected(
+        &self,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(50);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(anyhow::anyhow!(
+                    "timeout waiting for MCP '{}' to connect",
+                    name
+                ));
+            }
+
+            if let Some(status) = self.status(name) {
+                if status.state == "connected" {
+                    return Ok(());
+                }
+                if let Some(error) = status.error {
+                    // Still reconnecting, but log the error
+                    debug!(mcp = %name, error = %error, "MCP reconnecting");
+                }
+            } else {
+                return Err(anyhow::anyhow!("MCP '{}' not found", name));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
 }
 
 impl Default for McpManager {

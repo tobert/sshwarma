@@ -3,7 +3,6 @@
 //! Uses rmcp (official Rust MCP SDK) with streamable HTTP transport.
 
 mod backoff;
-mod client;
 mod events;
 mod manager;
 
@@ -13,11 +12,8 @@ pub use backoff::Backoff;
 // Re-export event types
 pub use events::{McpEvent, McpEventReceiver, McpEventSender};
 
-// Re-export manager types (new managed approach)
+// Re-export manager types
 pub use manager::{ConnectionState, ConnectionStatus, McpManager};
 
-// Re-export common types from manager (these replace client types going forward)
+// Re-export common types from manager
 pub use manager::{RigToolContext, ToolInfo, ToolResult};
-
-// Re-export legacy client types for backwards compatibility during migration
-pub use client::{ConnectionInfo, McpClients};

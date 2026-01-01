@@ -19,10 +19,7 @@ use crate::state::SharedState;
 
 /// Convert anyhow::Error to ToolError
 fn anyhow_to_tool_error(e: anyhow::Error) -> ToolError {
-    ToolError::ToolCallError(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        e.to_string(),
-    )))
+    ToolError::ToolCallError(Box::new(std::io::Error::other(e.to_string())))
 }
 
 /// Configuration for internal tools

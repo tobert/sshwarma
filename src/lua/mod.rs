@@ -7,6 +7,7 @@ pub mod cache;
 pub mod context;
 pub mod mcp_bridge;
 pub mod render;
+pub mod tool_middleware;
 pub mod tools;
 pub mod wrap;
 
@@ -14,6 +15,7 @@ pub use cache::ToolCache;
 pub use context::{build_hud_context, PendingNotification};
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use render::{parse_lua_output, HUD_ROWS};
+pub use tool_middleware::{ToolContext, ToolMiddleware};
 pub use tools::{register_mcp_tools, LuaToolState};
 pub use wrap::{compose_context, WrapResult, WrapState};
 
@@ -451,7 +453,7 @@ impl LuaRuntime {
                     hud.description = room.description.clone();
 
                     // Build participants list
-                    let users: Vec<String> = room.users.iter().cloned().collect();
+                    let users: Vec<String> = room.users.to_vec();
                     let models: Vec<String> = wrap_state
                         .shared_state
                         .models
@@ -527,7 +529,7 @@ impl LuaRuntime {
                     hud.description = room.description.clone();
 
                     // Build participants list
-                    let users: Vec<String> = room.users.iter().cloned().collect();
+                    let users: Vec<String> = room.users.to_vec();
                     let models: Vec<String> = wrap_state
                         .shared_state
                         .models

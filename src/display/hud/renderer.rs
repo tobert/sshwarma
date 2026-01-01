@@ -206,7 +206,7 @@ fn render_mcp_row(state: &HudState, inner_width: usize) -> String {
             content.push_str(&format!("({})", stats).with(colors::DIM).to_string());
 
             if let Some(ref last) = conn.last_tool {
-                content.push_str(" ");
+                content.push(' ');
                 content.push_str(&last.as_str().with(colors::CYAN).to_string());
             }
         }

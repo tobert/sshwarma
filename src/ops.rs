@@ -242,7 +242,7 @@ pub async fn get_journal(
     kind_filter: Option<&str>,
     limit: usize,
 ) -> Result<Vec<JournalEntry>> {
-    let db_kind = kind_filter.and_then(crate::world::JournalKind::from_str);
+    let db_kind = kind_filter.and_then(crate::world::JournalKind::parse);
     let entries = state.db.get_journal_entries(room_name, db_kind, limit)?;
 
     Ok(entries

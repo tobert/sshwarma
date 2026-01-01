@@ -526,7 +526,7 @@ impl SshwarmaMcpServer {
 
     #[tool(description = "Read journal entries from a room")]
     async fn journal_read(&self, Parameters(params): Parameters<JournalReadParams>) -> String {
-        let kind = params.kind.as_ref().and_then(|k| JournalKind::from_str(k));
+        let kind = params.kind.as_ref().and_then(|k| JournalKind::parse(k));
         let limit = params.limit.unwrap_or(20);
 
         match self.state.db.get_journal_entries(&params.room, kind, limit) {
@@ -554,7 +554,7 @@ impl SshwarmaMcpServer {
 
     #[tool(description = "Write a journal entry to a room")]
     async fn journal_write(&self, Parameters(params): Parameters<JournalWriteParams>) -> String {
-        let kind = match JournalKind::from_str(&params.kind) {
+        let kind = match JournalKind::parse(&params.kind) {
             Some(k) => k,
             None => return format!(
                 "Invalid kind '{}'. Use: note, decision, milestone, idea, question",

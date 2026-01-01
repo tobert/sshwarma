@@ -8,6 +8,7 @@ use crate::display::{EntryContent, EntrySource};
 use crate::lua::cache::ToolCache;
 use crate::lua::context::{build_hud_context, build_notifications_table, PendingNotification};
 use crate::lua::mcp_bridge::McpBridge;
+use crate::lua::tool_middleware::ToolMiddleware;
 use crate::model::ModelHandle;
 use crate::state::SharedState;
 use crate::world::JournalKind;
@@ -45,6 +46,8 @@ pub struct LuaToolState {
     shared_state: Arc<RwLock<Option<Arc<SharedState>>>>,
     /// Session context (user, model, room) for wrap operations
     session_context: Arc<RwLock<Option<SessionContext>>>,
+    /// Tool middleware for routing and transformation
+    middleware: ToolMiddleware,
 }
 
 impl LuaToolState {
@@ -56,7 +59,13 @@ impl LuaToolState {
             cache: ToolCache::new(),
             shared_state: Arc::new(RwLock::new(None)),
             session_context: Arc::new(RwLock::new(None)),
+            middleware: ToolMiddleware::new(),
         }
+    }
+
+    /// Get a reference to the tool middleware
+    pub fn middleware(&self) -> &ToolMiddleware {
+        &self.middleware
     }
 
     /// Update the HUD state (called before render)
@@ -425,7 +434,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             let list = lua.create_table()?;
 
             // Parse kind filter if provided
-            let kind_filter = kind.as_ref().and_then(|k| JournalKind::from_str(k));
+            let kind_filter = kind.as_ref().and_then(|k| JournalKind::parse(k));
 
             // Get room name from HudState
             let hud = state.hud_state();
@@ -693,7 +702,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
             let Some(shared) = state.shared_state() else {
-                return Ok(lua.create_table()?); // Empty table
+                return lua.create_table(); // Empty table
             };
             let list = shared.mcp.list(); // Non-blocking
 
@@ -841,18 +850,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Add extra labels if provided
             if let Some(Value::Table(t)) = extra_labels {
-                for pair in t.pairs::<String, Value>() {
-                    if let Ok((k, v)) = pair {
-                        let val = match v {
-                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                            Value::Integer(i) => Some(i.to_string()),
-                            Value::Number(n) => Some(n.to_string()),
-                            Value::Boolean(b) => Some(b.to_string()),
-                            _ => None,
-                        };
-                        if let Some(val) = val {
-                            attrs.push(opentelemetry::KeyValue::new(k, val));
-                        }
+                for (k, v) in t.pairs::<String, Value>().flatten() {
+                    let val = match v {
+                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                        Value::Integer(i) => Some(i.to_string()),
+                        Value::Number(n) => Some(n.to_string()),
+                        Value::Boolean(b) => Some(b.to_string()),
+                        _ => None,
+                    };
+                    if let Some(val) = val {
+                        attrs.push(opentelemetry::KeyValue::new(k, val));
                     }
                 }
             }
@@ -883,18 +890,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Add extra labels if provided
             if let Some(Value::Table(t)) = extra_labels {
-                for pair in t.pairs::<String, Value>() {
-                    if let Ok((k, v)) = pair {
-                        let val = match v {
-                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                            Value::Integer(i) => Some(i.to_string()),
-                            Value::Number(n) => Some(n.to_string()),
-                            Value::Boolean(b) => Some(b.to_string()),
-                            _ => None,
-                        };
-                        if let Some(val) = val {
-                            attrs.push(opentelemetry::KeyValue::new(k, val));
-                        }
+                for (k, v) in t.pairs::<String, Value>().flatten() {
+                    let val = match v {
+                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                        Value::Integer(i) => Some(i.to_string()),
+                        Value::Number(n) => Some(n.to_string()),
+                        Value::Boolean(b) => Some(b.to_string()),
+                        _ => None,
+                    };
+                    if let Some(val) = val {
+                        attrs.push(opentelemetry::KeyValue::new(k, val));
                     }
                 }
             }
@@ -925,18 +930,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Add extra labels if provided
             if let Some(Value::Table(t)) = extra_labels {
-                for pair in t.pairs::<String, Value>() {
-                    if let Ok((k, v)) = pair {
-                        let val = match v {
-                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                            Value::Integer(i) => Some(i.to_string()),
-                            Value::Number(n) => Some(n.to_string()),
-                            Value::Boolean(b) => Some(b.to_string()),
-                            _ => None,
-                        };
-                        if let Some(val) = val {
-                            attrs.push(opentelemetry::KeyValue::new(k, val));
-                        }
+                for (k, v) in t.pairs::<String, Value>().flatten() {
+                    let val = match v {
+                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                        Value::Integer(i) => Some(i.to_string()),
+                        Value::Number(n) => Some(n.to_string()),
+                        Value::Boolean(b) => Some(b.to_string()),
+                        _ => None,
+                    };
+                    if let Some(val) = val {
+                        attrs.push(opentelemetry::KeyValue::new(k, val));
                     }
                 }
             }
@@ -950,6 +953,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("metric_histogram", metric_histogram_fn)?;
+
+    // Register tool middleware functions
+    crate::lua::tool_middleware::register_middleware_tools(lua, &tools, state.middleware.clone())?;
 
     // Set as global
     lua.globals().set("tools", tools)?;

@@ -1,0 +1,151 @@
+-- sshwarma startup script
+-- Copy to ~/.config/sshwarma/startup.lua
+--
+-- This script runs once at server startup, before accepting SSH connections.
+-- Use it to configure MCP connections, create rooms, set vibes, etc.
+--
+-- Available tools:
+--   tools.mcp_connect(name, url) -> bool, error_string
+--   tools.mcp_disconnect(name) -> bool
+
+--------------------------------------------------------------------------------
+-- MCP Server Connections
+--------------------------------------------------------------------------------
+
+--- Connect to holler (hootenanny audio/music tools)
+local function connect_holler()
+    local ok, err = tools.mcp_connect("holler", "http://localhost:8080/mcp")
+    if ok then
+        print("Connected to holler")
+    else
+        print("Failed to connect to holler: " .. (err or "unknown error"))
+    end
+end
+
+--- Connect to otlp-mcp (OpenTelemetry observability)
+local function connect_otlp()
+    local ok, err = tools.mcp_connect("otlp-mcp", "http://localhost:4380/mcp")
+    if ok then
+        print("Connected to otlp-mcp")
+    else
+        print("Failed to connect to otlp-mcp: " .. (err or "unknown error"))
+    end
+end
+
+--- Connect to exa (web search)
+local function connect_exa()
+    -- Only connect if you have exa running locally
+    -- local ok, err = tools.mcp_connect("exa", "http://localhost:8081/mcp")
+    -- if ok then
+    --     print("Connected to exa")
+    -- end
+end
+
+--------------------------------------------------------------------------------
+-- Tool Routing Configuration
+--------------------------------------------------------------------------------
+
+-- Set preferred MCP servers for specific tools
+-- When multiple MCPs provide the same tool, prefer these
+tools.set_tool_priority({
+    -- Prefer holler for music generation
+    sample = "holler",
+    extend = "holler",
+    bridge = "holler",
+    project = "holler",
+    schedule = "holler",
+    -- Prefer exa for web search
+    web_search_exa = "exa",
+})
+
+-- Create tool aliases for convenience
+-- tools.alias_tool("music", "holler:sample")
+-- tools.alias_tool("search", "exa:web_search_exa")
+
+--------------------------------------------------------------------------------
+-- Tool Hooks (Optional)
+--------------------------------------------------------------------------------
+
+--- Normalize schema for llama.cpp compatibility
+--- Strips "default" keys and adds "type": "object" to description-only schemas
+local function normalize_for_llamacpp(schema)
+    if type(schema) ~= "table" then return schema end
+
+    local cleaned = {}
+    for k, v in pairs(schema) do
+        -- Strip "default" keys
+        if k ~= "default" then
+            cleaned[k] = normalize_for_llamacpp(v)
+        end
+    end
+
+    -- Add "type": "object" if has description but no type/$ref
+    if cleaned.description and not cleaned.type and not cleaned["$ref"] then
+        cleaned.type = "object"
+    end
+
+    return cleaned
+end
+
+--- Hook: Called when MCP tools are refreshed
+--- Receives mcp_name, tools list, and context (target_model, model_backend)
+--- Return modified tools list, or nil to keep original
+-- function on_mcp_tools(mcp_name, tools, context)
+--     local filtered = {}
+--     for _, tool in ipairs(tools) do
+--         -- Example: Block admin tools
+--         if not tool.name:match("^admin_") then
+--             -- Apply llama.cpp normalization if needed
+--             if context.model_backend == "llamacpp" and tool.input_schema then
+--                 tool.input_schema = normalize_for_llamacpp(tool.input_schema)
+--             end
+--             table.insert(filtered, tool)
+--         end
+--     end
+--     return filtered
+-- end
+
+--- Hook: Called before tool execution
+--- Return modified args, or nil to block the call
+-- function on_tool_call(mcp_name, tool_name, args)
+--     -- Example: Inject default creator
+--     if tool_name == "sample" and not args.creator then
+--         args.creator = "startup_default"
+--     end
+--     return args
+-- end
+
+--- Hook: Called after tool returns
+--- Return modified result
+-- function on_tool_result(mcp_name, tool_name, result, is_error)
+--     -- Example: Log all tool calls
+--     if is_error then
+--         print("Tool error: " .. mcp_name .. ":" .. tool_name)
+--     end
+--     return result
+-- end
+
+--------------------------------------------------------------------------------
+-- Startup Function
+--------------------------------------------------------------------------------
+
+--- Called by sshwarma at startup
+function startup()
+    print("Running sshwarma startup script...")
+
+    -- Connect to MCP servers
+    -- Comment out any you don't have running
+    connect_holler()
+    connect_otlp()
+    -- connect_exa()
+
+    print("Startup complete!")
+end
+
+-- If the script is run directly (not via startup()), also execute
+-- This allows testing with: lua startup.lua
+if not _G.tools then
+    print("Note: Running outside sshwarma, tools not available")
+else
+    -- Script body executes, then startup() is called by sshwarma
+end

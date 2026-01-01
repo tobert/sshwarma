@@ -31,6 +31,12 @@ impl RoomId {
     }
 }
 
+impl Default for RoomId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Reference to an artifact in the room
 #[derive(Debug, Clone)]
 pub struct ArtifactRef {
@@ -95,7 +101,7 @@ pub enum JournalKind {
 }
 
 impl JournalKind {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "note" => Some(Self::Note),
             "decision" | "decide" => Some(Self::Decision),
@@ -227,6 +233,12 @@ pub struct RoomSummary {
 /// The world: collection of rooms
 pub struct World {
     pub rooms: HashMap<String, Room>,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl World {

@@ -163,7 +163,7 @@ pub enum ExitDirection {
 }
 
 impl ExitDirection {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "n" | "north" => Some(Self::North),
             "e" | "east" => Some(Self::East),
@@ -311,7 +311,7 @@ impl HudState {
     pub fn exit_arrows(&self) -> String {
         let mut arrows = String::new();
         for dir_str in self.exits.keys() {
-            if let Some(dir) = ExitDirection::from_str(dir_str) {
+            if let Some(dir) = ExitDirection::parse(dir_str) {
                 arrows.push(dir.arrow());
             }
         }

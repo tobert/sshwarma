@@ -201,7 +201,6 @@ impl LineEditor {
         match self.history_pos {
             None => {
                 // Not navigating history
-                return;
             }
             Some(pos) if pos + 1 >= self.history.entries.len() => {
                 // Return to saved input

@@ -104,7 +104,7 @@ fn cmd_add(db: &Database, args: &[String]) -> Result<()> {
     }
 
     let key_type = parts[0];
-    let comment = parts.get(2).map(|s| *s);
+    let comment = parts.get(2).copied();
 
     // Store just the first two parts (type + base64) as the canonical key
     let canonical_key = if parts.len() >= 2 {

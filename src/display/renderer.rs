@@ -303,8 +303,10 @@ mod tests {
 
     #[test]
     fn test_render_with_timestamps() {
-        let mut config = RenderConfig::default();
-        config.show_timestamps = true;
+        let config = RenderConfig {
+            show_timestamps: true,
+            ..RenderConfig::default()
+        };
 
         let entry = make_entry(
             EntrySource::User("bob".into()),

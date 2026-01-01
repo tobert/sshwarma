@@ -23,15 +23,13 @@ pub fn parse(input: &str) -> Input {
         return Input::Empty;
     }
 
-    if input.starts_with('/') {
-        let rest = &input[1..];
+    if let Some(rest) = input.strip_prefix('/') {
         let (name, args) = match rest.find(' ') {
             Some(pos) => (rest[..pos].to_string(), rest[pos + 1..].to_string()),
             None => (rest.to_string(), String::new()),
         };
         Input::Command { name, args }
-    } else if input.starts_with('@') {
-        let rest = &input[1..];
+    } else if let Some(rest) = input.strip_prefix('@') {
         let (model, message) = match rest.find(' ') {
             Some(pos) => (rest[..pos].to_string(), rest[pos + 1..].to_string()),
             None => (rest.to_string(), String::new()),
