@@ -1,0 +1,9 @@
+[alias]
+# Run performance benchmarks
+perf = "test --lib perf_ -- --nocapture"
+
+# Run all UI tests
+ui-test = "test --lib ui::"
+
+# Run stress tests only
+stress = "test --lib test_stress_ -- --nocapture"
