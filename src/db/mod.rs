@@ -776,7 +776,6 @@ impl Database {
         Ok(())
     }
 
-    #[allow(unused_variables)]
     pub fn ensure_room(&self, room: &str) -> Result<()> {
         // Check if room exists, create if not
         if self.get_room_by_name(room)?.is_none() {
@@ -786,13 +785,11 @@ impl Database {
         Ok(())
     }
 
-    #[allow(unused_variables)]
     pub fn get_rooms(&self) -> Result<Vec<String>> {
         let rooms = self.list_rooms()?;
         Ok(rooms.into_iter().map(|r| r.name).collect())
     }
 
-    #[allow(unused_variables)]
     pub fn get_exits(&self, room: &str) -> Result<std::collections::HashMap<String, String>> {
         if let Some(room_obj) = self.get_room_by_name(room)? {
             self.get_room_exits(&room_obj.id)
@@ -801,7 +798,6 @@ impl Database {
         }
     }
 
-    #[allow(unused_variables)]
     pub fn add_exit(&self, room: &str, direction: &str, target: &str) -> Result<()> {
         if let Some(room_obj) = self.get_room_by_name(room)? {
             self.set_room_exit(&room_obj.id, direction, target)
@@ -810,7 +806,6 @@ impl Database {
         }
     }
 
-    #[allow(unused_variables)]
     pub fn create_room(&self, room: &str, description: Option<&str>) -> Result<()> {
         let room_obj = rooms::Room::new(room);
         self.insert_room(&room_obj)?;
@@ -1001,7 +996,6 @@ impl Database {
         Ok(result)
     }
 
-    #[allow(unused_variables)]
     pub fn get_room_navigation(&self, room: &str) -> Result<bool> {
         // Default to allowing navigation
         if let Some(room_obj) = self.get_room_by_name(room)? {
@@ -1012,7 +1006,6 @@ impl Database {
         Ok(true)
     }
 
-    #[allow(unused_variables)]
     pub fn set_room_navigation(&self, room: &str, enabled: bool) -> Result<()> {
         if let Some(room_obj) = self.get_room_by_name(room)? {
             self.set_room_kv(

@@ -49,7 +49,6 @@ impl Status {
 #[derive(Debug, Clone)]
 struct StatusEntry {
     status: Status,
-    updated_at: DateTime<Utc>,
 }
 
 /// Thread-safe status tracker
@@ -70,13 +69,7 @@ impl StatusTracker {
     /// Update a participant's status
     pub fn set(&self, name: &str, status: Status) {
         if let Ok(mut guard) = self.statuses.write() {
-            guard.insert(
-                name.to_string(),
-                StatusEntry {
-                    status,
-                    updated_at: Utc::now(),
-                },
-            );
+            guard.insert(name.to_string(), StatusEntry { status });
         }
     }
 

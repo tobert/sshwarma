@@ -58,7 +58,7 @@ async fn screen_refresh_task(
         tick += 1;
 
         // Run Lua background function every 500ms (tick % 5)
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             let background_tick = tick / 5;
 
             // Run user's background() function

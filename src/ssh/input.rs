@@ -65,9 +65,6 @@ impl SshHandler {
         let mut row = Row::message(&buffer.id, &agent.id, message, false);
         self.state.db.append_row(&mut row)?;
 
-        // Render and send
-        self.render_incremental(channel, session).await;
-
         Ok(())
     }
 
@@ -126,9 +123,6 @@ impl SshHandler {
             None
         };
 
-        // Render current state
-        self.render_full(channel, session).await;
-
         // Update status tracker
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
@@ -185,15 +179,5 @@ impl SshHandler {
                 crate::lua::NotificationLevel::Error,
             );
         }
-    }
-
-    /// Render buffer incrementally - now a no-op, Lua handles rendering
-    pub async fn render_incremental(&mut self, _channel: ChannelId, _session: &mut Session) {
-        // Lua's on_tick renders via tools.history() - no direct terminal output needed
-    }
-
-    /// Render full buffer - now a no-op, Lua handles rendering
-    pub async fn render_full(&mut self, _channel: ChannelId, _session: &mut Session) {
-        // Lua's on_tick renders via tools.history() - no direct terminal output needed
     }
 }

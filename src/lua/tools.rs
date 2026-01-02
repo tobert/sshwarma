@@ -205,7 +205,6 @@ impl Default for LuaToolState {
 /// - `tools.cached(key)` - reads from cache
 ///
 /// For HUD state, use `sshwarma.call("status")` instead.
-/// MCP tools can be registered dynamically via `register_mcp_tool`.
 pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let tools = lua.create_table()?;
 
@@ -1154,38 +1153,6 @@ impl UserData for LuaToolStateWrapper {
     fn add_methods<M: UserDataMethods<Self>>(_methods: &mut M) {
         // We don't expose methods directly; access via registry
     }
-}
-
-/// Register an MCP tool as a Lua function
-///
-/// The tool function takes a table of arguments and returns
-/// the result or nil + error message.
-#[allow(dead_code)]
-pub fn register_mcp_tool(
-    lua: &Lua,
-    name: &str,
-    _description: &str,
-    call_fn: impl Fn(serde_json::Value) -> Result<serde_json::Value, String> + Send + 'static,
-) -> LuaResult<()> {
-    let tools: Table = lua.globals().get("tools")?;
-
-    let tool_fn = lua.create_function(move |lua, args: Value| {
-        // Convert Lua args to JSON
-        let json_args = lua_to_json(&args)?;
-
-        // Call the tool
-        match call_fn(json_args) {
-            Ok(result) => json_to_lua(lua, &result),
-            Err(_err) => {
-                // Return nil for errors
-                Ok(Value::Nil)
-            }
-        }
-    })?;
-
-    tools.set(name, tool_fn)?;
-
-    Ok(())
 }
 
 /// Convert serde_json::Value to mlua::Value
