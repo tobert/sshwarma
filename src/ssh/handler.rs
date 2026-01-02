@@ -453,6 +453,11 @@ impl server::Handler for SshHandler {
         self.session_handle = Some(session.handle());
         self.main_channel = Some(channel);
 
+        // Enter alternate screen buffer (separates from scrollback, better for selection)
+        // Also hide cursor initially - screen refresh will show it at input position
+        let init_seq = "\x1b[?1049h\x1b[?25l";
+        let _ = session.data(channel, CryptoVec::from(init_seq.as_bytes()));
+
         // Set session context and send welcome notification
         if let Some(ref player) = self.player {
             if let Some(ref lua_runtime) = self.lua_runtime {
@@ -535,6 +540,18 @@ impl server::Handler for SshHandler {
         // Screen refresh task will pick up new dimensions on next tick
         Ok(())
     }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Exit alternate screen buffer and show cursor before disconnect
+        // This restores the terminal to normal state
+        let cleanup_seq = "\x1b[?25h\x1b[?1049l";
+        let _ = session.data(channel, CryptoVec::from(cleanup_seq.as_bytes()));
+        Ok(())
+    }
 }
 
 impl SshHandler {
@@ -585,6 +602,28 @@ impl SshHandler {
 
             EditorAction::Quit => {
                 let _ = session.close(channel);
+            }
+
+            EditorAction::PageUp => {
+                // Scroll chat up one page
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    let scroll = lua.tool_state().chat_scroll();
+                    let inner = scroll.inner();
+                    let mut state = inner.lock().unwrap();
+                    state.page_up();
+                }
+            }
+
+            EditorAction::PageDown => {
+                // Scroll chat down one page
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    let scroll = lua.tool_state().chat_scroll();
+                    let inner = scroll.inner();
+                    let mut state = inner.lock().unwrap();
+                    state.page_down();
+                }
             }
         }
     }

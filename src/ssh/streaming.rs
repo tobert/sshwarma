@@ -42,6 +42,11 @@ pub async fn push_updates_task(
                 if let Err(e) = db.append_to_row(&row_id, &text) {
                     tracing::error!("failed to append to row: {}", e);
                 }
+                // Signal screen refresh
+                if let Some(ref lua_runtime) = lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().mark_dirty();
+                }
             }
 
             RowUpdate::ToolCall {
@@ -71,6 +76,11 @@ pub async fn push_updates_task(
                 // Append tool result to row
                 if let Err(e) = db.append_to_row(&row_id, &format!("\n{}", summary)) {
                     tracing::error!("failed to append tool result: {}", e);
+                }
+                // Signal screen refresh
+                if let Some(ref lua_runtime) = lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().mark_dirty();
                 }
             }
 

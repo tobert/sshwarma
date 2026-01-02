@@ -60,6 +60,10 @@ pub struct LuaToolState {
     middleware: ToolMiddleware,
     /// Current input line state (for Lua to render)
     input_state: Arc<std::sync::RwLock<InputState>>,
+    /// Signal for screen refresh (event-driven rendering)
+    dirty_signal: Arc<tokio::sync::Notify>,
+    /// Chat scroll state (persists across renders)
+    chat_scroll: crate::ui::scroll::LuaScrollState,
 }
 
 impl LuaToolState {
@@ -73,7 +77,24 @@ impl LuaToolState {
             session_context: Arc::new(std::sync::RwLock::new(None)),
             middleware: ToolMiddleware::new(),
             input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
+            dirty_signal: Arc::new(tokio::sync::Notify::new()),
+            chat_scroll: crate::ui::scroll::LuaScrollState::new(),
         }
+    }
+
+    /// Get the chat scroll state (for Lua HUD)
+    pub fn chat_scroll(&self) -> crate::ui::scroll::LuaScrollState {
+        self.chat_scroll.clone()
+    }
+
+    /// Get the dirty signal for screen refresh task to wait on
+    pub fn dirty_signal(&self) -> Arc<tokio::sync::Notify> {
+        self.dirty_signal.clone()
+    }
+
+    /// Mark screen as needing refresh
+    pub fn mark_dirty(&self) {
+        self.dirty_signal.notify_one();
     }
 
     /// Update the current input state (called by handler on keystroke)
@@ -83,6 +104,7 @@ impl LuaToolState {
             guard.cursor = cursor;
             guard.prompt = prompt.to_string();
         }
+        self.mark_dirty();
     }
 
     /// Get the current input state
@@ -106,6 +128,7 @@ impl LuaToolState {
     /// Set a participant's status
     pub fn set_status(&self, name: &str, status: Status) {
         self.status_tracker.set(name, status);
+        self.mark_dirty();
     }
 
     /// Get a participant's status
@@ -134,6 +157,7 @@ impl LuaToolState {
         if let Ok(mut guard) = self.pending_notifications.write() {
             guard.push(notification);
         }
+        self.mark_dirty();
     }
 
     /// Get the cache for background updates
@@ -173,6 +197,7 @@ impl LuaToolState {
             tracing::info!(?room, "set_session_context");
             *guard = ctx;
         }
+        self.mark_dirty();
     }
 
     /// Get a clone of the session context if set
@@ -500,6 +525,14 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("input", input_fn)?;
 
+    // tools.scroll() -> persistent LuaScrollState
+    // Returns the same scroll state across renders so position is maintained
+    let scroll_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, ()| Ok(state.chat_scroll()))?
+    };
+    tools.set("scroll", scroll_fn)?;
+
     // Extended data tools (require SharedState)
 
     // tools.history(n) -> [{author, content, timestamp, kind}]
@@ -530,8 +563,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                     if let Ok(rows) = shared.db.list_recent_buffer_rows(&buffer.id, limit) {
                         let mut idx = 1;
                         for db_row in rows.iter().filter(|r| !r.ephemeral) {
-                            // Only include message rows
-                            if !db_row.content_method.starts_with("message.") {
+                            // Include message rows and thinking/streaming rows
+                            let is_message = db_row.content_method.starts_with("message.");
+                            let is_thinking = db_row.content_method.starts_with("thinking.");
+                            if !is_message && !is_thinking {
                                 continue;
                             }
 
@@ -556,7 +591,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             row.set("author", author)?;
                             row.set("content", text)?;
                             row.set("timestamp", db_row.created_at)?;
-                            row.set("is_model", db_row.content_method == "message.model")?;
+                            row.set("is_model", is_message && db_row.content_method == "message.model" || is_thinking)?;
+                            row.set("is_thinking", is_thinking)?;
+                            row.set("is_streaming", is_thinking && db_row.finalized_at.is_none())?;
                             list.set(idx, row)?;
                             idx += 1;
                         }
@@ -1449,6 +1486,23 @@ mod tests {
                     let _ = self.db.append_row(&mut row);
                 }
             }
+        }
+
+        /// Add a thinking/streaming row (simulates model response in progress)
+        async fn add_thinking(&self, room: &str, model_name: &str, content: &str) -> Option<String> {
+            use crate::db::rows::Row;
+
+            let buffer = self.db.get_or_create_room_buffer(room).ok()?;
+            let agent = self.db.get_or_create_model_agent(model_name).ok()?;
+            let mut row = Row::thinking(&buffer.id, &agent.id);
+            row.content = Some(content.to_string());
+            self.db.append_row(&mut row).ok()?;
+            Some(row.id)
+        }
+
+        /// Finalize a thinking row (simulates streaming complete)
+        fn finalize_thinking(&self, row_id: &str) {
+            let _ = self.db.finalize_row(row_id);
         }
 
         /// Add journal entry

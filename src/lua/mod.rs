@@ -27,6 +27,7 @@ pub use self::startup_script_path as get_startup_script_path;
 
 use crate::lua::tools::register_tools;
 use crate::paths;
+use crate::ui::scroll::register_scroll_functions;
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
 use opentelemetry::KeyValue;
@@ -125,6 +126,10 @@ impl LuaRuntime {
         // Register sshwarma.call() unified interface
         tools::register_sshwarma_call(&lua, tool_state.clone())
             .map_err(|e| anyhow::anyhow!("failed to register sshwarma.call: {}", e))?;
+
+        // Register scroll/view functions
+        register_scroll_functions(&lua)
+            .map_err(|e| anyhow::anyhow!("failed to register scroll functions: {}", e))?;
 
         // Load the wrap script first (provides wrap() and default_wrap())
         lua.load(DEFAULT_WRAP_SCRIPT)

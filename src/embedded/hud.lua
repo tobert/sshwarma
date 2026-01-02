@@ -32,54 +32,163 @@ local C = {
 }
 
 --------------------------------------------------------------------------------
--- Render Chat Buffer
+-- Word Wrap Helper
+--------------------------------------------------------------------------------
+
+-- Wrap text to fit within width, returning array of lines
+local function wrap_text(text, width)
+    if width <= 0 then return {""} end
+
+    local lines = {}
+    -- First, split by existing newlines
+    for segment in (text .. "\n"):gmatch("([^\n]*)\n") do
+        if #segment == 0 then
+            table.insert(lines, "")
+        elseif #segment <= width then
+            table.insert(lines, segment)
+        else
+            -- Word wrap this segment
+            local pos = 1
+            while pos <= #segment do
+                local chunk = segment:sub(pos, pos + width - 1)
+                if #chunk < width or pos + width > #segment then
+                    table.insert(lines, chunk)
+                    pos = pos + #chunk
+                else
+                    -- Find last space to break at
+                    local break_at = chunk:match(".*()%s") or width
+                    if break_at < width / 2 then break_at = width end
+                    -- Wrap gsub in parens to only get first return value
+                    table.insert(lines, (segment:sub(pos, pos + break_at - 1):gsub("%s+$", "")))
+                    pos = pos + break_at
+                    -- Skip leading whitespace on next line
+                    while pos <= #segment and segment:sub(pos, pos):match("%s") do
+                        pos = pos + 1
+                    end
+                end
+            end
+        end
+    end
+    return lines
+end
+
+--------------------------------------------------------------------------------
+-- Build Display Lines (message -> wrapped lines with metadata)
+--------------------------------------------------------------------------------
+
+local function build_display_lines(history, width, my_name)
+    local display_lines = {}
+    local prefix_width = 0
+
+    -- Calculate max nick width for alignment
+    for _, msg in ipairs(history) do
+        local author = msg.author or "???"
+        prefix_width = math.max(prefix_width, #author + 3) -- "<nick> "
+    end
+
+    local content_width = width - prefix_width
+    if content_width < 10 then content_width = width end
+
+    for _, msg in ipairs(history) do
+        local author = msg.author or "???"
+        local content = msg.content or ""
+        local is_model = msg.is_model
+        local is_streaming = msg.is_streaming
+
+        -- Choose nick color
+        local nick_color = C.nick
+        if author == my_name then
+            nick_color = C.self
+        elseif is_model then
+            nick_color = C.model
+        elseif author == "system" then
+            nick_color = C.system
+        end
+
+        -- Wrap the content
+        local wrapped = wrap_text(content, content_width)
+
+        for i, line_text in ipairs(wrapped) do
+            local entry = {
+                text = line_text,
+                nick_color = nick_color,
+                is_first_line = (i == 1),
+                is_streaming = is_streaming,
+            }
+            if i == 1 then
+                entry.author = author
+                entry.prefix_width = prefix_width
+            else
+                entry.author = nil
+                entry.prefix_width = prefix_width
+            end
+            table.insert(display_lines, entry)
+        end
+    end
+
+    return display_lines
+end
+
+--------------------------------------------------------------------------------
+-- Render Chat Buffer (with scroll)
 --------------------------------------------------------------------------------
 
 local function render_chat(ctx, chat_height)
-    local history = tools.history(chat_height) or {}
+    local history = tools.history(100) or {}  -- Get more messages for scroll
 
     -- Get current username for highlighting own messages
     local status = sshwarma and sshwarma.call and sshwarma.call("status", {}) or {}
     local session = status.session or {}
     local my_name = session.username or ""
 
-    -- Calculate starting row (messages flow up from bottom of chat area)
-    local msg_count = #history
-    local start_row = math.max(0, chat_height - msg_count)
+    -- Build wrapped display lines
+    local display_lines = build_display_lines(history, ctx.w, my_name)
+    local total_lines = #display_lines
 
-    for i, msg in ipairs(history) do
-        local y = start_row + (i - 1)
-        if y >= 0 and y < chat_height then
-            local author = msg.author or "???"
-            local content = msg.content or ""
-            local is_model = msg.is_model
+    -- Update scroll state
+    local scroll = tools.scroll()
+    scroll:set_content_height(total_lines)
+    scroll:set_viewport_height(chat_height)
 
-            -- Choose nick color
-            local nick_color = C.nick
-            if author == my_name then
-                nick_color = C.self
-            elseif is_model then
-                nick_color = C.model
-            elseif author == "system" then
-                nick_color = C.system
-            end
+    -- Get visible range
+    local start_line, end_line = scroll:visible_range()
 
-            -- Format: <nick> message
+    -- Draw visible lines
+    for i = start_line, end_line - 1 do
+        local line_idx = i + 1  -- Lua 1-indexed
+        local line = display_lines[line_idx]
+        if line then
+            local y = i - start_line
             local x = 0
-            ctx:print(x, y, "<", {fg = C.dim})
-            x = x + 1
-            ctx:print(x, y, author, {fg = nick_color})
-            x = x + #author
-            ctx:print(x, y, "> ", {fg = C.dim})
-            x = x + 2
 
-            -- Truncate message to fit
-            local max_len = ctx.w - x
-            if #content > max_len then
-                content = content:sub(1, max_len - 1) .. "…"
+            if line.is_first_line and line.author then
+                -- Draw prefix: <nick>
+                ctx:print(x, y, "<", {fg = C.dim})
+                x = x + 1
+                ctx:print(x, y, line.author, {fg = line.nick_color})
+                x = x + #line.author
+                ctx:print(x, y, "> ", {fg = C.dim})
+                x = x + 2
+            else
+                -- Continuation line - indent to align
+                x = line.prefix_width or 0
             end
-            ctx:print(x, y, content)
+
+            -- Draw content (with streaming indicator)
+            local text = line.text
+            if line.is_streaming and line.is_first_line then
+                text = "◌ " .. text  -- Streaming indicator
+            end
+            ctx:print(x, y, text)
         end
+    end
+
+    -- Draw scroll indicator if not at bottom
+    if not scroll.at_bottom and total_lines > chat_height then
+        local pct = math.floor(scroll.percent * 100)
+        local indicator = string.format("── %d%% ──", pct)
+        local ix = ctx.w - #indicator
+        ctx:print(ix, chat_height - 1, indicator, {fg = C.dim})
     end
 end
 
@@ -221,14 +330,6 @@ function on_tick(tick, ctx)
     local chat_height = h - 2
     local status_row = h - 2
     local input_row = h - 1
-
-    -- Debug: show dimensions and history count at top
-    local history = tools.history(50) or {}
-    local status = sshwarma and sshwarma.call and sshwarma.call("status", {}) or {}
-    local room = status.room or {}
-    local room_name = room.name or "nil"
-    local debug_str = string.format("h=%d w=%d msgs=%d tick=%d room=%s", h, w, #history, tick, room_name)
-    ctx:print(0, 0, debug_str, {fg = C.dim})
 
     if chat_height > 1 then
         render_chat(ctx, chat_height)

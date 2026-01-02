@@ -26,6 +26,8 @@ pub enum TerminalEvent {
     Home,
     End,
     Delete,
+    PageUp,
+    PageDown,
     /// Control key combinations
     CtrlA,
     CtrlC,
@@ -159,11 +161,13 @@ impl EscapeParser {
             // Tilde sequences: ESC [ n ~
             b'~' => {
                 let event = match self.params.as_slice() {
-                    b"1" => TerminalEvent::Home,   // ESC [ 1 ~
-                    b"3" => TerminalEvent::Delete, // ESC [ 3 ~
-                    b"4" => TerminalEvent::End,    // ESC [ 4 ~
-                    b"7" => TerminalEvent::Home,   // ESC [ 7 ~ (rxvt)
-                    b"8" => TerminalEvent::End,    // ESC [ 8 ~ (rxvt)
+                    b"1" => TerminalEvent::Home,     // ESC [ 1 ~
+                    b"3" => TerminalEvent::Delete,   // ESC [ 3 ~
+                    b"4" => TerminalEvent::End,      // ESC [ 4 ~
+                    b"5" => TerminalEvent::PageUp,   // ESC [ 5 ~
+                    b"6" => TerminalEvent::PageDown, // ESC [ 6 ~
+                    b"7" => TerminalEvent::Home,     // ESC [ 7 ~ (rxvt)
+                    b"8" => TerminalEvent::End,      // ESC [ 8 ~ (rxvt)
                     _ => TerminalEvent::Unknown(b'~'),
                 };
                 self.reset();
@@ -249,5 +253,22 @@ mod tests {
         assert_eq!(parser.feed(b'['), None);
         assert_eq!(parser.feed(b'3'), None);
         assert_eq!(parser.feed(b'~'), Some(TerminalEvent::Delete));
+    }
+
+    #[test]
+    fn test_page_up_down() {
+        let mut parser = EscapeParser::new();
+
+        // PageUp: ESC [ 5 ~
+        assert_eq!(parser.feed(0x1b), None);
+        assert_eq!(parser.feed(b'['), None);
+        assert_eq!(parser.feed(b'5'), None);
+        assert_eq!(parser.feed(b'~'), Some(TerminalEvent::PageUp));
+
+        // PageDown: ESC [ 6 ~
+        assert_eq!(parser.feed(0x1b), None);
+        assert_eq!(parser.feed(b'['), None);
+        assert_eq!(parser.feed(b'6'), None);
+        assert_eq!(parser.feed(b'~'), Some(TerminalEvent::PageDown));
     }
 }
