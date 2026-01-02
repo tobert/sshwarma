@@ -221,26 +221,34 @@ MCP:
             return "Usage: /join <room>".to_string();
         }
 
-        let username = match &self.player {
-            Some(p) => p.username.clone(),
-            None => return "Not authenticated".to_string(),
-        };
+        // Check room exists (in world or DB)
+        let room_exists = {
+            let world = self.state.world.read().await;
+            world.get_room(target).is_some()
+        } || self.state.db.get_room_by_name(target).ok().flatten().is_some();
 
-        let current = self.current_room();
+        if !room_exists {
+            return format!(
+                "No room named '{}'. Use /create {} to make one.",
+                target, target
+            );
+        }
 
-        match ops::join(&self.state, &username, current.as_deref(), target).await {
-            Ok(_summary) => {
-                // Update player state (handler-specific)
-                if let Some(ref mut player) = self.player {
-                    player.join_room(target.to_string());
-                    let _ = self
-                        .state
-                        .db
-                        .update_session_room(&player.session_id, Some(target));
+        // Leave current room if in one
+        if let Some(current) = self.current_room() {
+            if let Some(ref player) = self.player {
+                let mut world = self.state.world.write().await;
+                if let Some(room) = world.get_room_mut(&current) {
+                    room.remove_user(&player.username);
                 }
-                self.render_room_ansi(target).await
             }
-            Err(e) => e.to_string(),
+        }
+
+        // Use SshHandler::join_room which properly sets up everything
+        // including Lua session context
+        match self.join_room(target).await {
+            Ok(()) => self.render_room_ansi(target).await,
+            Err(e) => format!("Error joining room: {}", e),
         }
     }
 
@@ -259,12 +267,9 @@ MCP:
 
         match ops::create_room(&self.state, &username, room_name, current.as_deref()).await {
             Ok(_summary) => {
-                if let Some(ref mut player) = self.player {
-                    player.join_room(room_name.to_string());
-                    let _ = self
-                        .state
-                        .db
-                        .update_session_room(&player.session_id, Some(room_name));
+                // Use SshHandler::join_room which properly sets up Lua session context
+                if let Err(e) = self.join_room(room_name).await {
+                    return format!("Created room but failed to join: {}", e);
                 }
                 let room_output = self.render_room_ansi(room_name).await;
                 format!("Created room '{}'.\r\n\r\n{}", room_name, room_output)
@@ -858,12 +863,9 @@ MCP:
         match ops::go(&self.state, &username, &room, direction).await {
             Ok(summary) => {
                 let new_room = summary.name.clone();
-                if let Some(ref mut player) = self.player {
-                    player.join_room(new_room.clone());
-                    let _ = self
-                        .state
-                        .db
-                        .update_session_room(&player.session_id, Some(&new_room));
+                // Use SshHandler::join_room which properly sets up Lua session context
+                if let Err(e) = self.join_room(&new_room).await {
+                    return format!("Error joining room: {}", e);
                 }
                 self.render_room_ansi(&new_room).await
             }
@@ -911,12 +913,9 @@ MCP:
 
         match ops::fork_room(&self.state, &username, &source, new_name).await {
             Ok(_summary) => {
-                if let Some(ref mut player) = self.player {
-                    player.join_room(new_name.to_string());
-                    let _ = self
-                        .state
-                        .db
-                        .update_session_room(&player.session_id, Some(new_name));
+                // Use SshHandler::join_room which properly sets up Lua session context
+                if let Err(e) = self.join_room(new_name).await {
+                    return format!("Forked room but failed to join: {}", e);
                 }
                 let room_output = self.render_room_ansi(new_name).await;
                 format!(

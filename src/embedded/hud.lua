@@ -1,368 +1,249 @@
--- sshwarma HUD renderer (new API)
+-- sshwarma screen renderer (irssi-style)
 --
--- Interface:
---   Rust calls: on_tick(tick, ctx) where ctx is a LuaDrawContext
---   Lua calls:  sshwarma.call("status", {}) for app state
---               sshwarma.call("time", {}) for current time
+-- Full-screen layout (Lua owns everything):
+--   Rows 0 to (h-3): Chat buffer
+--   Row (h-2): Status line
+--   Row (h-1): Input line (prompt + text + cursor)
 --
--- The ctx object provides drawing methods:
+-- API:
 --   ctx:print(x, y, text, {fg, bg, bold, dim})
---   ctx:fill(x, y, w, h, char, {fg, bg})
---   ctx:hline(x, y, len, {fg, bg})
---   ctx:draw_box(x, y, w, h, {fg, bg})
 --   ctx:clear()
 --   ctx.w, ctx.h - dimensions
+--   tools.history(n) - get chat messages
+--   tools.input() - get {text, cursor, prompt}
+--   tools.mcp_connections() - get MCP server status
+--   sshwarma.call("status") - get room/participant info
 
 --------------------------------------------------------------------------------
--- Tokyo Night Color Palette
+-- Colors (simple palette)
 --------------------------------------------------------------------------------
 
-local colors = {
-    fg      = "#a9b1d6",
-    dim     = "#565f89",
-    border  = "#7dcfff",
-    cyan    = "#7dcfff",
-    blue    = "#7aa2f7",
-    green   = "#9ece6a",
-    yellow  = "#e0af68",
-    red     = "#f7768e",
-    magenta = "#bb9af7",
-    orange  = "#ff9e64",
+local C = {
+    fg       = "#c0caf5",
+    dim      = "#565f89",
+    nick     = "#7aa2f7",
+    model    = "#bb9af7",
+    self     = "#9ece6a",
+    system   = "#7dcfff",
+    error    = "#f7768e",
+    status   = "#1a1b26",
+    statusfg = "#a9b1d6",
+    cursor   = "#ff9e64",
 }
 
 --------------------------------------------------------------------------------
--- Box Drawing Characters (heavy style)
+-- Render Chat Buffer
 --------------------------------------------------------------------------------
 
-local box = {
-    tl = "┏",  -- top-left
-    tr = "┓",  -- top-right
-    bl = "┗",  -- bottom-left
-    br = "┛",  -- bottom-right
-    h  = "━",  -- horizontal
-    v  = "┃",  -- vertical
-}
+local function render_chat(ctx, chat_height)
+    local history = tools.history(chat_height) or {}
 
---------------------------------------------------------------------------------
--- Spinner Frames (braille animation)
---------------------------------------------------------------------------------
+    -- Get current username for highlighting own messages
+    local status = sshwarma and sshwarma.call and sshwarma.call("status", {}) or {}
+    local session = status.session or {}
+    local my_name = session.username or ""
 
-local spinner_frames = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+    -- Calculate starting row (messages flow up from bottom of chat area)
+    local msg_count = #history
+    local start_row = math.max(0, chat_height - msg_count)
 
---------------------------------------------------------------------------------
--- Status Glyphs
---------------------------------------------------------------------------------
+    for i, msg in ipairs(history) do
+        local y = start_row + (i - 1)
+        if y >= 0 and y < chat_height then
+            local author = msg.author or "???"
+            local content = msg.content or ""
+            local is_model = msg.is_model
 
-local status_glyphs = {
-    idle       = "◇",
-    thinking   = "◈",
-    running    = "◈",
-    error      = "◉",
-    offline    = "◌",
-}
-
---------------------------------------------------------------------------------
--- Exit Direction Arrows
---------------------------------------------------------------------------------
-
-local exit_arrows = {
-    n  = "↑", north     = "↑",
-    e  = "→", east      = "→",
-    s  = "↓", south     = "↓",
-    w  = "←", west      = "←",
-    u  = "↑", up        = "↑",
-    d  = "↓", down      = "↓",
-    ne = "↗", northeast = "↗",
-    se = "↘", southeast = "↘",
-    nw = "↖", northwest = "↖",
-    sw = "↙", southwest = "↙",
-}
-
---------------------------------------------------------------------------------
--- Tick Indicator (for refresh visualization)
---------------------------------------------------------------------------------
-
-local tick_chars = {"·", ":", "·", " "}
-
---------------------------------------------------------------------------------
--- Lua-Managed State (persists across render calls)
---------------------------------------------------------------------------------
-
-local state = {
-    notifications  = {},  -- {message, created_ms, ttl_ms}
-}
-
---------------------------------------------------------------------------------
--- Helper Functions
---------------------------------------------------------------------------------
-
---- Get current spinner character based on tick
-local function get_spinner(tick)
-    return spinner_frames[(tick % #spinner_frames) + 1]
-end
-
---- Get current tick character
-local function get_tick(tick)
-    local idx = math.floor(tick / 2) % #tick_chars
-    return tick_chars[idx + 1]
-end
-
---- Convert exits table {n = "room", e = "other"} to arrow string "↑→"
-local function exits_to_arrows(exits)
-    if not exits then return "" end
-    local arrows = ""
-    local order = {"n", "ne", "e", "se", "s", "sw", "w", "nw", "u", "d"}
-    for _, dir in ipairs(order) do
-        if exits[dir] then
-            local arrow = exit_arrows[dir]
-            if arrow then
-                arrows = arrows .. arrow
+            -- Choose nick color
+            local nick_color = C.nick
+            if author == my_name then
+                nick_color = C.self
+            elseif is_model then
+                nick_color = C.model
+            elseif author == "system" then
+                nick_color = C.system
             end
+
+            -- Format: <nick> message
+            local x = 0
+            ctx:print(x, y, "<", {fg = C.dim})
+            x = x + 1
+            ctx:print(x, y, author, {fg = nick_color})
+            x = x + #author
+            ctx:print(x, y, "> ", {fg = C.dim})
+            x = x + 2
+
+            -- Truncate message to fit
+            local max_len = ctx.w - x
+            if #content > max_len then
+                content = content:sub(1, max_len - 1) .. "…"
+            end
+            ctx:print(x, y, content)
         end
     end
-    return arrows
 end
 
 --------------------------------------------------------------------------------
--- Drawing Helpers
+-- Render Status Line (irssi-style bar)
 --------------------------------------------------------------------------------
 
-local border_style = { fg = colors.cyan }
-local dim_style = { fg = colors.dim }
-
---- Draw the HUD box frame (7 lines: 0-6, leaving row 7 for input)
-local function draw_frame(ctx)
-    local w = ctx.w
-    -- Frame is 7 lines (0-6), row 7 is for input prompt
-
-    -- Top border (row 0)
-    ctx:print(0, 0, box.tl, border_style)
-    for x = 1, w - 2 do
-        ctx:print(x, 0, box.h, border_style)
-    end
-    ctx:print(w - 1, 0, box.tr, border_style)
-
-    -- Side borders (rows 1-5)
-    for y = 1, 5 do
-        ctx:print(0, y, box.v, border_style)
-        ctx:print(w - 1, y, box.v, border_style)
+local function render_status(ctx, y)
+    -- Fill status bar background
+    for x = 0, ctx.w - 1 do
+        ctx:print(x, y, " ", {bg = C.status})
     end
 
-    -- Bottom border (row 6)
-    ctx:print(0, 6, box.bl, border_style)
-    for x = 1, w - 2 do
-        ctx:print(x, 6, box.h, border_style)
-    end
-    ctx:print(w - 1, 6, box.br, border_style)
-end
+    -- Get state
+    local status = sshwarma and sshwarma.call and sshwarma.call("status", {}) or {}
+    local room = status.room or {}
+    local participants = status.participants or {}
+    local session = status.session or {}
 
---- Draw participants on row 1 (inside frame, y=1)
-local function draw_participants(ctx, participants, tick)
-    local x = 2  -- inside left border + padding
+    local x = 1
 
-    -- Sort: users first, then models
-    local users = {}
-    local models = {}
-    for _, p in ipairs(participants or {}) do
-        if p.kind == "model" then
-            table.insert(models, p)
-        else
-            table.insert(users, p)
-        end
-    end
+    -- Room name
+    local room_name = room.name or "lobby"
+    ctx:print(x, y, "[", {fg = C.dim, bg = C.status})
+    x = x + 1
+    ctx:print(x, y, room_name, {fg = C.system, bg = C.status})
+    x = x + #room_name
+    ctx:print(x, y, "]", {fg = C.dim, bg = C.status})
+    x = x + 2
 
-    -- Draw users
-    for i, p in ipairs(users) do
-        if i > 1 then x = x + 2 end
-        ctx:print(x, 1, p.name)
-        x = x + #p.name
-    end
-
-    -- Draw models
-    for _, p in ipairs(models) do
-        if x > 2 then x = x + 2 end
-
-        -- Determine glyph based on status
-        local glyph = status_glyphs.idle
-        local glyph_color = colors.dim
-
-        if p.active then
-            glyph = get_spinner(tick)
-            glyph_color = colors.cyan
-        end
-
-        ctx:print(x, 1, glyph, { fg = glyph_color })
-        x = x + 2
-        ctx:print(x, 1, p.name, { fg = colors.magenta })
-        x = x + #p.name
-    end
-end
-
---- Draw status line on row 2 (y=2)
-local function draw_status(ctx, participants)
-    local status_text = nil
-
-    for _, p in ipairs(participants or {}) do
-        if p.status and p.status ~= "" then
-            status_text = p.status
-            break
-        end
-    end
-
-    if status_text then
-        ctx:print(14, 2, status_text, dim_style)
-    end
-end
-
---- Draw room details on row 3 (y=3)
-local function draw_room_details(ctx, room, participants)
-    local x = 2
-
-    -- Count participants
+    -- User count
     local user_count = 0
     local model_count = 0
-    for _, p in ipairs(participants or {}) do
+    local active_model = nil
+    for _, p in ipairs(participants) do
         if p.kind == "model" then
             model_count = model_count + 1
+            if p.active then
+                active_model = p.name
+            end
         else
             user_count = user_count + 1
         end
     end
 
-    local counts = string.format("%d user%s, %d model%s",
-        user_count, user_count == 1 and "" or "s",
-        model_count, model_count == 1 and "" or "s")
-    ctx:print(x, 3, counts, dim_style)
-    x = x + #counts
+    local counts = string.format("%d/%d", user_count, model_count)
+    ctx:print(x, y, counts, {fg = C.statusfg, bg = C.status})
+    x = x + #counts + 1
 
-    -- Vibe if set
-    local vibe = room and room.vibe
-    if vibe and vibe ~= "" then
-        local vibe_preview = vibe
-        if #vibe_preview > 30 then
-            vibe_preview = vibe_preview:sub(1, 29) .. "…"
-        end
-        ctx:print(x, 3, " │ ", dim_style)
-        x = x + 3
-        ctx:print(x, 3, "♪ ", { fg = colors.cyan })
+    -- Active model indicator
+    if active_model then
+        ctx:print(x, y, "◈", {fg = C.model, bg = C.status})
         x = x + 2
-        ctx:print(x, 3, vibe_preview, dim_style)
+        ctx:print(x, y, active_model, {fg = C.model, bg = C.status})
+        x = x + #active_model + 1
+    end
+
+    -- MCP status (right side)
+    local mcp = tools.mcp_connections and tools.mcp_connections() or {}
+    local mcp_str = ""
+    for _, conn in ipairs(mcp) do
+        local indicator = conn.connected and "●" or "○"
+        mcp_str = mcp_str .. indicator .. conn.name .. " "
+    end
+    if #mcp_str > 0 then
+        local mcp_x = ctx.w - #mcp_str - 1
+        if mcp_x > x then
+            ctx:print(mcp_x, y, mcp_str, {fg = C.dim, bg = C.status})
+        end
+    end
+
+    -- Duration (far right)
+    local duration = session.duration or "0:00"
+    local dur_x = ctx.w - #duration - 1
+    if dur_x > x + #mcp_str then
+        ctx:print(dur_x, y, duration, {fg = C.dim, bg = C.status})
     end
 end
 
---- Draw MCP connections on row 4 (y=4)
-local function draw_mcp(ctx, mcp)
-    local x = 2
+--------------------------------------------------------------------------------
+-- Render Input Line
+--------------------------------------------------------------------------------
 
-    -- Get MCP state from tools namespace (legacy for now)
-    if tools and tools.mcp_connections then
-        mcp = tools.mcp_connections() or {}
-    end
+local function render_input(ctx, y)
+    local input = tools.input() or {}
+    local prompt = input.prompt or "> "
+    local text = input.text or ""
+    local cursor = input.cursor or 0
 
-    if not mcp or #mcp == 0 then
-        ctx:print(x, 4, "no MCP connections", dim_style)
-        return
-    end
+    local x = 0
 
-    ctx:print(x, 4, "mcp: ", dim_style)
-    x = x + 5
+    -- Draw prompt
+    ctx:print(x, y, prompt, {fg = C.system})
+    x = x + #prompt
 
-    for i, conn in ipairs(mcp) do
-        if i > 1 then
-            ctx:print(x, 4, "  ")
-            x = x + 2
-        end
+    -- Draw text with cursor
+    if #text == 0 then
+        -- Empty input, just show cursor block
+        ctx:print(x, y, "▌", {fg = C.cursor})
+    else
+        -- Split text at cursor position
+        local before = text:sub(1, cursor)
+        local after = text:sub(cursor + 1)
 
-        -- Connection indicator
-        if conn.connected then
-            ctx:print(x, 4, "●", { fg = colors.green })
-        else
-            ctx:print(x, 4, "○", { fg = colors.red })
-        end
-        x = x + 1
+        -- Text before cursor
+        ctx:print(x, y, before)
+        x = x + #before
 
-        -- Name
-        ctx:print(x, 4, " " .. conn.name .. " ")
-        x = x + 2 + #conn.name
-
-        -- Stats
-        local stats = string.format("(%d/%d)", conn.tools or 0, conn.calls or 0)
-        ctx:print(x, 4, stats, dim_style)
-        x = x + #stats
-
-        -- Last tool
-        if conn.last_tool then
-            ctx:print(x, 4, " ")
+        -- Cursor indicator (block on current char or at end)
+        if #after > 0 then
+            -- Cursor on a character - highlight it
+            local cursor_char = after:sub(1, 1)
+            ctx:print(x, y, cursor_char, {fg = C.status, bg = C.cursor})
             x = x + 1
-            ctx:print(x, 4, conn.last_tool, { fg = colors.cyan })
-            x = x + #conn.last_tool
+            -- Rest of text after cursor
+            ctx:print(x, y, after:sub(2))
+        else
+            -- Cursor at end - show block
+            ctx:print(x, y, "▌", {fg = C.cursor})
         end
     end
-end
-
---- Draw room info on row 5 (y=5)
-local function draw_room_info(ctx, room, session, exits, tick)
-    local x = 2
-
-    -- Room name
-    local room_name = (room and room.name) or "lobby"
-    ctx:print(x, 5, room_name, { fg = colors.cyan })
-    x = x + #room_name
-
-    -- Exits
-    local arrows = exits_to_arrows(exits)
-    if arrows ~= "" then
-        ctx:print(x, 5, " │ ", dim_style)
-        x = x + 3
-        ctx:print(x, 5, arrows)
-        x = x + #arrows
-    end
-
-    -- Duration
-    local duration = (session and session.duration) or "0:00:00"
-    ctx:print(x, 5, " │ ", dim_style)
-    x = x + 3
-    ctx:print(x, 5, duration, dim_style)
-    x = x + #duration
-
-    -- Tick indicator
-    ctx:print(x, 5, " ")
-    x = x + 1
-    ctx:print(x, 5, get_tick(tick), dim_style)
 end
 
 --------------------------------------------------------------------------------
 -- Main Entry Point
 --------------------------------------------------------------------------------
 
---- Called every 100ms by the ticker
---- @param tick number Monotonic tick counter
---- @param ctx userdata LuaDrawContext for the HUD region
 function on_tick(tick, ctx)
-    -- Clear the buffer
     ctx:clear()
 
-    -- Get state
-    local status = {}
-    if sshwarma and sshwarma.call then
-        status = sshwarma.call("status", {}) or {}
+    local h = ctx.h
+    local w = ctx.w
+
+    -- Layout:
+    --   [0 to h-3] Chat buffer
+    --   [h-2]      Status line
+    --   [h-1]      Input line
+
+    local chat_height = h - 2
+    local status_row = h - 2
+    local input_row = h - 1
+
+    -- Debug: show dimensions and history count at top
+    local history = tools.history(50) or {}
+    local status = sshwarma and sshwarma.call and sshwarma.call("status", {}) or {}
+    local room = status.room or {}
+    local room_name = room.name or "nil"
+    local debug_str = string.format("h=%d w=%d msgs=%d tick=%d room=%s", h, w, #history, tick, room_name)
+    ctx:print(0, 0, debug_str, {fg = C.dim})
+
+    if chat_height > 1 then
+        render_chat(ctx, chat_height)
     end
 
-    local room = status.room or {}
-    local participants = status.participants or {}
-    local session = status.session or {}
-    local exits = status.exits or {}
+    if status_row >= 0 then
+        render_status(ctx, status_row)
+    end
 
-    -- Draw frame (rows 0-6, leaving row 7 for input prompt)
-    draw_frame(ctx)
-
-    -- Draw content rows (inside frame, rows 1-5)
-    draw_participants(ctx, participants, tick)      -- y=1
-    draw_status(ctx, participants)                   -- y=2
-    draw_room_details(ctx, room, participants)       -- y=3
-    draw_mcp(ctx, nil)                               -- y=4
-    draw_room_info(ctx, room, session, exits, tick)  -- y=5
-    -- y=6 = bottom border (drawn by draw_frame)
-    -- y=7 = input prompt (not drawn by HUD, handled by line editor)
+    if input_row >= 0 then
+        render_input(ctx, input_row)
+    end
 end
 
+-- Optional background function (called every 500ms)
+function background(tick)
+    -- Available for polling, caching, etc.
+end

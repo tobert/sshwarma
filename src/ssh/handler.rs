@@ -7,11 +7,10 @@ use crate::line_editor::{EditorAction, LineEditor};
 use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge};
 use crate::model::ModelHandle;
 use crate::player::PlayerSession;
-use crate::ssh::hud::spawn_hud_refresh;
+use crate::ssh::screen::spawn_screen_refresh;
 use crate::ssh::session::SessionState;
 use crate::ssh::streaming::{push_updates_task, RowUpdate};
 use crate::state::SharedState;
-use crate::terminal::{self, HUD_HEIGHT};
 use anyhow::Result;
 use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
@@ -54,7 +53,7 @@ impl SshHandler {
             completer: CompletionEngine::new(state),
             completions: Vec::new(),
             completion_index: 0,
-            session_state: Arc::new(Mutex::new(SessionState::new(80, 24))),
+            session_state: Arc::new(Mutex::new(SessionState::new())),
             update_tx,
             update_rx: Some(update_rx),
             session_handle: None,
@@ -353,10 +352,7 @@ impl server::Handler for SshHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.term_size = (col_width as u16, row_height as u16);
-        {
-            let mut sess = self.session_state.lock().await;
-            sess.set_width(col_width as usize);
-        }
+        // Screen refresh task will pick up new dimensions on next tick
         Ok(())
     }
 
@@ -371,19 +367,8 @@ impl server::Handler for SshHandler {
         self.session_handle = Some(session.handle());
         self.main_channel = Some(channel);
 
-        // Setup terminal
-        let mut init = String::new();
-        init.push_str(&terminal::set_scroll_region(1, height.saturating_sub(HUD_HEIGHT)));
-        init.push_str(&terminal::move_to(1, 1));
-        init.push_str(&terminal::clear_screen());
-        let _ = session.data(channel, CryptoVec::from(init.as_bytes()));
-
-        // Send welcome and set session context
+        // Set session context and send welcome notification
         if let Some(ref player) = self.player {
-            let welcome = format!("\x1b[32mWelcome, {}.\x1b[0m\r\n\r\n", player.username);
-            let _ = session.data(channel, CryptoVec::from(welcome.as_bytes()));
-
-            // Set session context for status tool
             if let Some(ref lua_runtime) = self.lua_runtime {
                 let lua = lua_runtime.lock().await;
                 lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
@@ -391,26 +376,26 @@ impl server::Handler for SshHandler {
                     model: None,
                     room_name: None,
                 }));
+                // Welcome as notification
+                lua.tool_state().push_notification(
+                    format!("Welcome, {}!", player.username),
+                    5000,
+                );
             }
         }
 
-        // Spawn background tasks
+        // Spawn background task for model streaming updates
         if let Some(update_rx) = self.update_rx.take() {
-            let handle = session.handle();
             let db = self.state.db.clone();
-            let buffer_id = self.current_buffer_id().await.unwrap_or_default();
             let lua_runtime = self.lua_runtime.clone();
 
             tokio::spawn(async move {
-                push_updates_task(
-                    handle, channel, update_rx, db, buffer_id,
-                    lua_runtime, width, height,
-                ).await;
+                push_updates_task(update_rx, db, lua_runtime).await;
             });
         }
 
-        // Spawn HUD refresh
-        spawn_hud_refresh(
+        // Spawn screen refresh - Lua owns full terminal
+        spawn_screen_refresh(
             session.handle(),
             channel,
             self.lua_runtime.clone().expect("lua_runtime"),
@@ -461,10 +446,7 @@ impl server::Handler for SshHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.term_size = (col_width as u16, row_height as u16);
-        {
-            let mut sess = self.session_state.lock().await;
-            sess.set_width(col_width as usize);
-        }
+        // Screen refresh task will pick up new dimensions on next tick
         Ok(())
     }
 }
@@ -476,43 +458,33 @@ impl SshHandler {
         session: &mut Session,
         action: EditorAction,
     ) {
-        let (_, height) = self.term_size;
-        let input_row = height;
-
         match action {
             EditorAction::None => {}
 
             EditorAction::Redraw => {
                 // Clear completions when user types
                 self.clear_completions();
-                // Redraw the input line
-                let output = format!(
-                    "{}{}{}",
-                    terminal::move_to(input_row, 1),
-                    terminal::clear_line(),
-                    self.editor.value()
-                );
-                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+                // Update input state - Lua renders it
+                self.update_input_state().await;
             }
 
             EditorAction::Execute(line) => {
                 // Handle /quit specially
                 if line.trim() == "/quit" {
-                    let output = format!("{}\r\nGoodbye!\r\n", terminal::reset_scroll_region());
-                    let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                     let _ = session.close(channel);
                     return;
                 }
 
-                // Move to new line
-                let _ = session.data(channel, CryptoVec::from(terminal::CRLF.as_bytes()));
-
-                // Process the input
+                // Process the input - Lua renders results via tools.history()
                 if let Err(e) = self.process_input(channel, session, &line).await {
-                    let error = format!("\x1b[31mError: {}\x1b[0m\r\n", e);
-                    let _ = session.data(channel, CryptoVec::from(error.as_bytes()));
+                    // Push error as notification for Lua to display
+                    if let Some(ref lua_runtime) = self.lua_runtime {
+                        let lua = lua_runtime.lock().await;
+                        lua.tool_state().push_notification(format!("Error: {}", e), 5000);
+                    }
                 }
 
+                // Clear input and update state
                 self.show_prompt(channel, session).await;
             }
 
@@ -521,23 +493,19 @@ impl SshHandler {
             }
 
             EditorAction::ClearScreen => {
-                // Full redraw
-                let _ = session.data(channel, CryptoVec::from(terminal::clear_screen().as_bytes()));
-                self.render_full(channel, session).await;
+                // Lua handles screen rendering - just update input state
                 self.show_prompt(channel, session).await;
             }
 
             EditorAction::Quit => {
-                // Reset scroll region and say goodbye
-                let output = format!("{}\r\nGoodbye!\r\n", terminal::reset_scroll_region());
-                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
                 let _ = session.close(channel);
             }
         }
     }
 
-    async fn show_prompt(&self, channel: ChannelId, session: &mut Session) {
-        let prompt = if let Some(ref player) = self.player {
+    /// Get the current prompt string
+    fn get_prompt(&self) -> String {
+        if let Some(ref player) = self.player {
             if let Some(ref room) = player.current_room {
                 format!("{}> ", room)
             } else {
@@ -545,14 +513,24 @@ impl SshHandler {
             }
         } else {
             "> ".to_string()
-        };
-        let _ = session.data(channel, CryptoVec::from(prompt.as_bytes()));
+        }
     }
 
-    #[allow(dead_code)]
-    async fn redraw_line(&self, channel: ChannelId, session: &mut Session, line: &str) {
-        let output = format!("{}{}{}", terminal::CR, terminal::clear_to_eol(), line);
-        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+    /// Update input state for Lua rendering (no direct terminal output)
+    async fn update_input_state(&self) {
+        if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            lua.tool_state().set_input(
+                self.editor.value(),
+                self.editor.cursor(),
+                &self.get_prompt(),
+            );
+        }
+    }
+
+    async fn show_prompt(&self, _channel: ChannelId, _session: &mut Session) {
+        // Input is now rendered by Lua - just update state
+        self.update_input_state().await;
     }
 
     async fn handle_tab_completion(&mut self, channel: ChannelId, session: &mut Session) {
@@ -568,7 +546,7 @@ impl SshHandler {
                 cursor,
                 room: room.as_deref(),
             };
-            self.apply_completion(channel, session, &ctx);
+            self.apply_completion(channel, session, &ctx).await;
             return;
         }
 
@@ -593,7 +571,7 @@ impl SshHandler {
                 cursor,
                 room: room.as_deref(),
             };
-            self.apply_completion(channel, session, &ctx);
+            self.apply_completion(channel, session, &ctx).await;
             self.completions.clear();
         } else {
             // Multiple completions, apply first
@@ -602,11 +580,11 @@ impl SshHandler {
                 cursor,
                 room: room.as_deref(),
             };
-            self.apply_completion(channel, session, &ctx);
+            self.apply_completion(channel, session, &ctx).await;
         }
     }
 
-    fn apply_completion(&mut self, channel: ChannelId, session: &mut Session, ctx: &CompletionContext<'_>) {
+    async fn apply_completion(&mut self, _channel: ChannelId, _session: &mut Session, ctx: &CompletionContext<'_>) {
         if let Some(completion) = self.completions.get(self.completion_index) {
             let (start, _end) = self.completer.replacement_range(ctx);
             self.editor.replace_with_completion(start, &completion.text);
@@ -616,9 +594,8 @@ impl SshHandler {
                 self.editor.insert_completion(" ");
             }
 
-            // Redraw the line
-            let output = self.editor.render("");
-            let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
+            // Update input state - Lua renders it
+            self.update_input_state().await;
         }
     }
 

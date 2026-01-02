@@ -1,14 +1,11 @@
 //! Streaming response handling
 //!
 //! Handles model response streaming with Row updates.
+//! Updates are written to the database; Lua's on_tick renders them via tools.history().
 
 use crate::db::Database;
 use crate::lua::LuaRuntime;
 use crate::status::Status;
-use crate::terminal::{self, HUD_HEIGHT};
-use crate::ui::render::render_rows;
-use russh::server::Handle;
-use russh::{ChannelId, CryptoVec};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -16,10 +13,7 @@ use tokio::sync::{mpsc, Mutex};
 #[derive(Debug)]
 pub enum RowUpdate {
     /// Incremental text chunk (for streaming)
-    Chunk {
-        row_id: String,
-        text: String,
-    },
+    Chunk { row_id: String, text: String },
     /// Tool being invoked
     ToolCall {
         row_id: String,
@@ -27,64 +21,48 @@ pub enum RowUpdate {
         model_name: String,
     },
     /// Tool result received
-    ToolResult {
-        row_id: String,
-        summary: String,
-    },
+    ToolResult { row_id: String, summary: String },
     /// Stream completed
-    Complete {
-        row_id: String,
-        model_name: String,
-    },
+    Complete { row_id: String, model_name: String },
 }
 
 /// Background task that processes streaming updates
+///
+/// Updates are written to the database only - Lua's on_tick renders them
+/// via tools.history() at ~100ms intervals.
 pub async fn push_updates_task(
-    handle: Handle,
-    channel: ChannelId,
     mut rx: mpsc::Receiver<RowUpdate>,
     db: Arc<Database>,
-    buffer_id: String,
     lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
-    term_width: u16,
-    term_height: u16,
 ) {
-    let mut _accumulated_text = String::new();
-    let mut _current_row_id: Option<String> = None;
-
     while let Some(update) = rx.recv().await {
         match update {
             RowUpdate::Chunk { row_id, text } => {
-                // Append to database row
+                // Append to database row - Lua will render via tools.history()
                 if let Err(e) = db.append_to_row(&row_id, &text) {
                     tracing::error!("failed to append to row: {}", e);
-                    continue;
-                }
-
-                _accumulated_text.push_str(&text);
-                _current_row_id = Some(row_id.clone());
-
-                // Render updated row
-                if let Ok(Some(row)) = db.get_row(&row_id) {
-                    let rendered = render_rows(&[row], term_width as usize);
-                    let output = format_streaming_output(&rendered, term_width, term_height);
-                    let _ = handle
-                        .data(channel, CryptoVec::from(output.as_bytes()))
-                        .await;
                 }
             }
 
-            RowUpdate::ToolCall { row_id, tool_name, model_name } => {
-                // Update status to show tool running
+            RowUpdate::ToolCall {
+                row_id,
+                tool_name,
+                model_name,
+            } => {
+                // Update status for Lua HUD
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    lua.tool_state().set_status(&model_name, Status::RunningTool(tool_name.clone()));
+                    lua.tool_state()
+                        .set_status(&model_name, Status::RunningTool(tool_name.clone()));
                 }
 
                 // Update row to show tool call
                 if let Ok(Some(mut row)) = db.get_row(&row_id) {
-                    row.content = Some(format!("{}[calling {}...]",
-                        row.content.unwrap_or_default(), tool_name));
+                    row.content = Some(format!(
+                        "{}[calling {}...]",
+                        row.content.unwrap_or_default(),
+                        tool_name
+                    ));
                     let _ = db.update_row(&row);
                 }
             }
@@ -102,44 +80,12 @@ pub async fn push_updates_task(
                     tracing::error!("failed to finalize row: {}", e);
                 }
 
-                // Update status to idle
+                // Update status to idle for Lua HUD
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;
                     lua.tool_state().set_status(&model_name, Status::Idle);
                 }
-
-                // Full re-render to clean up
-                if let Ok(rows) = db.list_buffer_rows(&buffer_id) {
-                    let rendered = render_rows(&rows, term_width as usize);
-                    let output = format_full_render(&rendered, term_width, term_height);
-                    let _ = handle
-                        .data(channel, CryptoVec::from(output.as_bytes()))
-                        .await;
-                }
-
-                _accumulated_text.clear();
-                _current_row_id = None;
             }
         }
     }
-}
-
-/// Format output for streaming update (partial line replacement)
-fn format_streaming_output(rendered: &str, _width: u16, _height: u16) -> String {
-    // Move to start of line, clear, write new content
-    format!("{}{}{}", terminal::CR, terminal::clear_line(), rendered)
-}
-
-/// Format output for full re-render
-fn format_full_render(rendered: &str, _width: u16, height: u16) -> String {
-    let mut output = String::new();
-    // Move to top, clear scroll region, redraw
-    output.push_str(&terminal::move_to(1, 1));
-    for _ in 0..height.saturating_sub(HUD_HEIGHT + 1) {
-        output.push_str(&terminal::clear_line());
-        output.push_str(terminal::CRLF);
-    }
-    output.push_str(&terminal::move_to(1, 1));
-    output.push_str(rendered);
-    output
 }

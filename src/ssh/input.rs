@@ -3,10 +3,9 @@
 use crate::db::rows::Row;
 use crate::interp::{self, Input};
 use crate::status::Status;
-use crate::terminal;
 use anyhow::Result;
 use russh::server::Session;
-use russh::{ChannelId, CryptoVec};
+use russh::ChannelId;
 
 use super::handler::SshHandler;
 
@@ -151,8 +150,8 @@ impl SshHandler {
     /// Dispatch a slash command
     async fn dispatch_command(
         &mut self,
-        channel: ChannelId,
-        session: &mut Session,
+        _channel: ChannelId,
+        _session: &mut Session,
         name: &str,
         args: &str,
     ) -> Result<()> {
@@ -164,47 +163,37 @@ impl SshHandler {
         };
         let result = self.handle_input(&line).await;
 
-        // Send output
+        // Route command output through notifications (Lua renders)
         if !result.text.is_empty() {
-            let formatted = result.text.replace('\n', "\r\n");
-            let _ = session.data(channel, CryptoVec::from(formatted.as_bytes()));
+            if let Some(ref lua_runtime) = self.lua_runtime {
+                let lua = lua_runtime.lock().await;
+                // Use longer TTL for command output
+                lua.tool_state().push_notification(result.text.clone(), 10000);
+            }
         }
 
         Ok(())
     }
 
-    /// Send error message
-    async fn send_error(&self, channel: ChannelId, session: &mut Session, msg: &str) {
-        let output = format!("\x1b[31m{}\x1b[0m\r\n", msg);
-        let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
-    }
-
-    /// Render buffer incrementally
-    pub async fn render_incremental(&mut self, channel: ChannelId, session: &mut Session) {
-        let mut sess = self.session_state.lock().await;
-        if let Ok(output) = sess.render_incremental(&self.state.db) {
-            if !output.is_empty() {
-                let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
-            }
+    /// Send error message via notification
+    async fn send_error(&self, _channel: ChannelId, _session: &mut Session, msg: &str) {
+        if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            lua.tool_state().push_notification_with_level(
+                msg.to_string(),
+                5000,
+                crate::lua::NotificationLevel::Error,
+            );
         }
     }
 
-    /// Render full buffer
-    pub async fn render_full(&mut self, channel: ChannelId, session: &mut Session) {
-        let (_, height) = self.term_size;
-        let mut sess = self.session_state.lock().await;
+    /// Render buffer incrementally - now a no-op, Lua handles rendering
+    pub async fn render_incremental(&mut self, _channel: ChannelId, _session: &mut Session) {
+        // Lua's on_tick renders via tools.history() - no direct terminal output needed
+    }
 
-        if let Ok(rendered) = sess.render_full(&self.state.db) {
-            // Clear and redraw
-            let mut output = String::new();
-            output.push_str(&terminal::move_to(1, 1));
-            for _ in 0..height.saturating_sub(10) {
-                output.push_str(&terminal::clear_line());
-                output.push_str(terminal::CRLF);
-            }
-            output.push_str(&terminal::move_to(1, 1));
-            output.push_str(&rendered);
-            let _ = session.data(channel, CryptoVec::from(output.as_bytes()));
-        }
+    /// Render full buffer - now a no-op, Lua handles rendering
+    pub async fn render_full(&mut self, _channel: ChannelId, _session: &mut Session) {
+        // Lua's on_tick renders via tools.history() - no direct terminal output needed
     }
 }

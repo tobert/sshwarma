@@ -23,6 +23,5 @@ pub mod rules;
 pub mod ssh;
 pub mod state;
 pub mod status;
-pub mod terminal;
 pub mod ui;
 pub mod world;

@@ -1,16 +1,13 @@
-//! HUD refresh task
+//! Screen refresh task
 //!
-//! Periodically refreshes the heads-up display at the bottom of the terminal.
-//!
-//! Lua defines on_tick(tick, ctx) and draws directly to a buffer.
-//! Output is only sent when the buffer content changes.
+//! Periodically calls Lua's on_tick() with a full-screen buffer.
+//! Lua owns the entire screen layout - chat, status, input, everything.
 //!
 //! Also executes room rules on tick/interval triggers.
 
 use crate::db::rules::ActionSlot;
 use crate::lua::LuaRuntime;
 use crate::state::SharedState;
-use crate::terminal::HUD_HEIGHT;
 use crate::ui::RenderBuffer;
 use russh::server::Handle;
 use russh::{ChannelId, CryptoVec};
@@ -18,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
-/// Spawn the HUD refresh task
-pub fn spawn_hud_refresh(
+/// Spawn the screen refresh task
+pub fn spawn_screen_refresh(
     handle: Handle,
     channel: ChannelId,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
@@ -28,7 +25,7 @@ pub fn spawn_hud_refresh(
     term_height: u16,
 ) {
     tokio::spawn(async move {
-        hud_refresh_task(
+        screen_refresh_task(
             handle,
             channel,
             lua_runtime,
@@ -40,8 +37,8 @@ pub fn spawn_hud_refresh(
     });
 }
 
-/// HUD refresh loop (100ms interval)
-async fn hud_refresh_task(
+/// Screen refresh loop (100ms interval)
+async fn screen_refresh_task(
     handle: Handle,
     channel: ChannelId,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
@@ -52,8 +49,8 @@ async fn hud_refresh_task(
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     let mut tick: u64 = 0;
 
-    // Create render buffer for HUD region (full width, HUD_HEIGHT lines)
-    let render_buffer = Arc::new(Mutex::new(RenderBuffer::new(term_width, HUD_HEIGHT)));
+    // Create full-screen render buffer - Lua owns everything including input
+    let render_buffer = Arc::new(Mutex::new(RenderBuffer::new(term_width, term_height)));
     let mut last_output = String::new();
 
     loop {
@@ -73,7 +70,6 @@ async fn hud_refresh_task(
             }
 
             // Execute room rules (tick and interval triggers)
-            // Get room name from session context
             let room_name = {
                 let lua = lua_runtime.lock().await;
                 lua.tool_state()
@@ -117,7 +113,7 @@ async fn hud_refresh_task(
             }
         }
 
-        // Render via on_tick
+        // Render via on_tick - Lua gets full screen
         let output = {
             let lua = lua_runtime.lock().await;
 
@@ -127,24 +123,25 @@ async fn hud_refresh_task(
                 buf.clear();
             }
 
-            // Call on_tick - Lua draws to buffer
-            // Lua queries live data via sshwarma.call("status")
-            if let Err(e) = lua.call_on_tick(tick, render_buffer.clone(), term_width, HUD_HEIGHT) {
+            // Call on_tick - Lua draws to full screen including input
+            if let Err(e) = lua.call_on_tick(tick, render_buffer.clone(), term_width, term_height) {
                 tracing::debug!("on_tick error: {}", e);
                 continue;
             }
 
-            // Get ANSI output from buffer with absolute positioning
-            // to_ansi_at avoids newlines that would cause scrolling
+            // Get ANSI output from buffer, positioned at top-left
             let buf = render_buffer.lock().unwrap();
-            let hud_row = term_height.saturating_sub(HUD_HEIGHT);
-            buf.to_ansi_at(hud_row)
+            buf.to_ansi_at(1) // Row 1 (1-indexed for terminal)
         };
 
         // Only send if changed
         if output != last_output {
             last_output = output.clone();
-            if handle.data(channel, CryptoVec::from(output.as_bytes())).await.is_err() {
+            if handle
+                .data(channel, CryptoVec::from(output.as_bytes()))
+                .await
+                .is_err()
+            {
                 // Connection closed
                 break;
             }

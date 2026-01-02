@@ -17,9 +17,9 @@ pub use cache::ToolCache;
 pub use context::{NotificationLevel, PendingNotification};
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use registry::ToolRegistry;
-pub use render::{parse_lua_output, HUD_ROWS};
+pub use render::parse_lua_rows;
 pub use tool_middleware::{ToolContext, ToolMiddleware};
-pub use tools::{register_mcp_tools, LuaToolState, SessionContext};
+pub use tools::{register_mcp_tools, InputState, LuaToolState, SessionContext};
 pub use wrap::{compose_context, WrapResult, WrapState};
 
 // Re-export startup script path for main.rs
@@ -403,6 +403,9 @@ impl LuaRuntime {
     ) -> Result<WrapResult> {
         use crate::lua::tools::SessionContext;
 
+        // Save current session context (don't clobber HUD's context)
+        let saved_context = self.tool_state.session_context();
+
         // Set session context for unified tools to access
         self.tool_state.set_session_context(Some(SessionContext {
             username: wrap_state.username.clone(),
@@ -417,8 +420,8 @@ impl LuaRuntime {
         // Call compose_context from wrap.rs
         let result = wrap::compose_context(&self.lua, target_tokens);
 
-        // Cleanup session context (shared_state can persist for HUD)
-        self.tool_state.clear_session_context();
+        // Restore previous session context
+        self.tool_state.set_session_context(saved_context);
 
         result
     }
@@ -429,6 +432,9 @@ impl LuaRuntime {
     /// then converts to ANSI string for terminal display.
     pub fn render_look_ansi(&self, wrap_state: WrapState) -> Result<String> {
         use crate::lua::tools::SessionContext;
+
+        // Save current session context (don't clobber HUD's context)
+        let saved_context = self.tool_state.session_context();
 
         // Set session context for tools to access
         self.tool_state.set_session_context(Some(SessionContext {
@@ -455,8 +461,8 @@ impl LuaRuntime {
         // Parse segments to ANSI string
         let output = render::parse_lua_rows(rows)?;
 
-        // Cleanup
-        self.tool_state.clear_session_context();
+        // Restore previous session context
+        self.tool_state.set_session_context(saved_context);
 
         Ok(output)
     }
@@ -466,6 +472,9 @@ impl LuaRuntime {
     /// Calls Lua's `look_markdown()` function which returns a markdown string.
     pub fn render_look_markdown(&self, wrap_state: WrapState) -> Result<String> {
         use crate::lua::tools::SessionContext;
+
+        // Save current session context (don't clobber HUD's context)
+        let saved_context = self.tool_state.session_context();
 
         // Set session context for tools to access
         self.tool_state.set_session_context(Some(SessionContext {
@@ -489,8 +498,8 @@ impl LuaRuntime {
             .call(())
             .map_err(|e| anyhow::anyhow!("look_markdown call failed: {}", e))?;
 
-        // Cleanup
-        self.tool_state.clear_session_context();
+        // Restore previous session context
+        self.tool_state.set_session_context(saved_context);
 
         Ok(result)
     }

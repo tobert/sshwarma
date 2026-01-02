@@ -3,8 +3,8 @@
 //! Modular SSH server implementation using the Row/Buffer system.
 
 mod handler;
-mod hud;
 mod input;
+mod screen;
 mod session;
 mod streaming;
 

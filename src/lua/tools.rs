@@ -29,6 +29,17 @@ pub struct SessionContext {
     pub room_name: Option<String>,
 }
 
+/// Current input line state for Lua rendering
+#[derive(Clone, Default)]
+pub struct InputState {
+    /// Current input text
+    pub text: String,
+    /// Cursor position (byte offset)
+    pub cursor: usize,
+    /// Prompt string (e.g., "lobby> ")
+    pub prompt: String,
+}
+
 /// Shared state holder for Lua callbacks
 ///
 /// Uses Arc for thread-safe sharing across async handlers and
@@ -47,6 +58,8 @@ pub struct LuaToolState {
     session_context: Arc<std::sync::RwLock<Option<SessionContext>>>,
     /// Tool middleware for routing and transformation
     middleware: ToolMiddleware,
+    /// Current input line state (for Lua to render)
+    input_state: Arc<std::sync::RwLock<InputState>>,
 }
 
 impl LuaToolState {
@@ -59,7 +72,25 @@ impl LuaToolState {
             shared_state: Arc::new(std::sync::RwLock::new(None)),
             session_context: Arc::new(std::sync::RwLock::new(None)),
             middleware: ToolMiddleware::new(),
+            input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
         }
+    }
+
+    /// Update the current input state (called by handler on keystroke)
+    pub fn set_input(&self, text: &str, cursor: usize, prompt: &str) {
+        if let Ok(mut guard) = self.input_state.write() {
+            guard.text = text.to_string();
+            guard.cursor = cursor;
+            guard.prompt = prompt.to_string();
+        }
+    }
+
+    /// Get the current input state
+    pub fn input_state(&self) -> InputState {
+        self.input_state
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     /// Get a reference to the tool middleware
@@ -138,16 +169,21 @@ impl LuaToolState {
     /// Set the session context for wrap operations
     pub fn set_session_context(&self, ctx: Option<SessionContext>) {
         if let Ok(mut guard) = self.session_context.write() {
+            let room = ctx.as_ref().and_then(|c| c.room_name.clone());
+            tracing::info!(?room, "set_session_context");
             *guard = ctx;
         }
     }
 
     /// Get a clone of the session context if set
     pub fn session_context(&self) -> Option<SessionContext> {
-        self.session_context
+        let ctx = self.session_context
             .read()
             .ok()
-            .and_then(|guard| guard.clone())
+            .and_then(|guard| guard.clone());
+        let room = ctx.as_ref().and_then(|c| c.room_name.clone());
+        tracing::debug!(?room, "session_context read");
+        ctx
     }
 
     /// Clear the session context (cleanup after wrap operations)
@@ -276,7 +312,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             // Get room data from shared state
             if let Some(shared) = state.shared_state() {
                 // Get room from world
-                let world = shared.world.blocking_read();
+                let world = tokio::task::block_in_place(|| shared.world.blocking_read());
                 if let Some(room) = world.get_room(&room_name) {
                     // Description
                     if let Some(ref desc) = room.description {
@@ -336,7 +372,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             if let Some(shared) = state.shared_state() {
                 // Get users from room
                 if let Some(ref room) = room_name {
-                    let world = shared.world.blocking_read();
+                    let world = tokio::task::block_in_place(|| shared.world.blocking_read());
                     if let Some(room_data) = world.get_room(room) {
                         for user in &room_data.users {
                             let entry = lua.create_table()?;
@@ -451,6 +487,20 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("session", session_fn)?;
 
+    // tools.input() -> {text, cursor, prompt}
+    let input_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let input = state.input_state();
+            let result = lua.create_table()?;
+            result.set("text", input.text)?;
+            result.set("cursor", input.cursor)?;
+            result.set("prompt", input.prompt)?;
+            Ok(result)
+        })?
+    };
+    tools.set("input", input_fn)?;
+
     // Extended data tools (require SharedState)
 
     // tools.history(n) -> [{author, content, timestamp, kind}]
@@ -461,9 +511,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             let list = lua.create_table()?;
 
             // Get room name from session context
-            let room_name = match state.session_context().and_then(|ctx| ctx.room_name) {
-                Some(name) => name,
-                None => return Ok(list), // Empty list if not in a room
+            let ctx = state.session_context();
+            let room_name = match ctx.and_then(|c| c.room_name) {
+                Some(name) => {
+                    tracing::debug!(room = %name, "tools.history: found room");
+                    name
+                }
+                None => {
+                    tracing::debug!("tools.history: no room in session context");
+                    return Ok(list); // Empty list if not in a room
+                }
             };
 
             // Try to get history from database
