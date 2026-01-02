@@ -6,6 +6,7 @@
 pub mod cache;
 pub mod context;
 pub mod data;
+pub mod dirty;
 pub mod mcp_bridge;
 pub mod registry;
 pub mod render;
@@ -15,6 +16,7 @@ pub mod wrap;
 
 pub use cache::ToolCache;
 pub use context::{NotificationLevel, PendingNotification};
+pub use dirty::DirtyState;
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use registry::ToolRegistry;
 pub use render::parse_lua_rows;
@@ -519,17 +521,37 @@ impl LuaRuntime {
         self.loaded_script_path.as_ref()
     }
 
-    /// Call the on_tick(tick, ctx) function if it exists
+    /// Call on_tick for screen rendering (legacy API)
     ///
-    /// This is the main render loop entry point. Called every 100ms.
-    /// Lua receives:
-    /// - tick: monotonic tick counter
-    /// - ctx: LuaDrawContext for the full screen
-    ///
-    /// Lua can draw to the context, and the caller will diff and emit output.
-    /// If the script doesn't define an `on_tick` function, this is a no-op.
+    /// This is a convenience wrapper that marks all regions dirty.
+    /// For tag-based partial updates, use `call_on_tick_with_tags` instead.
     pub fn call_on_tick(
         &self,
+        tick: u64,
+        render_buffer: std::sync::Arc<std::sync::Mutex<crate::ui::RenderBuffer>>,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        // Mark all standard regions dirty for full render
+        let mut all_dirty = std::collections::HashSet::new();
+        all_dirty.insert("status".to_string());
+        all_dirty.insert("chat".to_string());
+        all_dirty.insert("input".to_string());
+
+        self.call_on_tick_with_tags(&all_dirty, tick, render_buffer, width, height)
+    }
+
+    /// Call on_tick with dirty tags for tag-based partial updates
+    ///
+    /// The dirty_tags set is passed to Lua as a table where keys are tag names
+    /// and values are true. Lua can check `if dirty_tags["chat"] then ... end`
+    /// to decide which regions to render.
+    ///
+    /// This enables Lua to control layout: status at top, bottom, both sides,
+    /// or mixed with content - Rust imposes no layout assumptions.
+    pub fn call_on_tick_with_tags(
+        &self,
+        dirty_tags: &std::collections::HashSet<String>,
         tick: u64,
         render_buffer: std::sync::Arc<std::sync::Mutex<crate::ui::RenderBuffer>>,
         width: u16,
@@ -552,14 +574,32 @@ impl LuaRuntime {
             .ok_or_else(|| anyhow::anyhow!("on_tick is not a function"))?
             .clone();
 
+        // Convert dirty_tags to Lua table: {status = true, chat = true, ...}
+        let tags_table = self.lua.create_table().map_err(|e| {
+            anyhow::anyhow!("failed to create tags table: {}", e)
+        })?;
+        for tag in dirty_tags {
+            tags_table.set(tag.as_str(), true).map_err(|e| {
+                anyhow::anyhow!("failed to set tag {}: {}", tag, e)
+            })?;
+        }
+
         // Create draw context for full screen
         let ctx = crate::ui::LuaDrawContext::new(render_buffer, 0, 0, width, height);
 
-        func.call::<()>((tick, ctx)).map_err(|e| {
-            let msg = format!("on_tick() call failed: {}", e);
-            record_lua_error("on_tick", &msg);
-            anyhow::anyhow!("{}", msg)
-        })?;
+        // Call on_tick(dirty_tags, tick, ctx) - new signature
+        // For backwards compatibility, also try (tick, ctx) if that fails
+        let result = func.call::<()>((tags_table.clone(), tick, ctx.clone()));
+
+        if let Err(e) = result {
+            // Try old signature (tick, ctx) for backwards compatibility
+            let old_result = func.call::<()>((tick, ctx));
+            if let Err(old_e) = old_result {
+                let msg = format!("on_tick() call failed: {} (also tried old signature: {})", e, old_e);
+                record_lua_error("on_tick", &msg);
+                return Err(anyhow::anyhow!("{}", msg));
+            }
+        }
 
         Ok(())
     }

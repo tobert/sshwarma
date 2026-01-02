@@ -5,6 +5,7 @@
 
 use crate::lua::cache::ToolCache;
 use crate::lua::context::{build_notifications_table, NotificationLevel, PendingNotification};
+use crate::lua::dirty::DirtyState;
 use crate::lua::mcp_bridge::McpBridge;
 use crate::lua::tool_middleware::ToolMiddleware;
 use crate::model::ModelHandle;
@@ -60,8 +61,9 @@ pub struct LuaToolState {
     middleware: ToolMiddleware,
     /// Current input line state (for Lua to render)
     input_state: Arc<std::sync::RwLock<InputState>>,
-    /// Signal for screen refresh (event-driven rendering)
-    dirty_signal: Arc<tokio::sync::Notify>,
+    /// Tag-based dirty tracking for partial screen updates
+    /// Lua defines regions; Rust provides primitives
+    dirty: Arc<DirtyState>,
     /// Chat scroll state (persists across renders)
     chat_scroll: crate::ui::scroll::LuaScrollState,
 }
@@ -77,7 +79,7 @@ impl LuaToolState {
             session_context: Arc::new(std::sync::RwLock::new(None)),
             middleware: ToolMiddleware::new(),
             input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
-            dirty_signal: Arc::new(tokio::sync::Notify::new()),
+            dirty: Arc::new(DirtyState::new()),
             chat_scroll: crate::ui::scroll::LuaScrollState::new(),
         }
     }
@@ -87,14 +89,19 @@ impl LuaToolState {
         self.chat_scroll.clone()
     }
 
-    /// Get the dirty signal for screen refresh task to wait on
-    pub fn dirty_signal(&self) -> Arc<tokio::sync::Notify> {
-        self.dirty_signal.clone()
+    /// Get the dirty state for screen refresh task
+    ///
+    /// Screen loop waits on `dirty.notified()` and calls `dirty.take()` to get dirty tags.
+    pub fn dirty(&self) -> &Arc<DirtyState> {
+        &self.dirty
     }
 
-    /// Mark screen as needing refresh
-    pub fn mark_dirty(&self) {
-        self.dirty_signal.notify_one();
+    /// Mark a tag dirty for partial screen updates
+    ///
+    /// Conventional tags: "status", "chat", "input"
+    /// Lua can define its own tag names for custom layouts.
+    pub fn mark_dirty(&self, tag: &str) {
+        self.dirty.mark(tag);
     }
 
     /// Update the current input state (called by handler on keystroke)
@@ -104,7 +111,7 @@ impl LuaToolState {
             guard.cursor = cursor;
             guard.prompt = prompt.to_string();
         }
-        self.mark_dirty();
+        self.mark_dirty("input");
     }
 
     /// Get the current input state
@@ -128,7 +135,7 @@ impl LuaToolState {
     /// Set a participant's status
     pub fn set_status(&self, name: &str, status: Status) {
         self.status_tracker.set(name, status);
-        self.mark_dirty();
+        self.mark_dirty("status");
     }
 
     /// Get a participant's status
@@ -157,7 +164,7 @@ impl LuaToolState {
         if let Ok(mut guard) = self.pending_notifications.write() {
             guard.push(notification);
         }
-        self.mark_dirty();
+        self.mark_dirty("status");
     }
 
     /// Get the cache for background updates
@@ -197,7 +204,8 @@ impl LuaToolState {
             tracing::info!(?room, "set_session_context");
             *guard = ctx;
         }
-        self.mark_dirty();
+        // Room/context change affects all regions
+        self.dirty.mark_many(["status", "chat", "input"]);
     }
 
     /// Get a clone of the session context if set
@@ -532,6 +540,29 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |_lua, ()| Ok(state.chat_scroll()))?
     };
     tools.set("scroll", scroll_fn)?;
+
+    // tools.mark_dirty(tag) -> nil
+    // Mark a region tag dirty for partial screen updates
+    // Conventional tags: "status", "chat", "input" (Lua can define others)
+    let mark_dirty_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, tag: String| {
+            state.mark_dirty(&tag);
+            Ok(())
+        })?
+    };
+    tools.set("mark_dirty", mark_dirty_fn)?;
+
+    // tools.mark_all_dirty(tags) -> nil
+    // Mark multiple region tags dirty at once
+    let mark_all_dirty_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, tags: Vec<String>| {
+            state.dirty().mark_many(tags);
+            Ok(())
+        })?
+    };
+    tools.set("mark_all_dirty", mark_all_dirty_fn)?;
 
     // Extended data tools (require SharedState)
 

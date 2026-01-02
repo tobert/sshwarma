@@ -346,6 +346,121 @@ impl RenderBuffer {
         self.to_ansi_impl(Some(start_row))
     }
 
+    /// Get a row as a comparable string (character content + style hash)
+    ///
+    /// Used for row-based diffing - two rows with the same return value are identical.
+    pub fn row_fingerprint(&self, y: u16) -> String {
+        if y >= self.height {
+            return String::new();
+        }
+
+        use std::hash::{Hash, Hasher};
+        let mut fingerprint = String::new();
+
+        for x in 0..self.width {
+            let idx = (y as usize) * (self.width as usize) + (x as usize);
+            let cell = &self.cells[idx];
+
+            // Character
+            fingerprint.push(if cell.char == '\0' { ' ' } else { cell.char });
+
+            // Style hash (compact representation)
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            cell.fg.hash(&mut hasher);
+            cell.bg.hash(&mut hasher);
+            cell.bold.hash(&mut hasher);
+            cell.dim.hash(&mut hasher);
+            fingerprint.push_str(&format!("{:x}", hasher.finish() & 0xFFFF));
+        }
+
+        fingerprint
+    }
+
+    /// Generate ANSI for a single row at a specific screen position
+    pub fn row_to_ansi(&self, y: u16, screen_row: u16) -> String {
+        use crossterm::style::{ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
+        use crossterm::Command;
+
+        if y >= self.height {
+            return String::new();
+        }
+
+        let mut output = String::new();
+
+        // Position cursor for this row (1-indexed)
+        output.push_str(&format!("\x1b[{};1H", screen_row));
+
+        let mut last_fg: Option<Color> = None;
+        let mut last_bg: Option<Color> = None;
+        let mut last_bold = false;
+        let mut last_dim = false;
+
+        for x in 0..self.width {
+            let cell = &self.cells[(y as usize) * (self.width as usize) + (x as usize)];
+
+            // Apply style changes
+            let needs_reset = (cell.bold != last_bold) || (cell.dim != last_dim);
+            if needs_reset {
+                let _ = ResetColor.write_ansi(&mut output);
+                last_fg = None;
+                last_bg = None;
+                last_bold = false;
+                last_dim = false;
+            }
+
+            if cell.bold && !last_bold {
+                let _ = SetAttribute(Attribute::Bold).write_ansi(&mut output);
+                last_bold = true;
+            }
+
+            if cell.dim && !last_dim {
+                let _ = SetAttribute(Attribute::Dim).write_ansi(&mut output);
+                last_dim = true;
+            }
+
+            if cell.fg != last_fg {
+                if let Some(color) = cell.fg {
+                    let _ = SetForegroundColor(color).write_ansi(&mut output);
+                }
+                last_fg = cell.fg;
+            }
+
+            if cell.bg != last_bg {
+                if let Some(color) = cell.bg {
+                    let _ = SetBackgroundColor(color).write_ansi(&mut output);
+                }
+                last_bg = cell.bg;
+            }
+
+            // Output character
+            output.push(if cell.char == '\0' { ' ' } else { cell.char });
+        }
+
+        // Reset and clear to end of line
+        let _ = ResetColor.write_ansi(&mut output);
+        output.push_str("\x1b[K");
+
+        output
+    }
+
+    /// Generate ANSI for only the rows that differ from a previous buffer
+    ///
+    /// Uses row fingerprinting to detect changes. Only emits ANSI for changed rows,
+    /// preserving terminal selection state for unchanged regions.
+    pub fn diff_ansi(&self, previous: &RenderBuffer, start_row: u16) -> String {
+        let mut output = String::new();
+
+        for y in 0..self.height {
+            // Compare row fingerprints
+            if self.row_fingerprint(y) != previous.row_fingerprint(y) {
+                // Row changed - emit positioned ANSI
+                output.push_str(&self.row_to_ansi(y, start_row + y + 1));
+            }
+        }
+
+        output
+    }
+
     /// Internal renderer - if start_row is Some, use absolute positioning
     fn to_ansi_impl(&self, start_row: Option<u16>) -> String {
         use crossterm::style::{ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};

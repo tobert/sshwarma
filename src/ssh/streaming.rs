@@ -42,10 +42,10 @@ pub async fn push_updates_task(
                 if let Err(e) = db.append_to_row(&row_id, &text) {
                     tracing::error!("failed to append to row: {}", e);
                 }
-                // Signal screen refresh
+                // Signal chat region needs refresh
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    lua.tool_state().mark_dirty();
+                    lua.tool_state().mark_dirty("chat");
                 }
             }
 
@@ -77,10 +77,10 @@ pub async fn push_updates_task(
                 if let Err(e) = db.append_to_row(&row_id, &format!("\n{}", summary)) {
                     tracing::error!("failed to append tool result: {}", e);
                 }
-                // Signal screen refresh
+                // Signal chat region needs refresh
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    lua.tool_state().mark_dirty();
+                    lua.tool_state().mark_dirty("chat");
                 }
             }
 

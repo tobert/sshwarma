@@ -316,35 +316,57 @@ end
 -- Main Entry Point
 --------------------------------------------------------------------------------
 
-function on_tick(tick, ctx)
+-- on_tick(dirty_tags, tick, ctx)
+--
+-- dirty_tags is a table where keys are tag names and values are true:
+--   dirty_tags["status"] -> true if status region needs redraw
+--   dirty_tags["chat"] -> true if chat region needs redraw
+--   dirty_tags["input"] -> true if input region needs redraw
+--
+-- The Rust layer only redraws rows that actually changed (row diffing),
+-- so even if we redraw everything here, only modified rows are sent to terminal.
+-- This preserves text selection in unchanged regions.
+--
+-- For maximum efficiency, Lua can check dirty_tags and only render affected regions.
+-- For simplicity, we render everything but let Rust diff handle the optimization.
+
+function on_tick(dirty_tags, tick, ctx)
     ctx:clear()
 
     local h = ctx.h
     local w = ctx.w
 
-    -- Layout:
-    --   [0 to h-3] Chat buffer
-    --   [h-2]      Status line
-    --   [h-1]      Input line
+    -- Layout (Lua controls this - can be changed):
+    --   [0 to h-3] Chat buffer (tag: "chat")
+    --   [h-2]      Status line (tag: "status")
+    --   [h-1]      Input line (tag: "input")
 
     local chat_height = h - 2
     local status_row = h - 2
     local input_row = h - 1
 
+    -- Render chat region
+    -- Note: we always render for now; Rust's row diffing handles optimization
     if chat_height > 1 then
         render_chat(ctx, chat_height)
     end
 
+    -- Render status region
     if status_row >= 0 then
         render_status(ctx, status_row)
     end
 
+    -- Render input region
     if input_row >= 0 then
         render_input(ctx, input_row)
     end
 end
 
--- Optional background function (called every 500ms)
+-- Background function (called every 500ms)
+-- Can use tools.mark_dirty("status") etc. to trigger redraws
 function background(tick)
-    -- Available for polling, caching, etc.
+    -- Example: refresh status every 2 seconds for duration counter
+    if tick % 4 == 0 then
+        tools.mark_dirty("status")
+    end
 end

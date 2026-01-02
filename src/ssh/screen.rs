@@ -37,9 +37,10 @@ pub fn spawn_screen_refresh(
     });
 }
 
-/// Event-driven screen refresh
+/// Event-driven screen refresh with tag-based dirty tracking
 ///
-/// Waits for dirty signal instead of polling. Background tasks run on 5-second intervals.
+/// Uses double-buffering and row-based diffing for efficient partial updates.
+/// Only redraws rows that actually changed, preserving terminal selection.
 async fn screen_refresh_task(
     handle: Handle,
     channel: ChannelId,
@@ -48,63 +49,38 @@ async fn screen_refresh_task(
     term_width: u16,
     term_height: u16,
 ) {
-    // Get the dirty signal for event-driven updates
-    let dirty_signal = {
+    // Get the dirty state for event-driven updates
+    let dirty = {
         let lua = lua_runtime.lock().await;
-        lua.tool_state().dirty_signal()
+        lua.tool_state().dirty().clone()
     };
 
-    // Create full-screen render buffer - Lua owns everything including input
-    let render_buffer = Arc::new(Mutex::new(RenderBuffer::new(term_width, term_height)));
-    let mut last_output = String::new();
+    // Double-buffered rendering for efficient diffing
+    let current_buffer = Arc::new(Mutex::new(RenderBuffer::new(term_width, term_height)));
+    let mut last_buffer = RenderBuffer::new(term_width, term_height);
     let mut tick: u64 = 0;
     let mut background_tick: u64 = 0;
 
-    // Initial render
-    render_screen(
-        &handle,
-        channel,
-        &lua_runtime,
-        &render_buffer,
-        &mut last_output,
-        tick,
-        term_width,
-        term_height,
-    )
-    .await;
+    // Mark all regions dirty for initial render
+    dirty.mark_many(["status", "chat", "input"]);
 
     loop {
         // Wait for either:
-        // 1. Dirty signal (something changed, redraw immediately)
-        // 2. 5-second timeout (run background tasks)
-        let was_dirty = tokio::select! {
-            _ = dirty_signal.notified() => true,
-            _ = tokio::time::sleep(Duration::from_secs(5)) => false,
+        // 1. Dirty signal (something changed, redraw)
+        // 2. 500ms timeout (run background tasks)
+        let was_background = tokio::select! {
+            _ = dirty.notified() => false,
+            _ = tokio::time::sleep(Duration::from_millis(500)) => true,
         };
 
         tick += 1;
 
-        if was_dirty {
-            // Something changed - render immediately
-            if !render_screen(
-                &handle,
-                channel,
-                &lua_runtime,
-                &render_buffer,
-                &mut last_output,
-                tick,
-                term_width,
-                term_height,
-            )
-            .await
-            {
-                break; // Connection closed
-            }
-        } else {
-            // 5-second background tick
+        if was_background {
+            // 500ms background tick
             background_tick += 1;
 
             // Run user's background() function
+            // (This can call tools.mark_dirty() to trigger redraws)
             {
                 let lua = lua_runtime.lock().await;
                 if let Err(e) = lua.call_background(background_tick) {
@@ -151,65 +127,81 @@ async fn screen_refresh_task(
                     }
                 }
             }
+        }
 
-            // Render after background tasks (they might have changed state)
-            if !render_screen(
-                &handle,
-                channel,
-                &lua_runtime,
-                &render_buffer,
-                &mut last_output,
-                tick,
-                term_width,
-                term_height,
-            )
-            .await
-            {
-                break;
-            }
+        // Get dirty tags (clears the set)
+        let dirty_tags = dirty.take();
+        if dirty_tags.is_empty() {
+            continue; // Nothing to redraw
+        }
+
+        // Render screen with dirty tags
+        if !render_screen_with_tags(
+            &handle,
+            channel,
+            &lua_runtime,
+            &current_buffer,
+            &mut last_buffer,
+            &dirty_tags,
+            tick,
+            term_width,
+            term_height,
+        )
+        .await
+        {
+            break; // Connection closed
         }
     }
 }
 
-/// Render the screen via Lua's on_tick. Returns false if connection closed.
-async fn render_screen(
+/// Render the screen with tag-based dirty tracking and row diffing.
+/// Returns false if connection closed.
+async fn render_screen_with_tags(
     handle: &Handle,
     channel: ChannelId,
     lua_runtime: &Arc<TokioMutex<LuaRuntime>>,
-    render_buffer: &Arc<Mutex<RenderBuffer>>,
-    last_output: &mut String,
+    current_buffer: &Arc<Mutex<RenderBuffer>>,
+    last_buffer: &mut RenderBuffer,
+    dirty_tags: &std::collections::HashSet<String>,
     tick: u64,
     term_width: u16,
     term_height: u16,
 ) -> bool {
-    let output = {
+    let diff_output = {
         let lua = lua_runtime.lock().await;
 
-        // Clear buffer before drawing
+        // Clear current buffer before drawing
         {
-            let mut buf = render_buffer.lock().unwrap();
+            let mut buf = current_buffer.lock().unwrap();
             buf.clear();
         }
 
-        // Call on_tick - Lua draws to full screen including input
-        if let Err(e) = lua.call_on_tick(tick, render_buffer.clone(), term_width, term_height) {
+        // Call on_tick with dirty tags - Lua draws to full screen
+        // Future: Lua can use dirty_tags to render only affected regions
+        if let Err(e) =
+            lua.call_on_tick_with_tags(dirty_tags, tick, current_buffer.clone(), term_width, term_height)
+        {
             tracing::debug!("on_tick error: {}", e);
             return true; // Continue, just skip this frame
         }
 
-        // Get ANSI output from buffer, positioned at top-left
-        let buf = render_buffer.lock().unwrap();
-        buf.to_ansi_at(1)
+        // Generate diff ANSI - only rows that changed
+        let buf = current_buffer.lock().unwrap();
+        buf.diff_ansi(last_buffer, 0)
     };
 
-    // Only send if changed
-    if output != *last_output {
-        *last_output = output.clone();
+    // Update last_buffer for next comparison
+    {
+        let buf = current_buffer.lock().unwrap();
+        *last_buffer = buf.clone();
+    }
 
+    // Only send if there are changes
+    if !diff_output.is_empty() {
         // Wrap in synchronized output to prevent tearing
         let final_output = format!(
             "\x1b[?2026h{}\x1b[{};1H\x1b[?25h\x1b[?2026l",
-            output, term_height
+            diff_output, term_height
         );
 
         if handle
