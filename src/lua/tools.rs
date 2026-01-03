@@ -15,6 +15,7 @@ use crate::ui::{LuaArea, LuaDrawContext, Rect, RenderBuffer};
 use crate::world::JournalKind;
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::Arc;
+use unicode_width::UnicodeWidthStr;
 
 /// Session context for wrap operations
 ///
@@ -818,6 +819,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     tools.set("get_target_prompts", get_target_prompts_fn)?;
 
     // Utility tools
+
+    // tools.display_width(text) -> int
+    // Returns terminal display width of text (handles wide CJK chars, zero-width, etc.)
+    // Uses Unicode UAX#11 East Asian Width property
+    let display_width_fn = lua.create_function(|_, text: String| Ok(text.width()))?;
+    tools.set("display_width", display_width_fn)?;
 
     // tools.estimate_tokens(text) -> int
     // Simple heuristic: ~4 characters per token
@@ -1671,6 +1678,35 @@ mod tests {
     // =========================================================================
     // Phase 2: Utility Tool Tests
     // =========================================================================
+
+    #[test]
+    fn test_display_width() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        lua.load(
+            r#"
+            -- ASCII: 1 cell per char
+            assert(tools.display_width("hello") == 5, "ASCII width")
+
+            -- CJK: 2 cells per char (東京 = 2 chars, 4 cells)
+            assert(tools.display_width("東京") == 4, "CJK width should be 4, got " .. tools.display_width("東京"))
+
+            -- Mixed: "Hi東京" = 2 + 4 = 6 cells
+            assert(tools.display_width("Hi東京") == 6, "mixed width")
+
+            -- Emoji: typically 2 cells (implementation may vary)
+            local emoji_width = tools.display_width("🎵")
+            assert(emoji_width >= 1 and emoji_width <= 2, "emoji width should be 1-2")
+
+            -- Empty string
+            assert(tools.display_width("") == 0, "empty string")
+        "#,
+        )
+        .exec()
+        .expect("display_width should work");
+    }
 
     #[test]
     fn test_estimate_tokens() {

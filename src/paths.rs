@@ -11,7 +11,7 @@
 //!
 //! ~/.config/sshwarma/          (XDG_CONFIG_HOME)
 //! ├── models.toml
-//! ├── hud.lua
+//! ├── screen.lua
 //! └── {user}.lua
 //! ```
 //!

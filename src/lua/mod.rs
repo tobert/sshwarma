@@ -1,7 +1,7 @@
 //! Lua integration for sshwarma
 //!
-//! This module provides Lua scripting support for customizable HUD rendering.
-//! Supports hot-reloading of user scripts from ~/.config/sshwarma/hud.lua.
+//! This module provides Lua scripting support for customizable screen rendering.
+//! Supports hot-reloading of user scripts from ~/.config/sshwarma/screen.lua.
 
 pub mod cache;
 pub mod context;
@@ -79,18 +79,18 @@ fn classify_lua_error(msg: &str) -> &'static str {
     }
 }
 
-/// Embedded default HUD script
-const DEFAULT_HUD_SCRIPT: &str = include_str!("../embedded/hud.lua");
+/// Embedded default screen script (full UI: chat, status, input)
+const DEFAULT_SCREEN_SCRIPT: &str = include_str!("../embedded/screen.lua");
 
 /// Embedded wrap script for context composition
 const DEFAULT_WRAP_SCRIPT: &str = include_str!("../embedded/wrap.lua");
 
-/// Path to user's custom HUD script
-pub fn user_hud_script_path() -> PathBuf {
-    paths::config_dir().join("hud.lua")
+/// Path to user's custom screen script
+pub fn user_screen_script_path() -> PathBuf {
+    paths::config_dir().join("screen.lua")
 }
 
-/// Path to a specific user's HUD script (e.g., atobey.lua, claude.lua)
+/// Path to a specific user's screen script (e.g., atobey.lua, claude.lua)
 pub fn user_named_script_path(username: &str) -> PathBuf {
     paths::config_dir().join(format!("{}.lua", username))
 }
@@ -100,10 +100,10 @@ pub fn startup_script_path() -> PathBuf {
     paths::config_dir().join("startup.lua")
 }
 
-/// Lua runtime for HUD rendering
+/// Lua runtime for screen rendering
 ///
 /// Manages the Lua state, script loading, and hot-reloading.
-/// Lua scripts implement `on_tick(tick, ctx)` to render the HUD.
+/// Lua scripts implement `on_tick(tick, ctx)` to render the screen.
 pub struct LuaRuntime {
     /// The Lua interpreter state
     lua: Lua,
@@ -139,11 +139,11 @@ impl LuaRuntime {
             .exec()
             .map_err(|e| anyhow::anyhow!("failed to load embedded wrap script: {}", e))?;
 
-        // Load the default HUD script
-        lua.load(DEFAULT_HUD_SCRIPT)
-            .set_name("embedded:hud.lua")
+        // Load the default screen script
+        lua.load(DEFAULT_SCREEN_SCRIPT)
+            .set_name("embedded:screen.lua")
             .exec()
-            .map_err(|e| anyhow::anyhow!("failed to load embedded HUD script: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to load embedded screen script: {}", e))?;
 
         info!("Lua runtime initialized with embedded scripts");
 
@@ -166,7 +166,7 @@ impl LuaRuntime {
     ///
     /// Script lookup order:
     /// 1. `{username}.lua` (e.g., atobey.lua, claude.lua)
-    /// 2. `hud.lua` (shared fallback)
+    /// 2. `screen.lua` (shared fallback)
     /// 3. Embedded default
     pub fn new_for_user(username: Option<&str>) -> Result<Self> {
         let mut runtime = Self::new()?;
@@ -177,12 +177,12 @@ impl LuaRuntime {
             if named_path.exists() {
                 match runtime.load_script(&named_path) {
                     Ok(()) => {
-                        info!("Loaded HUD script for '{}' from {:?}", name, named_path);
+                        info!("Loaded screen script for '{}' from {:?}", name, named_path);
                         return Ok(runtime);
                     }
                     Err(e) => {
                         warn!(
-                            "Failed to load HUD script {:?}: {}. Trying fallback.",
+                            "Failed to load screen script {:?}: {}. Trying fallback.",
                             named_path, e
                         );
                     }
@@ -190,23 +190,23 @@ impl LuaRuntime {
             }
         }
 
-        // Try shared user script (hud.lua)
-        let user_path = user_hud_script_path();
+        // Try shared user script (screen.lua)
+        let user_path = user_screen_script_path();
         if user_path.exists() {
             match runtime.load_script(&user_path) {
                 Ok(()) => {
-                    info!("Loaded user HUD script from {:?}", user_path);
+                    info!("Loaded user screen script from {:?}", user_path);
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to load user HUD script {:?}: {}. Using embedded default.",
+                        "Failed to load user screen script {:?}: {}. Using embedded default.",
                         user_path, e
                     );
                 }
             }
         } else {
             debug!(
-                "No user HUD script at {:?}, using embedded default",
+                "No user screen script at {:?}, using embedded default",
                 user_path
             );
         }
@@ -290,7 +290,7 @@ impl LuaRuntime {
         self.loaded_script_path = Some(path.clone());
         self.loaded_script_mtime = mtime;
 
-        debug!("Loaded HUD script from {:?}", path);
+        debug!("Loaded screen script from {:?}", path);
         Ok(())
     }
 
@@ -340,10 +340,10 @@ impl LuaRuntime {
     /// Reload the embedded default script
     fn reload_embedded(&mut self) -> Result<()> {
         self.lua
-            .load(DEFAULT_HUD_SCRIPT)
-            .set_name("embedded:hud.lua")
+            .load(DEFAULT_SCREEN_SCRIPT)
+            .set_name("embedded:screen.lua")
             .exec()
-            .map_err(|e| anyhow::anyhow!("failed to reload embedded HUD script: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to reload embedded screen script: {}", e))?;
 
         self.loaded_script_path = None;
         self.loaded_script_mtime = None;
@@ -351,7 +351,7 @@ impl LuaRuntime {
         Ok(())
     }
 
-    /// Push a notification for the HUD to display
+    /// Push a notification for the screen to display
     pub fn push_notification(&self, message: String, ttl_ms: i64) {
         self.tool_state.push_notification(message, ttl_ms);
     }
@@ -410,7 +410,7 @@ impl LuaRuntime {
     ) -> Result<WrapResult> {
         use crate::lua::tools::SessionContext;
 
-        // Save current session context (don't clobber HUD's context)
+        // Save current session context (don't clobber screen's context)
         let saved_context = self.tool_state.session_context();
 
         // Set session context for unified tools to access
@@ -440,7 +440,7 @@ impl LuaRuntime {
     pub fn render_look_ansi(&self, wrap_state: WrapState) -> Result<String> {
         use crate::lua::tools::SessionContext;
 
-        // Save current session context (don't clobber HUD's context)
+        // Save current session context (don't clobber screen's context)
         let saved_context = self.tool_state.session_context();
 
         // Set session context for tools to access
@@ -480,7 +480,7 @@ impl LuaRuntime {
     pub fn render_look_markdown(&self, wrap_state: WrapState) -> Result<String> {
         use crate::lua::tools::SessionContext;
 
-        // Save current session context (don't clobber HUD's context)
+        // Save current session context (don't clobber screen's context)
         let saved_context = self.tool_state.session_context();
 
         // Set session context for tools to access
@@ -827,8 +827,8 @@ mod tests {
         let buf = render_buffer.lock().unwrap();
         let output = buf.to_ansi();
 
-        // Embedded hud.lua should draw frame with box chars
-        assert!(!output.is_empty(), "HUD should produce output");
+        // Embedded screen.lua should produce output
+        assert!(!output.is_empty(), "screen should produce output");
     }
 
     #[test]
@@ -864,9 +864,9 @@ mod tests {
 
     #[test]
     fn test_user_config_path() {
-        let path = user_hud_script_path();
+        let path = user_screen_script_path();
         assert!(path.to_string_lossy().contains("sshwarma"));
-        assert!(path.to_string_lossy().ends_with("hud.lua"));
+        assert!(path.to_string_lossy().ends_with("screen.lua"));
     }
 
     #[test]
@@ -1310,5 +1310,149 @@ end
 
         // Cleanup
         let _ = fs::remove_file(&script_path);
+    }
+
+    // =========================================================================
+    // Screen module tests (pure function tests)
+    // =========================================================================
+
+    #[test]
+    fn test_screen_wrap_text_basic() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let result: Vec<String> = runtime
+            .lua
+            .load(r#"return screen.wrap_text("hello world", 20)"#)
+            .eval()
+            .expect("should run wrap_text");
+
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_screen_wrap_text_wraps_long_line() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let result: Vec<String> = runtime
+            .lua
+            .load(r#"return screen.wrap_text("hello world this is a test", 12)"#)
+            .eval()
+            .expect("should run wrap_text");
+
+        // Should wrap at word boundaries
+        assert!(result.len() > 1, "should wrap to multiple lines");
+        for line in &result {
+            assert!(line.len() <= 12, "line should fit in width: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_screen_wrap_text_preserves_newlines() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let result: Vec<String> = runtime
+            .lua
+            .load(r#"return screen.wrap_text("line1\nline2\nline3", 50)"#)
+            .eval()
+            .expect("should run wrap_text");
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "line1");
+        assert_eq!(result[1], "line2");
+        assert_eq!(result[2], "line3");
+    }
+
+    #[test]
+    fn test_screen_wrap_text_empty() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let result: Vec<String> = runtime
+            .lua
+            .load(r#"return screen.wrap_text("", 20)"#)
+            .eval()
+            .expect("should run wrap_text");
+
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn test_screen_build_display_lines_basic() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        let result: i64 = runtime
+            .lua
+            .load(
+                r#"
+                local messages = {
+                    {author = "alice", content = "hello", is_model = false},
+                    {author = "bob", content = "hi there", is_model = false},
+                }
+                return #screen.build_display_lines(messages, 80, "alice")
+            "#,
+            )
+            .eval()
+            .expect("should build display lines");
+
+        assert_eq!(result, 2, "should have 2 display lines");
+    }
+
+    #[test]
+    fn test_screen_build_display_lines_wrapping() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        let result: i64 = runtime
+            .lua
+            .load(
+                r#"
+                local long_content = string.rep("word ", 20)
+                local messages = {{author = "alice", content = long_content, is_model = false}}
+                return #screen.build_display_lines(messages, 40, "alice")
+            "#,
+            )
+            .eval()
+            .expect("should build display lines");
+
+        assert!(result > 1, "long message should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_screen_build_display_lines_author_only_on_first() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        let result: (bool, bool) = runtime
+            .lua
+            .load(
+                r#"
+                local long_content = string.rep("word ", 20)
+                local messages = {{author = "alice", content = long_content, is_model = false}}
+                local lines = screen.build_display_lines(messages, 40, "alice")
+                return lines[1].author ~= nil, lines[2].author == nil
+            "#,
+            )
+            .eval()
+            .expect("should check author presence");
+
+        assert!(result.0, "first line should have author");
+        assert!(result.1, "second line should not have author");
+    }
+
+    #[test]
+    fn test_screen_display_width_ascii() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let result: i64 = runtime
+            .lua
+            .load(r#"return screen.display_width("hello")"#)
+            .eval()
+            .expect("should get display width");
+
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn test_screen_display_width_empty() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let result: i64 = runtime
+            .lua
+            .load(r#"return screen.display_width("")"#)
+            .eval()
+            .expect("should get display width");
+
+        assert_eq!(result, 0);
     }
 }
