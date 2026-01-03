@@ -22,12 +22,24 @@ fn command_counter() -> opentelemetry::metrics::Counter<u64> {
         .clone()
 }
 
+/// How command output should be displayed
+#[derive(Default)]
+pub enum OutputMode {
+    /// Show as notification (default)
+    #[default]
+    Notification,
+    /// Show in overlay (modal, dismissable with Escape)
+    Overlay { title: String },
+}
+
 /// Result of a command execution
 pub struct CommandResult {
     /// Output text to display
     pub text: String,
     /// If true, output is displayed but excluded from context/history
     pub ephemeral: bool,
+    /// How to display the output
+    pub mode: OutputMode,
 }
 
 impl CommandResult {
@@ -36,6 +48,7 @@ impl CommandResult {
         Self {
             text: text.into(),
             ephemeral: false,
+            mode: OutputMode::Notification,
         }
     }
 
@@ -44,6 +57,16 @@ impl CommandResult {
         Self {
             text: text.into(),
             ephemeral: true,
+            mode: OutputMode::Notification,
+        }
+    }
+
+    /// Create an overlay result (modal display)
+    pub fn overlay(title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ephemeral: true,
+            mode: OutputMode::Overlay { title: title.into() },
         }
     }
 
@@ -67,7 +90,7 @@ impl SshHandler {
             command_counter().add(1, &[KeyValue::new("command", cmd.to_string())]);
 
             match *cmd {
-                "help" => CommandResult::normal(self.cmd_help()),
+                "help" => CommandResult::overlay("Help", self.cmd_help()),
                 "rooms" => CommandResult::normal(self.cmd_rooms().await),
                 "who" => CommandResult::normal(self.cmd_who().await),
                 "join" => CommandResult::normal(self.cmd_join(args).await),

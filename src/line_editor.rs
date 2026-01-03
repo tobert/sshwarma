@@ -144,6 +144,7 @@ impl LineEditor {
                 }
             }
             TerminalEvent::Tab => EditorAction::Tab,
+            TerminalEvent::Escape => EditorAction::Escape,
             TerminalEvent::PageUp => EditorAction::PageUp,
             TerminalEvent::PageDown => EditorAction::PageDown,
             TerminalEvent::Unknown(_) => EditorAction::None,
@@ -366,6 +367,8 @@ pub enum EditorAction {
     ClearScreen,
     /// Quit (Ctrl+D on empty line)
     Quit,
+    /// Escape key pressed (dismiss overlay, cancel, etc.)
+    Escape,
     /// Scroll up one page
     PageUp,
     /// Scroll down one page

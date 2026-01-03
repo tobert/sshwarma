@@ -571,6 +571,13 @@ impl server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // Flush any pending escape sequence from previous packet
+        // This detects bare ESC key when no follow-up bytes arrive
+        if let Some(event) = self.esc_parser.flush() {
+            let action = self.editor.handle_event(event);
+            self.handle_editor_action(channel, session, action).await;
+        }
+
         for &byte in data {
             if let Some(event) = self.esc_parser.feed(byte) {
                 let action = self.editor.handle_event(event);
@@ -657,29 +664,51 @@ impl SshHandler {
                 let _ = session.close(channel);
             }
 
-            EditorAction::PageUp => {
-                // Scroll chat up one page
+            EditorAction::Escape => {
+                // Close overlay if one is open
                 if let Some(ref lua_runtime) = self.lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    let scroll = lua.tool_state().chat_scroll();
-                    let inner = scroll.inner();
-                    let mut state = inner.lock().unwrap();
-                    state.page_up();
-                    drop(state); // Release lock before marking dirty
-                    lua.tool_state().mark_dirty("chat");
+                    if lua.tool_state().has_overlay() {
+                        lua.tool_state().close_overlay();
+                    }
+                }
+            }
+
+            EditorAction::PageUp => {
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    // If overlay is open, scroll overlay instead of chat
+                    if lua.tool_state().has_overlay() {
+                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
+                        lua.tool_state().overlay_scroll_up(page_size);
+                    } else {
+                        // Scroll chat up one page
+                        let scroll = lua.tool_state().chat_scroll();
+                        let inner = scroll.inner();
+                        let mut state = inner.lock().unwrap();
+                        state.page_up();
+                        drop(state); // Release lock before marking dirty
+                        lua.tool_state().mark_dirty("chat");
+                    }
                 }
             }
 
             EditorAction::PageDown => {
-                // Scroll chat down one page
                 if let Some(ref lua_runtime) = self.lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    let scroll = lua.tool_state().chat_scroll();
-                    let inner = scroll.inner();
-                    let mut state = inner.lock().unwrap();
-                    state.page_down();
-                    drop(state); // Release lock before marking dirty
-                    lua.tool_state().mark_dirty("chat");
+                    // If overlay is open, scroll overlay instead of chat
+                    if lua.tool_state().has_overlay() {
+                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
+                        lua.tool_state().overlay_scroll_down(page_size, page_size);
+                    } else {
+                        // Scroll chat down one page
+                        let scroll = lua.tool_state().chat_scroll();
+                        let inner = scroll.inner();
+                        let mut state = inner.lock().unwrap();
+                        state.page_down();
+                        drop(state); // Release lock before marking dirty
+                        lua.tool_state().mark_dirty("chat");
+                    }
                 }
             }
         }

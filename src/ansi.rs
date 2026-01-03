@@ -17,6 +17,8 @@ pub enum TerminalEvent {
     Backspace,
     /// Tab
     Tab,
+    /// Escape key (bare ESC, not part of a sequence)
+    Escape,
     /// Arrow keys
     Up,
     Down,
@@ -69,6 +71,17 @@ impl EscapeParser {
             ParseState::Normal => self.handle_normal(byte),
             ParseState::Escape => self.handle_escape(byte),
             ParseState::Csi => self.handle_csi(byte),
+        }
+    }
+
+    /// Flush pending state - call before processing new data packet
+    /// Returns Escape event if we were waiting for a sequence that never came
+    pub fn flush(&mut self) -> Option<TerminalEvent> {
+        if self.state == ParseState::Escape {
+            self.reset();
+            Some(TerminalEvent::Escape)
+        } else {
+            None
         }
     }
 
@@ -253,6 +266,18 @@ mod tests {
         assert_eq!(parser.feed(b'['), None);
         assert_eq!(parser.feed(b'3'), None);
         assert_eq!(parser.feed(b'~'), Some(TerminalEvent::Delete));
+    }
+
+    #[test]
+    fn test_bare_escape() {
+        let mut parser = EscapeParser::new();
+
+        // Bare ESC: feed ESC, then flush (simulates no follow-up)
+        assert_eq!(parser.feed(0x1b), None);
+        assert_eq!(parser.flush(), Some(TerminalEvent::Escape));
+
+        // Verify parser is reset
+        assert_eq!(parser.flush(), None);
     }
 
     #[test]

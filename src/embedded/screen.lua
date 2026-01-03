@@ -305,6 +305,58 @@ function M.render_status(ctx, y, data)
     end
 end
 
+--- Render overlay (modal help/command output)
+--- @param ctx table Draw context
+--- @param overlay table {title, lines, scroll_offset, total_lines}
+--- @param height number Available height for overlay
+function M.render_overlay(ctx, overlay, height)
+    local C = M.colors
+    local w = ctx.w
+
+    -- Calculate visible area (leave 1 line for title, 1 for footer)
+    local content_height = height - 2
+    local start_line = overlay.scroll_offset + 1  -- Convert to 1-indexed
+    local end_line = math.min(start_line + content_height - 1, overlay.total_lines)
+
+    -- Fill background with dim color
+    for y = 0, height - 1 do
+        for x = 0, w - 1 do
+            ctx:print(x, y, " ", {bg = "#1a1b26"})
+        end
+    end
+
+    -- Title bar
+    local title = "─── " .. overlay.title .. " ───"
+    local hint = "[ESC to close, PgUp/PgDn to scroll]"
+    ctx:print(0, 0, title, {fg = C.system, bg = "#1a1b26"})
+    if M.display_width(title) + M.display_width(hint) + 2 < w then
+        ctx:print(w - M.display_width(hint), 0, hint, {fg = C.dim, bg = "#1a1b26"})
+    end
+
+    -- Content
+    local y = 1
+    for i = start_line, end_line do
+        local line = overlay.lines[i] or ""
+        -- Truncate if too long
+        if M.display_width(line) > w then
+            line = line:sub(1, w - 1) .. "…"
+        end
+        ctx:print(0, y, line, {fg = C.fg, bg = "#1a1b26"})
+        y = y + 1
+    end
+
+    -- Footer with scroll indicator
+    local footer_y = height - 1
+    if overlay.total_lines > content_height then
+        local percent = math.floor((overlay.scroll_offset / (overlay.total_lines - content_height)) * 100)
+        local indicator = string.format("─── %d%% (%d/%d) ───",
+            percent, end_line, overlay.total_lines)
+        ctx:print(0, footer_y, indicator, {fg = C.dim, bg = "#1a1b26"})
+    else
+        ctx:print(0, footer_y, "───────────────", {fg = C.dim, bg = "#1a1b26"})
+    end
+end
+
 --- Render input line
 ---
 --- NOTE: We render a visual cursor (orange "▌" or inverted char) AND the terminal
@@ -436,7 +488,7 @@ function on_tick(dirty_tags, tick, ctx)
     local w = ctx.w
 
     -- Layout:
-    --   [0 to h-3] Chat buffer
+    --   [0 to h-3] Chat buffer (or overlay if active)
     --   [h-2]      Status line
     --   [h-1]      Input line
 
@@ -449,10 +501,20 @@ function on_tick(dirty_tags, tick, ctx)
     local session = data.status.session or {}
     local my_name = session.username or ""
 
-    -- Render chat
-    if chat_height > 0 and data.scroll then
-        local display_lines = M.build_display_lines(data.history, w, my_name)
-        M.render_chat(ctx, display_lines, data.scroll, chat_height)
+    -- Check for active overlay
+    local overlay = tools.overlay and tools.overlay()
+
+    if overlay then
+        -- Render overlay instead of chat
+        if chat_height > 0 then
+            M.render_overlay(ctx, overlay, chat_height)
+        end
+    else
+        -- Render chat
+        if chat_height > 0 and data.scroll then
+            local display_lines = M.build_display_lines(data.history, w, my_name)
+            M.render_chat(ctx, display_lines, data.scroll, chat_height)
+        end
     end
 
     -- Render status

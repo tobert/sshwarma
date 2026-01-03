@@ -42,6 +42,19 @@ pub struct InputState {
     pub prompt: String,
 }
 
+/// Overlay buffer state for modal displays (help, command output, etc.)
+///
+/// When active, renders over the chat area. Dismissed with Escape.
+#[derive(Clone, Default)]
+pub struct OverlayState {
+    /// Title shown at top of overlay (e.g., "Help")
+    pub title: String,
+    /// Content lines (pre-split for rendering)
+    pub lines: Vec<String>,
+    /// Current scroll offset (line index of first visible line)
+    pub scroll_offset: usize,
+}
+
 /// Shared state holder for Lua callbacks
 ///
 /// Uses Arc for thread-safe sharing across async handlers and
@@ -67,6 +80,9 @@ pub struct LuaToolState {
     dirty: Arc<DirtyState>,
     /// Chat scroll state (persists across renders)
     chat_scroll: crate::ui::scroll::LuaScrollState,
+    /// Overlay buffer state (help, command output, etc.)
+    /// None = no overlay active
+    overlay: Arc<std::sync::RwLock<Option<OverlayState>>>,
 }
 
 impl LuaToolState {
@@ -82,6 +98,7 @@ impl LuaToolState {
             input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
             dirty: Arc::new(DirtyState::new()),
             chat_scroll: crate::ui::scroll::LuaScrollState::new(),
+            overlay: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -121,6 +138,63 @@ impl LuaToolState {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    /// Show an overlay with the given title and content
+    ///
+    /// Content is split into lines for scrolling. Replaces any existing overlay.
+    pub fn show_overlay(&self, title: &str, content: &str) {
+        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        if let Ok(mut guard) = self.overlay.write() {
+            *guard = Some(OverlayState {
+                title: title.to_string(),
+                lines,
+                scroll_offset: 0,
+            });
+        }
+        self.mark_dirty("overlay");
+    }
+
+    /// Close the overlay
+    pub fn close_overlay(&self) {
+        if let Ok(mut guard) = self.overlay.write() {
+            *guard = None;
+        }
+        self.mark_dirty("overlay");
+    }
+
+    /// Check if an overlay is currently active
+    pub fn has_overlay(&self) -> bool {
+        self.overlay
+            .read()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Get the current overlay state
+    pub fn overlay_state(&self) -> Option<OverlayState> {
+        self.overlay.read().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Scroll overlay up by n lines
+    pub fn overlay_scroll_up(&self, n: usize) {
+        if let Ok(mut guard) = self.overlay.write() {
+            if let Some(ref mut overlay) = *guard {
+                overlay.scroll_offset = overlay.scroll_offset.saturating_sub(n);
+            }
+        }
+        self.mark_dirty("overlay");
+    }
+
+    /// Scroll overlay down by n lines
+    pub fn overlay_scroll_down(&self, n: usize, viewport_height: usize) {
+        if let Ok(mut guard) = self.overlay.write() {
+            if let Some(ref mut overlay) = *guard {
+                let max_scroll = overlay.lines.len().saturating_sub(viewport_height);
+                overlay.scroll_offset = (overlay.scroll_offset + n).min(max_scroll);
+            }
+        }
+        self.mark_dirty("overlay");
     }
 
     /// Get a reference to the tool middleware
@@ -564,6 +638,42 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("mark_all_dirty", mark_all_dirty_fn)?;
+
+    // tools.overlay() -> {title, lines, scroll_offset} or nil
+    // Get current overlay state for rendering
+    let overlay_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            if let Some(overlay) = state.overlay_state() {
+                let result = lua.create_table()?;
+                result.set("title", overlay.title)?;
+
+                let lines_table = lua.create_table()?;
+                for (i, line) in overlay.lines.iter().enumerate() {
+                    lines_table.set(i + 1, line.clone())?;
+                }
+                result.set("lines", lines_table)?;
+                result.set("scroll_offset", overlay.scroll_offset)?;
+                result.set("total_lines", overlay.lines.len())?;
+
+                Ok(Value::Table(result))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?
+    };
+    tools.set("overlay", overlay_fn)?;
+
+    // tools.close_overlay() -> nil
+    // Close the overlay (if open)
+    let close_overlay_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, ()| {
+            state.close_overlay();
+            Ok(())
+        })?
+    };
+    tools.set("close_overlay", close_overlay_fn)?;
 
     // Extended data tools (require SharedState)
 

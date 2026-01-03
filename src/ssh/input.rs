@@ -1,5 +1,6 @@
 //! Input handling and command dispatch
 
+use crate::commands::OutputMode;
 use crate::db::rows::Row;
 use crate::interp::{self, Input};
 use crate::status::Status;
@@ -163,12 +164,20 @@ impl SshHandler {
         };
         let result = self.handle_input(&line).await;
 
-        // Route command output through notifications (Lua renders)
+        // Route command output based on mode
         if !result.text.is_empty() {
             if let Some(ref lua_runtime) = self.lua_runtime {
                 let lua = lua_runtime.lock().await;
-                // Use longer TTL for command output
-                lua.tool_state().push_notification(result.text.clone(), 10000);
+                match result.mode {
+                    OutputMode::Overlay { title } => {
+                        // Show in overlay (modal, dismissable with Escape)
+                        lua.tool_state().show_overlay(&title, &result.text);
+                    }
+                    OutputMode::Notification => {
+                        // Use longer TTL for command output
+                        lua.tool_state().push_notification(result.text.clone(), 10000);
+                    }
+                }
             }
         }
 
