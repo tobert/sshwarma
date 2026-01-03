@@ -943,4 +943,250 @@ mod tests {
         assert_eq!(state.max_offset(), 90);
         assert_eq!(state.offset, 90); // Tail mode follows
     }
+
+    // ==========================================================================
+    // OFF-BY-ONE AND BOUNDARY TESTS
+    // These tests verify scroll edge cases that could cause fencepost errors
+    // ==========================================================================
+
+    #[test]
+    fn test_visible_range_is_half_open_interval() {
+        // visible_range returns [start, end) - end is exclusive
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.offset = 20;
+
+        let (start, end) = state.visible_range();
+
+        // Visible lines are 20, 21, 22, ..., 29 (10 lines total)
+        // So start=20, end=30 (exclusive)
+        assert_eq!(start, 20, "start should be offset");
+        assert_eq!(end, 30, "end should be offset + viewport_height");
+        assert_eq!(end - start, 10, "range should span exactly viewport_height lines");
+    }
+
+    #[test]
+    fn test_visible_range_clips_to_content() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(25);
+        state.offset = 20; // Near the end
+
+        let (start, end) = state.visible_range();
+
+        // Only 5 lines remain (25 - 20 = 5)
+        // But visible_range should clip to content_height
+        assert_eq!(start, 20);
+        assert_eq!(end, 25, "end should be clipped to content_height");
+        assert_eq!(end - start, 5, "only 5 lines visible when near end");
+    }
+
+    #[test]
+    fn test_visible_range_exactly_at_bottom() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.scroll_to_bottom();
+
+        let (start, end) = state.visible_range();
+
+        // At bottom: offset = max_offset = 40
+        // Visible lines: 40, 41, 42, ..., 49 (exactly 10 lines)
+        assert_eq!(start, 40);
+        assert_eq!(end, 50);
+        assert_eq!(end - start, 10, "full viewport should be visible at bottom");
+    }
+
+    #[test]
+    fn test_scroll_up_by_one_from_bottom() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.scroll_to_bottom();
+
+        assert_eq!(state.offset, 40);
+
+        state.scroll_up(1);
+
+        assert_eq!(state.offset, 39, "offset should decrease by exactly 1");
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 39);
+        assert_eq!(end, 49);
+    }
+
+    #[test]
+    fn test_scroll_down_by_one_from_top() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.scroll_to_top();
+
+        assert_eq!(state.offset, 0);
+
+        state.scroll_down(1);
+
+        assert_eq!(state.offset, 1, "offset should increase by exactly 1");
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 1);
+        assert_eq!(end, 11);
+    }
+
+    #[test]
+    fn test_max_offset_boundary() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+
+        // max_offset = content_height - viewport_height = 40
+        // This means lines 40-49 are visible at max scroll
+        assert_eq!(state.max_offset(), 40);
+
+        // Verify boundary: at max_offset, last visible line is content_height - 1
+        state.offset = state.max_offset();
+        let (_, end) = state.visible_range();
+        assert_eq!(end, 50, "at max_offset, end should equal content_height");
+    }
+
+    #[test]
+    fn test_page_navigation_boundaries() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(100);
+        state.scroll_to_top();
+
+        // page_down moves by (viewport - 2) to maintain context
+        state.page_down();
+        assert_eq!(state.offset, 8, "page_down should move by viewport - 2");
+
+        // Another page down
+        state.page_down();
+        assert_eq!(state.offset, 16);
+
+        // page_up from here
+        state.page_up();
+        assert_eq!(state.offset, 8);
+
+        // page_up to top (should clamp to 0)
+        state.page_up();
+        assert_eq!(state.offset, 0, "page_up should not go below 0");
+    }
+
+    #[test]
+    fn test_half_page_on_small_viewport() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(3); // Very small viewport
+        state.set_content_height(20);
+        state.scroll_to_top();
+
+        // half_page_down = max(viewport/2, 1) = max(1, 1) = 1
+        state.half_page_down();
+        assert_eq!(state.offset, 1, "half page on small viewport should move by at least 1");
+
+        state.half_page_down();
+        assert_eq!(state.offset, 2);
+    }
+
+    #[test]
+    fn test_single_line_content() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(1); // Only 1 line of content
+
+        // max_offset = max(1 - 10, 0) = 0
+        assert_eq!(state.max_offset(), 0);
+        assert!(state.at_top());
+        assert!(state.at_bottom());
+
+        // visible_range should show just line 0
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 0);
+        assert_eq!(end, 1, "only 1 line of content");
+    }
+
+    #[test]
+    fn test_content_exactly_fills_viewport() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(10);
+
+        // max_offset = 10 - 10 = 0 (no scrolling possible)
+        assert_eq!(state.max_offset(), 0);
+        assert!(state.at_top());
+        assert!(state.at_bottom());
+
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 0);
+        assert_eq!(end, 10);
+        assert_eq!(end - start, 10, "exactly fills viewport");
+    }
+
+    #[test]
+    fn test_content_one_more_than_viewport() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(11);
+
+        // max_offset = 11 - 10 = 1 (can scroll by 1 line)
+        assert_eq!(state.max_offset(), 1);
+
+        // At top
+        state.scroll_to_top();
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 0);
+        assert_eq!(end, 10);
+
+        // At bottom
+        state.scroll_to_bottom();
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 1);
+        assert_eq!(end, 11);
+    }
+
+    #[test]
+    fn test_zero_viewport_height() {
+        // Edge case: viewport with 0 height
+        let mut state = ScrollState::new();
+        state.set_viewport_height(0);
+        state.set_content_height(50);
+
+        // max_offset should be content_height (50 - 0 = 50)
+        assert_eq!(state.max_offset(), 50);
+
+        // visible_range should return empty range
+        state.offset = 0;
+        let (start, end) = state.visible_range();
+        assert_eq!(start, 0);
+        assert_eq!(end, 0, "0-height viewport means 0 visible lines");
+    }
+
+    #[test]
+    fn test_scroll_preserves_mode_at_exact_boundary() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.offset = 39; // One line above bottom
+        state.mode = ScrollMode::Pinned;
+
+        // Scroll down by exactly 1 - should reach bottom and switch to tail
+        state.scroll_down(1);
+
+        assert_eq!(state.offset, 40, "should be at max_offset");
+        assert_eq!(state.mode, ScrollMode::Tail, "reaching bottom should enable tail mode");
+    }
+
+    #[test]
+    fn test_scroll_up_one_from_tail_pins() {
+        let mut state = ScrollState::new();
+        state.set_viewport_height(10);
+        state.set_content_height(50);
+        state.scroll_to_bottom();
+        assert_eq!(state.mode, ScrollMode::Tail);
+
+        // Any scroll up should switch to pinned
+        state.scroll_up(1);
+
+        assert_eq!(state.offset, 39);
+        assert_eq!(state.mode, ScrollMode::Pinned, "scrolling up from tail should pin");
+    }
 }

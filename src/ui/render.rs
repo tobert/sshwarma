@@ -342,6 +342,22 @@ impl RenderBuffer {
     ///
     /// Uses ESC[row;colH to position each line, avoiding newlines that could
     /// cause scrolling when rendering at the bottom of the terminal.
+    ///
+    /// # Arguments
+    /// * `start_row` - Screen row where this buffer starts (0-indexed)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // 8-line HUD at bottom of 24-line terminal
+    /// let hud = RenderBuffer::new(80, 8);
+    /// // Terminal row 16 (0-indexed) = terminal row 17 (1-indexed)
+    /// let ansi = hud.to_ansi_at(16);
+    /// // Positions rows at terminal lines 17-24
+    /// ```
+    ///
+    /// # Note
+    /// All public APIs use 0-indexed coordinates. The terminal's 1-indexed
+    /// format is handled internally.
     pub fn to_ansi_at(&self, start_row: u16) -> String {
         self.to_ansi_impl(Some(start_row))
     }
@@ -377,6 +393,17 @@ impl RenderBuffer {
     }
 
     /// Generate ANSI for a single row at a specific screen position
+    ///
+    /// # Arguments
+    /// * `y` - Buffer row index (0-indexed)
+    /// * `screen_row` - Screen row position (0-indexed, will be converted to 1-indexed for terminal)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Render buffer row 0 at terminal row 17 (0-indexed: 16)
+    /// let ansi = buf.row_to_ansi(0, 16);
+    /// // Output contains: ESC[17;1H (terminal is 1-indexed)
+    /// ```
     pub fn row_to_ansi(&self, y: u16, screen_row: u16) -> String {
         use crossterm::style::{ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
         use crossterm::Command;
@@ -387,8 +414,8 @@ impl RenderBuffer {
 
         let mut output = String::new();
 
-        // Position cursor for this row (1-indexed)
-        output.push_str(&format!("\x1b[{};1H", screen_row));
+        // Position cursor for this row (convert 0-indexed to terminal's 1-indexed)
+        output.push_str(&format!("\x1b[{};1H", screen_row + 1));
 
         let mut last_fg: Option<Color> = None;
         let mut last_bg: Option<Color> = None;
@@ -447,6 +474,17 @@ impl RenderBuffer {
     ///
     /// Uses row fingerprinting to detect changes. Only emits ANSI for changed rows,
     /// preserving terminal selection state for unchanged regions.
+    ///
+    /// # Arguments
+    /// * `previous` - The previous buffer state to compare against
+    /// * `start_row` - Screen row where this buffer starts (0-indexed)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // HUD buffer at bottom of 24-row terminal (starts at row 16, 0-indexed)
+    /// let diff = new_hud.diff_ansi(&old_hud, 16);
+    /// // Changed rows will be positioned at terminal rows 17-24 (1-indexed output)
+    /// ```
     pub fn diff_ansi(&self, previous: &RenderBuffer, start_row: u16) -> String {
         let mut output = String::new();
 
@@ -454,7 +492,9 @@ impl RenderBuffer {
             // Compare row fingerprints
             if self.row_fingerprint(y) != previous.row_fingerprint(y) {
                 // Row changed - emit positioned ANSI
-                output.push_str(&self.row_to_ansi(y, start_row + y + 1));
+                // start_row is 0-indexed, y is buffer row index
+                // screen position = start_row + y (both 0-indexed)
+                output.push_str(&self.row_to_ansi(y, start_row + y));
             }
         }
 
@@ -2154,5 +2194,573 @@ mod tests {
                 let _ = buf.to_ansi();
             }
         });
+    }
+
+    // ==========================================================================
+    // OFF-BY-ONE AND BOUNDARY TESTS
+    // These tests are designed to catch fencepost errors in cursor positioning,
+    // row calculations, and boundary conditions in the UI rendering system.
+    // ==========================================================================
+
+    /// Helper to extract cursor position commands from ANSI output
+    /// Returns Vec of (row, col) pairs from ESC[row;colH sequences
+    fn extract_cursor_positions(ansi: &str) -> Vec<(u16, u16)> {
+        let mut positions = Vec::new();
+        let mut iter = ansi.chars().peekable();
+
+        while let Some(c) = iter.next() {
+            if c == '\x1b' {
+                if iter.next() == Some('[') {
+                    let mut nums = String::new();
+                    while let Some(&c) = iter.peek() {
+                        if c.is_ascii_digit() || c == ';' {
+                            nums.push(iter.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    if iter.next() == Some('H') {
+                        // Parse row;col
+                        let parts: Vec<&str> = nums.split(';').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(row), Ok(col)) = (parts[0].parse(), parts[1].parse()) {
+                                positions.push((row, col));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        positions
+    }
+
+    // --------------------------------------------------------------------------
+    // Cursor positioning tests for to_ansi_at()
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_to_ansi_at_row_0_positions_at_row_1() {
+        // When start_row=0, first buffer row (y=0) should go to terminal row 1
+        let mut buf = RenderBuffer::new(5, 1);
+        buf.print(0, 0, "Test", &Style::new());
+
+        let ansi = buf.to_ansi_at(0);
+        let positions = extract_cursor_positions(&ansi);
+
+        assert_eq!(
+            positions.len(),
+            1,
+            "should have exactly 1 cursor position"
+        );
+        assert_eq!(
+            positions[0],
+            (1, 1),
+            "start_row=0, y=0 should map to terminal row 1"
+        );
+    }
+
+    #[test]
+    fn test_to_ansi_at_start_row_16_for_hud() {
+        // HUD at bottom of 24-line terminal: start_row=16, height=8
+        // Buffer rows 0-7 should map to terminal rows 17-24
+        let mut buf = RenderBuffer::new(10, 8);
+        for y in 0..8 {
+            buf.print(0, y, &format!("Row{}", y), &Style::new());
+        }
+
+        let ansi = buf.to_ansi_at(16);
+        let positions = extract_cursor_positions(&ansi);
+
+        assert_eq!(positions.len(), 8, "should have 8 cursor positions");
+
+        // Buffer row 0 → terminal row 17 (16 + 0 + 1)
+        // Buffer row 7 → terminal row 24 (16 + 7 + 1)
+        for (i, (row, col)) in positions.iter().enumerate() {
+            let expected_row = 16 + i as u16 + 1;
+            assert_eq!(
+                *row, expected_row,
+                "buffer row {} should map to terminal row {}, got {}",
+                i, expected_row, row
+            );
+            assert_eq!(*col, 1, "column should always be 1");
+        }
+    }
+
+    #[test]
+    fn test_to_ansi_at_last_row_of_terminal() {
+        // Single row buffer at row 23 (0-indexed), which is terminal row 24
+        let mut buf = RenderBuffer::new(10, 1);
+        buf.print(0, 0, "Bottom", &Style::new());
+
+        let ansi = buf.to_ansi_at(23);
+        let positions = extract_cursor_positions(&ansi);
+
+        assert_eq!(positions.len(), 1);
+        assert_eq!(
+            positions[0],
+            (24, 1),
+            "row 23 + 0 + 1 = 24 (last terminal row)"
+        );
+    }
+
+    #[test]
+    fn test_to_ansi_at_consistency_with_row_to_ansi() {
+        // Verify that to_ansi_at and row_to_ansi produce consistent row numbers
+        // Both now use 0-indexed screen_row that gets converted to 1-indexed internally
+        let mut buf = RenderBuffer::new(10, 3);
+        buf.print(0, 0, "Row0", &Style::new());
+        buf.print(0, 1, "Row1", &Style::new());
+        buf.print(0, 2, "Row2", &Style::new());
+
+        let start_row: u16 = 10; // 0-indexed: terminal row 11
+
+        // Get positions from to_ansi_at
+        let full_ansi = buf.to_ansi_at(start_row);
+        let full_positions = extract_cursor_positions(&full_ansi);
+
+        // Get positions from individual row_to_ansi calls
+        // Now both APIs use 0-indexed screen positions
+        let mut individual_positions = Vec::new();
+        for y in 0..3 {
+            // screen_row is 0-indexed: start_row + y
+            let row_ansi = buf.row_to_ansi(y, start_row + y);
+            let pos = extract_cursor_positions(&row_ansi);
+            if !pos.is_empty() {
+                individual_positions.push(pos[0]);
+            }
+        }
+
+        assert_eq!(
+            full_positions, individual_positions,
+            "to_ansi_at and row_to_ansi should produce identical row positions"
+        );
+    }
+
+    // --------------------------------------------------------------------------
+    // Diff rendering tests
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_diff_ansi_unchanged_emits_nothing() {
+        let mut buf1 = RenderBuffer::new(10, 5);
+        let mut buf2 = RenderBuffer::new(10, 5);
+
+        // Both buffers have identical content
+        buf1.print(0, 0, "Same", &Style::new());
+        buf2.print(0, 0, "Same", &Style::new());
+
+        let diff = buf2.diff_ansi(&buf1, 0);
+
+        // Should emit nothing for unchanged content
+        assert!(
+            diff.is_empty(),
+            "diff of identical buffers should be empty, got: {:?}",
+            diff
+        );
+    }
+
+    #[test]
+    fn test_diff_ansi_single_row_change() {
+        let mut buf1 = RenderBuffer::new(10, 5);
+        let mut buf2 = RenderBuffer::new(10, 5);
+
+        // Fill both with same base
+        buf1.fill(0, 0, 10, 5, '.', &Style::new());
+        buf2.fill(0, 0, 10, 5, '.', &Style::new());
+
+        // Change only row 2 in buf2
+        buf2.print(0, 2, "CHANGED", &Style::new());
+
+        let diff = buf2.diff_ansi(&buf1, 10);
+        let positions = extract_cursor_positions(&diff);
+
+        // Should only have one cursor position for row 2
+        assert_eq!(positions.len(), 1, "should only update 1 row");
+        // Row 2 with start_row=10 should be terminal row 13 (10 + 2 + 1)
+        assert_eq!(
+            positions[0],
+            (13, 1),
+            "changed row 2 should map to terminal row 13"
+        );
+    }
+
+    #[test]
+    fn test_diff_ansi_multiple_non_consecutive_rows() {
+        let mut buf1 = RenderBuffer::new(10, 10);
+        let mut buf2 = RenderBuffer::new(10, 10);
+
+        buf1.fill(0, 0, 10, 10, '.', &Style::new());
+        buf2.fill(0, 0, 10, 10, '.', &Style::new());
+
+        // Change rows 0, 4, and 9
+        buf2.print(0, 0, "First", &Style::new());
+        buf2.print(0, 4, "Middle", &Style::new());
+        buf2.print(0, 9, "Last", &Style::new());
+
+        let diff = buf2.diff_ansi(&buf1, 5);
+        let positions = extract_cursor_positions(&diff);
+
+        assert_eq!(positions.len(), 3, "should update exactly 3 rows");
+        // Verify each position
+        assert!(
+            positions.contains(&(6, 1)),
+            "row 0 should be at terminal row 6 (5+0+1)"
+        );
+        assert!(
+            positions.contains(&(10, 1)),
+            "row 4 should be at terminal row 10 (5+4+1)"
+        );
+        assert!(
+            positions.contains(&(15, 1)),
+            "row 9 should be at terminal row 15 (5+9+1)"
+        );
+    }
+
+    #[test]
+    fn test_diff_ansi_all_rows_changed() {
+        let mut buf1 = RenderBuffer::new(10, 3);
+        let mut buf2 = RenderBuffer::new(10, 3);
+
+        buf1.fill(0, 0, 10, 3, 'A', &Style::new());
+        buf2.fill(0, 0, 10, 3, 'B', &Style::new());
+
+        let diff = buf2.diff_ansi(&buf1, 0);
+        let positions = extract_cursor_positions(&diff);
+
+        assert_eq!(
+            positions.len(),
+            3,
+            "all 3 rows should be updated when all changed"
+        );
+    }
+
+    #[test]
+    fn test_diff_ansi_no_overlap_between_updates() {
+        // Verify that updating row N doesn't accidentally affect row N-1 or N+1
+        let mut buf1 = RenderBuffer::new(20, 5);
+        let mut buf2 = RenderBuffer::new(20, 5);
+
+        // Set up identifiable content in each row
+        for y in 0..5 {
+            buf1.print(0, y, &format!("Original row {}", y), &Style::new());
+            buf2.print(0, y, &format!("Original row {}", y), &Style::new());
+        }
+
+        // Change only row 2
+        buf2.print(0, 2, "Modified row 2!!!", &Style::new());
+
+        let diff = buf2.diff_ansi(&buf1, 0);
+
+        // Verify diff only contains row 2 content
+        assert!(
+            diff.contains("Modified"),
+            "diff should contain the modified content"
+        );
+        assert!(
+            !diff.contains("Original row 1"),
+            "diff should NOT contain row 1"
+        );
+        assert!(
+            !diff.contains("Original row 3"),
+            "diff should NOT contain row 3"
+        );
+    }
+
+    // --------------------------------------------------------------------------
+    // Row fingerprint tests
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_row_fingerprint_changes_with_content() {
+        let mut buf = RenderBuffer::new(10, 1);
+
+        let fp1 = buf.row_fingerprint(0);
+        buf.print(0, 0, "Hello", &Style::new());
+        let fp2 = buf.row_fingerprint(0);
+
+        assert_ne!(fp1, fp2, "fingerprint should change when content changes");
+    }
+
+    #[test]
+    fn test_row_fingerprint_changes_with_style() {
+        let mut buf1 = RenderBuffer::new(10, 1);
+        let mut buf2 = RenderBuffer::new(10, 1);
+
+        buf1.print(0, 0, "Same", &Style::new());
+        buf2.print(0, 0, "Same", &Style::new().fg(Color::Red));
+
+        let fp1 = buf1.row_fingerprint(0);
+        let fp2 = buf2.row_fingerprint(0);
+
+        assert_ne!(
+            fp1, fp2,
+            "fingerprint should differ when style differs (same content)"
+        );
+    }
+
+    #[test]
+    fn test_row_fingerprint_out_of_bounds() {
+        let buf = RenderBuffer::new(10, 5);
+        let fp = buf.row_fingerprint(100);
+        assert_eq!(fp, "", "out of bounds row should return empty fingerprint");
+    }
+
+    // --------------------------------------------------------------------------
+    // DrawContext boundary tests
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_draw_context_exact_boundary_print() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(20, 10)));
+        let ctx = LuaDrawContext::new(buffer.clone(), 5, 2, 10, 5);
+
+        // Print at exactly the last valid position
+        ctx.print(9, 4, "X", &Style::new()); // x=9 is last column, y=4 is last row
+
+        let buf = buffer.lock().unwrap();
+        assert_eq!(
+            buf.get(14, 6).unwrap().char,
+            'X',
+            "should write at context (9,4) = buffer (14,6)"
+        );
+    }
+
+    #[test]
+    fn test_draw_context_one_past_boundary_ignored() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(20, 10)));
+        let ctx = LuaDrawContext::new(buffer.clone(), 5, 2, 10, 5);
+
+        // Try to print just past the boundary
+        ctx.print(10, 0, "X", &Style::new()); // x=10 is out of 0..10
+        ctx.print(0, 5, "Y", &Style::new()); // y=5 is out of 0..5
+
+        let buf = buffer.lock().unwrap();
+        // These positions in buffer coords should be unchanged
+        assert_eq!(
+            buf.get(15, 2).unwrap().char,
+            '\0',
+            "x=10 should be ignored"
+        );
+        assert_eq!(
+            buf.get(5, 7).unwrap().char,
+            '\0',
+            "y=5 should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_draw_context_sub_accumulates_offsets() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(100, 100)));
+
+        // Create a chain of sub-contexts
+        let ctx1 = LuaDrawContext::new(buffer.clone(), 10, 10, 80, 80);
+        let ctx2 = LuaDrawContext::new(buffer.clone(), ctx1.x + 5, ctx1.y + 5, 70, 70);
+        let ctx3 = LuaDrawContext::new(buffer.clone(), ctx2.x + 5, ctx2.y + 5, 60, 60);
+
+        // Verify accumulated offsets
+        assert_eq!(ctx3.x, 20, "third context x should be 10+5+5=20");
+        assert_eq!(ctx3.y, 20, "third context y should be 10+5+5=20");
+
+        // Write at (0,0) in ctx3 should appear at (20,20) in buffer
+        ctx3.print(0, 0, "Z", &Style::new());
+
+        let buf = buffer.lock().unwrap();
+        assert_eq!(
+            buf.get(20, 20).unwrap().char,
+            'Z',
+            "nested context (0,0) should map to buffer (20,20)"
+        );
+    }
+
+    #[test]
+    fn test_draw_context_sub_clips_to_parent() {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(RenderBuffer::new(100, 100)));
+
+        // Create context at (10, 10) with size 20x20
+        let parent = LuaDrawContext::new(buffer.clone(), 10, 10, 20, 20);
+
+        // Request a sub-context that would exceed parent bounds
+        // Starting at (15, 15) within parent, requesting 30x30
+        // Should be clipped to 5x5 (20-15=5)
+
+        // Using the same pattern as Lua would
+        let sub_x = parent.x + 15u16.min(parent.width);
+        let sub_y = parent.y + 15u16.min(parent.height);
+        let sub_w = 30u16.min(parent.width.saturating_sub(15));
+        let sub_h = 30u16.min(parent.height.saturating_sub(15));
+
+        let sub = LuaDrawContext::new(buffer.clone(), sub_x, sub_y, sub_w, sub_h);
+
+        assert_eq!(sub.width, 5, "sub-context width should be clipped to 5");
+        assert_eq!(sub.height, 5, "sub-context height should be clipped to 5");
+    }
+
+    // --------------------------------------------------------------------------
+    // Buffer index calculation tests
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_buffer_index_calculation() {
+        let buf = RenderBuffer::new(80, 24);
+
+        // First cell
+        assert!(buf.get(0, 0).is_some());
+        // Last cell
+        assert!(buf.get(79, 23).is_some());
+        // Just past last cell
+        assert!(buf.get(80, 0).is_none());
+        assert!(buf.get(0, 24).is_none());
+        assert!(buf.get(80, 24).is_none());
+    }
+
+    #[test]
+    fn test_buffer_row_layout() {
+        // Verify that cells are laid out row-major
+        let mut buf = RenderBuffer::new(10, 5);
+
+        // Set cell at (5, 2)
+        buf.set(5, 2, 'X', &Style::new());
+
+        // Verify it's at the right index
+        // Index should be: y * width + x = 2 * 10 + 5 = 25
+        assert_eq!(buf.get(5, 2).unwrap().char, 'X');
+
+        // Cells before and after should be unaffected
+        assert_eq!(buf.get(4, 2).unwrap().char, '\0');
+        assert_eq!(buf.get(6, 2).unwrap().char, '\0');
+        assert_eq!(buf.get(5, 1).unwrap().char, '\0');
+        assert_eq!(buf.get(5, 3).unwrap().char, '\0');
+    }
+
+    // --------------------------------------------------------------------------
+    // HUD-specific positioning tests
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_hud_at_terminal_bottom_no_gap_no_overlap() {
+        // Simulate 24-line terminal with 8-line HUD at bottom
+        let term_height = 24u16;
+        let hud_height = 8u16;
+        let chat_height = term_height - hud_height; // 16 lines
+
+        // Chat region: rows 0-15 (terminal rows 1-16)
+        // HUD region: rows 16-23 (terminal rows 17-24)
+
+        let mut chat_buf = RenderBuffer::new(80, chat_height);
+        let mut hud_buf = RenderBuffer::new(80, hud_height);
+
+        chat_buf.fill(0, 0, 80, chat_height, 'C', &Style::new());
+        hud_buf.fill(0, 0, 80, hud_height, 'H', &Style::new());
+
+        let chat_ansi = chat_buf.to_ansi_at(0);
+        let hud_ansi = hud_buf.to_ansi_at(chat_height);
+
+        let chat_positions = extract_cursor_positions(&chat_ansi);
+        let hud_positions = extract_cursor_positions(&hud_ansi);
+
+        // Chat should occupy rows 1-16
+        assert_eq!(chat_positions.len(), 16);
+        assert_eq!(chat_positions.first(), Some(&(1, 1)));
+        assert_eq!(chat_positions.last(), Some(&(16, 1)));
+
+        // HUD should occupy rows 17-24
+        assert_eq!(hud_positions.len(), 8);
+        assert_eq!(hud_positions.first(), Some(&(17, 1)));
+        assert_eq!(hud_positions.last(), Some(&(24, 1)));
+
+        // Verify no overlap: last chat row < first hud row
+        let last_chat = chat_positions.last().unwrap().0;
+        let first_hud = hud_positions.first().unwrap().0;
+        assert_eq!(
+            first_hud,
+            last_chat + 1,
+            "HUD should start immediately after chat with no gap or overlap"
+        );
+    }
+
+    #[test]
+    fn test_hud_diff_update_preserves_chat() {
+        // Simulates the case where only HUD updates
+        let term_height = 24u16;
+        let hud_height = 8u16;
+
+        let mut hud_old = RenderBuffer::new(80, hud_height);
+        let mut hud_new = RenderBuffer::new(80, hud_height);
+
+        // Old HUD
+        hud_old.print(0, 0, "Status: idle", &Style::new());
+        hud_old.print(0, 1, "Users: alice", &Style::new());
+
+        // New HUD - only status line changed
+        hud_new.print(0, 0, "Status: busy", &Style::new());
+        hud_new.print(0, 1, "Users: alice", &Style::new());
+
+        let start_row = term_height - hud_height; // 16
+        let diff = hud_new.diff_ansi(&hud_old, start_row);
+
+        let positions = extract_cursor_positions(&diff);
+
+        // Only row 0 of HUD should update (terminal row 17)
+        assert_eq!(positions.len(), 1, "only 1 row should update");
+        assert_eq!(positions[0], (17, 1), "should update terminal row 17");
+
+        // Verify the diff doesn't contain any positioning for chat area (rows 1-16)
+        for (row, _) in &positions {
+            assert!(
+                *row >= 17,
+                "diff should never touch chat area (rows 1-16), got row {}",
+                row
+            );
+        }
+    }
+
+    // --------------------------------------------------------------------------
+    // Edge case: 1-cell and 1-row buffers
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_single_cell_buffer() {
+        let mut buf = RenderBuffer::new(1, 1);
+        buf.set(0, 0, 'X', &Style::new());
+
+        assert_eq!(buf.get(0, 0).unwrap().char, 'X');
+
+        let ansi = buf.to_ansi();
+        assert!(ansi.contains('X'));
+
+        let ansi_at = buf.to_ansi_at(0);
+        let positions = extract_cursor_positions(&ansi_at);
+        assert_eq!(positions, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn test_single_row_buffer() {
+        let mut buf = RenderBuffer::new(80, 1);
+        buf.print(0, 0, "Single row content", &Style::new());
+
+        let ansi_at = buf.to_ansi_at(23); // Put at terminal row 24
+        let positions = extract_cursor_positions(&ansi_at);
+
+        assert_eq!(positions, vec![(24, 1)]);
+    }
+
+    #[test]
+    fn test_single_column_buffer() {
+        let mut buf = RenderBuffer::new(1, 10);
+        for y in 0..10 {
+            buf.set(0, y, ('0' as u8 + y as u8) as char, &Style::new());
+        }
+
+        // Verify each row
+        for y in 0..10 {
+            assert_eq!(
+                buf.get(0, y).unwrap().char,
+                ('0' as u8 + y as u8) as char
+            );
+        }
+
+        let ansi_at = buf.to_ansi_at(0);
+        let positions = extract_cursor_positions(&ansi_at);
+        assert_eq!(positions.len(), 10);
     }
 }
