@@ -153,12 +153,20 @@ local function render_chat(ctx, chat_height)
     -- Get visible range
     local start_line, end_line = scroll:visible_range()
 
+    -- Clamp end_line to content bounds to prevent index issues
+    if end_line > total_lines then
+        end_line = total_lines
+    end
+
     -- Draw visible lines
+    -- Note: start_line and end_line are 0-indexed from Rust
+    -- display_lines is 1-indexed (Lua tables)
+    -- y is the screen row (0-indexed)
     for i = start_line, end_line - 1 do
-        local line_idx = i + 1  -- Lua 1-indexed
+        local line_idx = i + 1  -- Convert to 1-indexed for Lua table
         local line = display_lines[line_idx]
         if line then
-            local y = i - start_line
+            local y = i - start_line  -- Screen row
             local x = 0
 
             if line.is_first_line and line.author then
