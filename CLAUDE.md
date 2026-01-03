@@ -518,6 +518,20 @@ cargo test --test e2e   # Run e2e tests only
 
 Tests use in-memory SQLite databases. E2E tests are in `tests/e2e.rs` and test MCP server functionality.
 
+### Lua Gotchas
+
+**Multiple return values**: Many Lua functions return multiple values. When passing directly to another function, all values are passed as arguments:
+
+```lua
+-- BAD: gsub returns (result, count) - count becomes table.insert's position arg!
+table.insert(lines, chunk:gsub("%s+$", ""))
+
+-- GOOD: parens capture only first return value
+table.insert(lines, (chunk:gsub("%s+$", "")))
+```
+
+This also applies to `string.match`, `string.find`, `pcall`, and others.
+
 ## Common Tasks
 
 ### Adding a New Slash Command
