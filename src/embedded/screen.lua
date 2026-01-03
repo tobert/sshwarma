@@ -306,6 +306,13 @@ function M.render_status(ctx, y, data)
 end
 
 --- Render input line
+---
+--- NOTE: We render a visual cursor (orange "▌" or inverted char) AND the terminal
+--- positions its hardware cursor at the same spot. This creates a layered effect
+--- where the blinking hardware cursor overlays our static visual cursor - a happy
+--- accident that provides both precise position feedback and attention-grabbing blink.
+--- To disable: hide hardware cursor in screen.rs with \x1b[?25l
+---
 --- @param ctx table Draw context
 --- @param y number Row to render at
 --- @param data table {prompt, text, cursor}

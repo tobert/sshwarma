@@ -216,7 +216,9 @@ async fn render_screen_with_tags(
     // Only send if there are changes
     if !diff_output.is_empty() {
         // Wrap in synchronized output to prevent tearing
-        // Position cursor at input line (term_height) at calculated column
+        // Position hardware cursor at input line - this overlays the visual cursor
+        // rendered by Lua (screen.lua), creating a layered blink effect.
+        // Use \x1b[?25l instead of \x1b[?25h to hide hardware cursor if unwanted.
         let final_output = format!(
             "\x1b[?2026h{}\x1b[{};{}H\x1b[?25h\x1b[?2026l",
             diff_output, term_height, cursor_col
