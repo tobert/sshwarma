@@ -14,6 +14,7 @@ use russh::{ChannelId, CryptoVec};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
+use unicode_width::UnicodeWidthStr;
 
 /// Spawn the screen refresh task
 pub fn spawn_screen_refresh(
@@ -196,12 +197,29 @@ async fn render_screen_with_tags(
         *last_buffer = buf.clone();
     }
 
+    // Calculate cursor position from input state
+    let cursor_col = {
+        let lua = lua_runtime.lock().await;
+        let input = lua.tool_state().input_state();
+        // ANSI cursor positions are 1-indexed
+        // Column = 1 + width(prompt) + width(text before cursor)
+        let prompt_width = input.prompt.width();
+        let text_before_cursor = if input.cursor <= input.text.len() {
+            &input.text[..input.cursor]
+        } else {
+            &input.text
+        };
+        let text_width = text_before_cursor.width();
+        1 + prompt_width + text_width
+    };
+
     // Only send if there are changes
     if !diff_output.is_empty() {
         // Wrap in synchronized output to prevent tearing
+        // Position cursor at input line (term_height) at calculated column
         let final_output = format!(
-            "\x1b[?2026h{}\x1b[{};1H\x1b[?25h\x1b[?2026l",
-            diff_output, term_height
+            "\x1b[?2026h{}\x1b[{};{}H\x1b[?25h\x1b[?2026l",
+            diff_output, term_height, cursor_col
         );
 
         if handle

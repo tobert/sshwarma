@@ -612,6 +612,8 @@ impl SshHandler {
                     let inner = scroll.inner();
                     let mut state = inner.lock().unwrap();
                     state.page_up();
+                    drop(state); // Release lock before marking dirty
+                    lua.tool_state().mark_dirty("chat");
                 }
             }
 
@@ -623,6 +625,8 @@ impl SshHandler {
                     let inner = scroll.inner();
                     let mut state = inner.lock().unwrap();
                     state.page_down();
+                    drop(state); // Release lock before marking dirty
+                    lua.tool_state().mark_dirty("chat");
                 }
             }
         }
