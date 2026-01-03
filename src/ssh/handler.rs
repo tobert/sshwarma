@@ -6,7 +6,7 @@ use crate::db::rows::Row;
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::llm::StreamChunk;
-use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge};
+use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge, WrapState};
 use crate::model::ModelHandle;
 use crate::player::PlayerSession;
 use crate::ssh::screen::spawn_screen_refresh;
@@ -242,31 +242,84 @@ impl SshHandler {
             }
         }
 
-        // Build system prompt with tool definitions
-        let base_prompt = format!(
-            "You are {} in a collaborative chat room. Be helpful and concise.",
-            model.display_name
-        );
-
-        let system_prompt = match tool_server_handle.get_tool_defs(None).await {
+        // Build tool guide for system prompt
+        let tool_guide = match tool_server_handle.get_tool_defs(None).await {
             Ok(tool_defs) if !tool_defs.is_empty() => {
-                let mut tool_guide = String::from("\n\n## Your Functions\n");
-                tool_guide.push_str("You have these built-in functions:\n\n");
+                let mut guide = String::from("\n\n## Your Functions\n");
+                guide.push_str("You have these built-in functions:\n\n");
                 for tool in &tool_defs {
                     let display_name = tool.name.strip_prefix("sshwarma_").unwrap_or(&tool.name);
-                    tool_guide.push_str(&format!("- **{}**: {}\n", display_name, tool.description));
+                    guide.push_str(&format!("- **{}**: {}\n", display_name, tool.description));
                 }
                 tracing::info!("injecting {} tool definitions into prompt", tool_defs.len());
-                format!("{}{}", base_prompt, tool_guide)
+                guide
             }
             Ok(_) => {
                 tracing::warn!("no tools available for @mention");
-                base_prompt
+                String::new()
             }
             Err(e) => {
                 tracing::error!("failed to get tool definitions: {}", e);
-                base_prompt
+                String::new()
             }
+        };
+
+        // Build context via wrap() system
+        let target_tokens = model.context_window.unwrap_or(8000);
+        let (system_prompt, full_message) = if let Some(ref lua_rt) = lua_runtime {
+            let wrap_state = WrapState {
+                room_name: room_name.clone(),
+                username: username.clone(),
+                model: model.clone(),
+                shared_state: state.clone(),
+            };
+
+            let lua = lua_rt.lock().await;
+            match lua.wrap(wrap_state, target_tokens) {
+                Ok(result) => {
+                    // Log token counts before moving values
+                    let system_tokens = result.system_prompt.len() / 4;
+                    let context_tokens = result.context.len() / 4;
+
+                    // Combine wrap system_prompt with tool guide
+                    let prompt = if tool_guide.is_empty() {
+                        result.system_prompt
+                    } else {
+                        format!("{}{}", result.system_prompt, tool_guide)
+                    };
+
+                    // Prepend context to user message
+                    let msg = if result.context.is_empty() {
+                        message.clone()
+                    } else {
+                        format!("{}\n\n---\n\n{}", result.context, message)
+                    };
+
+                    tracing::info!(
+                        "wrap() composed {} system tokens, {} context tokens",
+                        system_tokens, context_tokens
+                    );
+
+                    (prompt, msg)
+                }
+                Err(e) => {
+                    // Fail visibly - notify user and abort
+                    tracing::error!("wrap() failed: {}", e);
+                    lua.tool_state().push_notification_with_level(
+                        format!("Context composition failed: {}", e),
+                        5000,
+                        crate::lua::NotificationLevel::Error,
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            // No Lua runtime - use basic fallback
+            let prompt = format!(
+                "You are {} in a collaborative chat room. Be helpful and concise.{}",
+                model.display_name, tool_guide
+            );
+            (prompt, message.clone())
         };
 
         let model_short = model.short_name.clone();
@@ -281,12 +334,12 @@ impl SshHandler {
                 let llm = llm.clone();
                 let model = model.clone();
                 let system_prompt = system_prompt.clone();
-                let message = message.clone();
+                let full_message = full_message.clone();
                 async move {
                     llm.stream_with_tool_server(
                         &model,
                         &system_prompt,
-                        &message,
+                        &full_message,
                         tool_server_handle,
                         chunk_tx,
                         100, // max tool turns

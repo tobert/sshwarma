@@ -17,17 +17,15 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::config::Config;
 use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
 use crate::db::scripts::{LuaScript, ScriptKind};
 use crate::db::Database;
 use crate::llm::LlmClient;
 use crate::lua::{LuaRuntime, WrapState};
 use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
-use crate::rules::RulesEngine;
 use crate::state::SharedState;
 use crate::world::{JournalKind, World};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Shared state for the MCP server
 pub struct McpServerState {
@@ -35,6 +33,8 @@ pub struct McpServerState {
     pub db: Arc<Database>,
     pub llm: Arc<LlmClient>,
     pub models: Arc<ModelRegistry>,
+    pub lua_runtime: Arc<Mutex<LuaRuntime>>,
+    pub shared_state: Arc<SharedState>,
 }
 
 /// MCP server for sshwarma
@@ -834,32 +834,25 @@ impl SshwarmaMcpServer {
 
         let target_tokens = model.context_window.unwrap_or(30000);
 
-        // Create a temporary LuaRuntime for the preview
-        let lua_runtime = match LuaRuntime::new() {
-            Ok(rt) => rt,
-            Err(e) => return format!("Error creating Lua runtime: {}", e),
-        };
-
-        // Build SharedState from McpServerState components
-        // Note: MCP server doesn't have MCP clients, so we create minimal state
-        let shared_state = Arc::new(SharedState {
-            world: self.state.world.clone(),
-            db: self.state.db.clone(),
-            config: Config::default(),
-            llm: self.state.llm.clone(),
-            models: self.state.models.clone(),
-            mcp: Arc::new(crate::mcp::McpManager::new()),
-            rules: Arc::new(RulesEngine::new()),
-        });
-
+        // Use the persistent LuaRuntime with full SharedState
         let wrap_state = WrapState {
-            room_name: params.room,
-            username,
+            room_name: params.room.clone(),
+            username: username.clone(),
             model: model.clone(),
-            shared_state,
+            shared_state: self.state.shared_state.clone(),
         };
 
-        match lua_runtime.compose_context(wrap_state, target_tokens) {
+        let lua_runtime = self.state.lua_runtime.lock().await;
+
+        // Set session context so tools.history() etc. work
+        lua_runtime.tool_state().set_session_context(Some(crate::lua::SessionContext {
+            username,
+            model: Some(model.clone()),
+            room_name: params.room,
+        }));
+        lua_runtime.tool_state().set_shared_state(Some(self.state.shared_state.clone()));
+
+        match lua_runtime.wrap(wrap_state, target_tokens) {
             Ok(result) => {
                 let system_tokens = result.system_prompt.len() / 4;
                 let context_tokens = result.context.len() / 4;

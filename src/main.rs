@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use russh::server::Server as _;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -125,11 +125,19 @@ async fn main() -> Result<()> {
 
     // Start MCP server for Claude Code
     if config.mcp_server_port > 0 {
+        use sshwarma::lua::LuaRuntime;
+
+        // Create a LuaRuntime for the MCP server with full tool state
+        let mcp_lua = LuaRuntime::new().context("failed to create Lua runtime for MCP server")?;
+        mcp_lua.tool_state().set_shared_state(Some(state.clone()));
+
         let mcp_state = Arc::new(McpServerState {
             world: world.clone(),
             db: db.clone(),
             llm: llm.clone(),
             models: models.clone(),
+            lua_runtime: Arc::new(Mutex::new(mcp_lua)),
+            shared_state: state.clone(),
         });
         let _mcp_handle = mcp_server::start_mcp_server(config.mcp_server_port, mcp_state).await?;
         info!(port = config.mcp_server_port, "MCP server started");

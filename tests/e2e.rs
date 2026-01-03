@@ -15,13 +15,17 @@ use rmcp::{
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
+use sshwarma::config::Config;
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
+use sshwarma::lua::LuaRuntime;
 use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::{ModelBackend, ModelHandle, ModelRegistry};
+use sshwarma::rules::RulesEngine;
+use sshwarma::state::SharedState;
 use sshwarma::world::World;
 use std::time::Duration;
 
@@ -421,11 +425,33 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
         context_window: None,
     });
 
+    let world = Arc::new(RwLock::new(World::new()));
+    let db = Arc::new(db);
+    let llm = Arc::new(LlmClient::new()?);
+    let models = Arc::new(models);
+
+    // Build SharedState for the MCP server
+    let shared_state = Arc::new(SharedState {
+        world: world.clone(),
+        db: db.clone(),
+        config: Config::default(),
+        llm: llm.clone(),
+        models: models.clone(),
+        mcp: Arc::new(McpManager::new()),
+        rules: Arc::new(RulesEngine::new()),
+    });
+
+    // Create LuaRuntime with shared state
+    let lua_runtime = LuaRuntime::new().expect("failed to create test Lua runtime");
+    lua_runtime.tool_state().set_shared_state(Some(shared_state.clone()));
+
     let state = Arc::new(McpServerState {
-        world: Arc::new(tokio::sync::RwLock::new(World::new())),
-        db: Arc::new(db),
-        llm: Arc::new(LlmClient::new()?),
-        models: Arc::new(models),
+        world,
+        db,
+        llm,
+        models,
+        lua_runtime: Arc::new(Mutex::new(lua_runtime)),
+        shared_state,
     });
 
     // Find a free port

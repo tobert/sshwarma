@@ -204,13 +204,24 @@ local function format_participants_layer()
 end
 
 --- Format the conversation history layer
+--- When model and user are in session context, filters to just their conversation
 local function format_history_layer(limit)
-    local messages = tools.history(limit)
+    local model = tools.current_model()
+    local user = tools.current_user()
+
+    -- Build history options with agent filter if we have context
+    local opts = {limit = limit}
+    if model and user then
+        -- Filter to messages from current user + addressed model only
+        opts.agents = {user.name, model.name}
+    end
+
+    local messages = tools.history(opts)
     if not messages or #messages == 0 then
         return layer_result("")
     end
 
-    local lines = {"## Recent History"}
+    local lines = {"## Recent Conversation"}
     for _, msg in ipairs(messages) do
         table.insert(lines, msg.author .. ": " .. msg.content)
     end

@@ -567,12 +567,28 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
     // Extended data tools (require SharedState)
 
-    // tools.history(n) -> [{author, content, timestamp, kind}]
+    // tools.history(opts) -> [{author, content, timestamp, kind}]
+    // opts can be:
+    //   - number: limit (backward compat)
+    //   - table: {limit, agents, thread, since_marker}
     let history_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, limit: Option<usize>| {
-            let limit = limit.unwrap_or(30);
+        lua.create_function(move |lua, opts: Value| {
             let list = lua.create_table()?;
+
+            // Parse options - either number or table
+            let (limit, agent_filter): (usize, Option<Vec<String>>) = match opts {
+                Value::Nil => (30, None),
+                Value::Integer(n) => (n.max(1) as usize, None),
+                Value::Number(n) => (n.max(1.0) as usize, None),
+                Value::Table(ref tbl) => {
+                    let limit: usize = tbl.get::<usize>("limit").unwrap_or(30);
+                    let agents: Option<Vec<String>> = tbl.get("agents").ok();
+                    // thread and since_marker reserved for future
+                    (limit, agents)
+                }
+                _ => (30, None),
+            };
 
             // Get room name from session context
             let ctx = state.session_context();
@@ -591,10 +607,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             if let Some(shared) = state.shared_state() {
                 // Get buffer for room
                 if let Ok(buffer) = shared.db.get_or_create_room_buffer(&room_name) {
-                    // Get recent rows
-                    if let Ok(rows) = shared.db.list_recent_buffer_rows(&buffer.id, limit) {
+                    // Get recent rows (fetch more than limit to account for filtering)
+                    let fetch_limit = if agent_filter.is_some() { limit * 3 } else { limit };
+                    if let Ok(rows) = shared.db.list_recent_buffer_rows(&buffer.id, fetch_limit) {
                         let mut idx = 1;
+                        let mut count = 0;
                         for db_row in rows.iter().filter(|r| !r.ephemeral) {
+                            if count >= limit {
+                                break;
+                            }
+
                             // Include message rows and thinking/streaming rows
                             let is_message = db_row.content_method.starts_with("message.");
                             let is_thinking = db_row.content_method.starts_with("thinking.");
@@ -619,6 +641,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                                 "system".to_string()
                             };
 
+                            // Apply agent filter if specified
+                            if let Some(ref agents) = agent_filter {
+                                if !agents.iter().any(|a| a == &author) {
+                                    continue;
+                                }
+                            }
+
                             let row = lua.create_table()?;
                             row.set("author", author)?;
                             row.set("content", text)?;
@@ -628,6 +657,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             row.set("is_streaming", is_thinking && db_row.finalized_at.is_none())?;
                             list.set(idx, row)?;
                             idx += 1;
+                            count += 1;
                         }
                     }
                 }

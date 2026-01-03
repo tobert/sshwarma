@@ -22,7 +22,7 @@ pub use registry::ToolRegistry;
 pub use render::parse_lua_rows;
 pub use tool_middleware::{ToolContext, ToolMiddleware};
 pub use tools::{register_mcp_tools, InputState, LuaToolState, SessionContext};
-pub use wrap::{compose_context, WrapResult, WrapState};
+pub use wrap::{WrapResult, WrapState};
 
 // Re-export startup script path for main.rs
 pub use self::startup_script_path as get_startup_script_path;
@@ -392,7 +392,7 @@ impl LuaRuntime {
         &self.lua
     }
 
-    /// Compose context for LLM interactions
+    /// Build context for LLM interactions via Lua wrap() system
     ///
     /// Calls Lua's `default_wrap()` function with the target token budget,
     /// then extracts system_prompt and context strings.
@@ -403,7 +403,7 @@ impl LuaRuntime {
     ///
     /// # Returns
     /// WrapResult with system_prompt (stable, for preamble) and context (dynamic)
-    pub fn compose_context(
+    pub fn wrap(
         &self,
         wrap_state: WrapState,
         target_tokens: usize,
@@ -918,7 +918,7 @@ mod tests {
         };
 
         let result = runtime
-            .compose_context(wrap_state, 8000)
+            .wrap(wrap_state, 8000)
             .expect("should compose context");
 
         // System prompt should contain model identity and sshwarma info
@@ -971,7 +971,7 @@ mod tests {
         };
 
         let result = runtime
-            .compose_context(wrap_state, 8000)
+            .wrap(wrap_state, 8000)
             .expect("should compose context");
 
         // Context should contain history with messages
@@ -1017,7 +1017,7 @@ mod tests {
         };
 
         // Very small budget should trigger overflow error
-        let result = runtime.compose_context(wrap_state, 100);
+        let result = runtime.wrap(wrap_state, 100);
         assert!(result.is_err(), "should error on budget overflow");
         let err_msg = result.unwrap_err().to_string();
         assert!(

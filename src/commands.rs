@@ -1021,7 +1021,7 @@ MCP:
         };
 
         let lua = lua_runtime.lock().await;
-        match lua.compose_context(wrap_state, target_tokens) {
+        match lua.wrap(wrap_state, target_tokens) {
             Ok(result) => {
                 let system_tokens = result.system_prompt.len() / 4;
                 let context_tokens = result.context.len() / 4;

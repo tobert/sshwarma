@@ -123,9 +123,15 @@ impl SshHandler {
             None
         };
 
-        // Update status tracker
+        // Update session context with model and status
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
+            // Set full session context including model for wrap()
+            lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
+                username: username.clone(),
+                model: Some(model.clone()),
+                room_name: room_name.clone(),
+            }));
             lua.tool_state().set_status(&model.short_name, Status::Thinking);
         }
 
