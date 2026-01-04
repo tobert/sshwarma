@@ -1,6 +1,5 @@
 //! Input handling and command dispatch
 
-use crate::commands::OutputMode;
 use crate::db::rows::Row;
 use crate::interp::{self, Input};
 use crate::status::Status;
@@ -24,11 +23,13 @@ impl SshHandler {
             Input::Empty => {}
 
             Input::Command { name, args } => {
-                self.dispatch_command(channel, session, &name, &args).await?;
+                self.dispatch_command(channel, session, &name, &args)
+                    .await?;
             }
 
             Input::Mention { model, message } => {
-                self.handle_mention(channel, session, &model, &message).await?;
+                self.handle_mention(channel, session, &model, &message)
+                    .await?;
             }
 
             Input::Chat(message) => {
@@ -52,7 +53,8 @@ impl SshHandler {
         };
 
         let Some(ref room_name) = player.current_room else {
-            self.send_error(channel, session, "Not in a room. Use /join <room>").await;
+            self.send_error(channel, session, "Not in a room. Use /join <room>")
+                .await;
             return Ok(());
         };
 
@@ -83,7 +85,12 @@ impl SshHandler {
         };
 
         if message.is_empty() {
-            self.send_error(channel, session, &format!("Usage: @{} <message>", model_name)).await;
+            self.send_error(
+                channel,
+                session,
+                &format!("Usage: @{} <message>", model_name),
+            )
+            .await;
             return Ok(());
         }
 
@@ -91,12 +98,23 @@ impl SshHandler {
         let model = match self.state.models.get(model_name) {
             Some(m) => m.clone(),
             None => {
-                let available: Vec<_> = self.state.models.available()
+                let available: Vec<_> = self
+                    .state
+                    .models
+                    .available()
                     .iter()
                     .map(|m| m.short_name.as_str())
                     .collect();
-                self.send_error(channel, session,
-                    &format!("Unknown model '{}'. Available: {}", model_name, available.join(", "))).await;
+                self.send_error(
+                    channel,
+                    session,
+                    &format!(
+                        "Unknown model '{}'. Available: {}",
+                        model_name,
+                        available.join(", ")
+                    ),
+                )
+                .await;
                 return Ok(());
             }
         };
@@ -108,8 +126,12 @@ impl SshHandler {
         if let Some(ref room) = room_name {
             let buffer = self.state.db.get_or_create_room_buffer(room)?;
             let agent = self.state.db.get_or_create_human_agent(&username)?;
-            let mut row = Row::message(&buffer.id, &agent.id,
-                format!("@{}: {}", model_name, message), false);
+            let mut row = Row::message(
+                &buffer.id,
+                &agent.id,
+                format!("@{}: {}", model_name, message),
+                false,
+            );
             self.state.db.append_row(&mut row)?;
         }
 
@@ -128,12 +150,14 @@ impl SshHandler {
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
             // Set full session context including model for wrap()
-            lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
-                username: username.clone(),
-                model: Some(model.clone()),
-                room_name: room_name.clone(),
-            }));
-            lua.tool_state().set_status(&model.short_name, Status::Thinking);
+            lua.tool_state()
+                .set_session_context(Some(crate::lua::SessionContext {
+                    username: username.clone(),
+                    model: Some(model.clone()),
+                    room_name: room_name.clone(),
+                }));
+            lua.tool_state()
+                .set_status(&model.short_name, Status::Thinking);
         }
 
         // Spawn background task for model response
@@ -143,12 +167,13 @@ impl SshHandler {
             username,
             room_name,
             placeholder_row_id,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
 
-    /// Dispatch a slash command
+    /// Dispatch a slash command via Lua command system
     async fn dispatch_command(
         &mut self,
         _channel: ChannelId,
@@ -156,28 +181,34 @@ impl SshHandler {
         name: &str,
         args: &str,
     ) -> Result<()> {
-        // Build the full command line and call handle_input from commands.rs
-        let line = if args.is_empty() {
-            format!("/{}", name)
-        } else {
-            format!("/{} {}", name, args)
+        let Some(ref lua_runtime) = self.lua_runtime else {
+            tracing::error!("No Lua runtime available for command dispatch");
+            return Ok(());
         };
-        let result = self.handle_input(&line).await;
 
-        // Route command output based on mode
-        if !result.text.is_empty() {
-            if let Some(ref lua_runtime) = self.lua_runtime {
-                let lua = lua_runtime.lock().await;
-                match result.mode {
-                    OutputMode::Overlay { title } => {
-                        // Show in overlay (modal, dismissable with Escape)
-                        lua.tool_state().show_overlay(&title, &result.text);
-                    }
-                    OutputMode::Notification => {
-                        // Use longer TTL for command output
-                        lua.tool_state().push_notification(result.text.clone(), 10000);
+        let lua = lua_runtime.lock().await;
+        match lua.call_dispatch_command(name, args) {
+            Ok(Some(cmd_result)) => {
+                if !cmd_result.text.is_empty() {
+                    if cmd_result.mode == "overlay" {
+                        let title = cmd_result.title.unwrap_or_else(|| name.to_string());
+                        lua.tool_state().show_overlay(&title, &cmd_result.text);
+                    } else {
+                        lua.tool_state()
+                            .push_notification(cmd_result.text.clone(), 10000);
                     }
                 }
+            }
+            Ok(None) => {
+                lua.tool_state()
+                    .push_notification(format!("Unknown command: /{}", name), 5000);
+            }
+            Err(e) => {
+                lua.tool_state().push_notification_with_level(
+                    format!("Command error: {}", e),
+                    5000,
+                    crate::lua::NotificationLevel::Error,
+                );
             }
         }
 

@@ -220,7 +220,9 @@ pub struct CreateRuleParams {
     pub tick_divisor: Option<i32>,
     #[schemars(description = "For interval triggers: milliseconds between runs")]
     pub interval_ms: Option<i64>,
-    #[schemars(description = "For row triggers: glob pattern to match content_method (e.g. 'message.*')")]
+    #[schemars(
+        description = "For row triggers: glob pattern to match content_method (e.g. 'message.*')"
+    )]
     pub match_pattern: Option<String>,
     #[schemars(description = "Name of the script to execute (must exist in database)")]
     pub script_name: String,
@@ -329,9 +331,7 @@ impl SshwarmaMcpServer {
                 let filtered: Vec<_> = messages
                     .iter()
                     .filter(|m| {
-                        m.message_type.starts_with("message.")
-                            && !m.content.is_empty()
-                            && !m.hidden
+                        m.message_type.starts_with("message.") && !m.content.is_empty() && !m.hidden
                     })
                     .collect();
 
@@ -345,7 +345,10 @@ impl SshwarmaMcpServer {
                     filtered.len()
                 );
                 for msg in filtered {
-                    output.push_str(&format!("[{}] {}: {}\n", msg.timestamp, msg.sender_name, msg.content));
+                    output.push_str(&format!(
+                        "[{}] {}: {}\n",
+                        msg.timestamp, msg.sender_name, msg.content
+                    ));
                 }
                 output
             }
@@ -458,7 +461,9 @@ impl SshwarmaMcpServer {
                     // Get buffer
                     if let Ok(buffer) = self.state.db.get_or_create_room_buffer(room_name) {
                         // Get or create model agent
-                        if let Ok(agent) = self.state.db.get_or_create_model_agent(&model.short_name) {
+                        if let Ok(agent) =
+                            self.state.db.get_or_create_model_agent(&model.short_name)
+                        {
                             // Add model response row
                             let mut row = Row::new(&buffer.id, "message.model");
                             row.source_agent_id = Some(agent.id);
@@ -874,12 +879,16 @@ impl SshwarmaMcpServer {
         let lua_runtime = self.state.lua_runtime.lock().await;
 
         // Set session context so tools.history() etc. work
-        lua_runtime.tool_state().set_session_context(Some(crate::lua::SessionContext {
-            username,
-            model: Some(model.clone()),
-            room_name: params.room,
-        }));
-        lua_runtime.tool_state().set_shared_state(Some(self.state.shared_state.clone()));
+        lua_runtime
+            .tool_state()
+            .set_session_context(Some(crate::lua::SessionContext {
+                username,
+                model: Some(model.clone()),
+                room_name: params.room,
+            }));
+        lua_runtime
+            .tool_state()
+            .set_shared_state(Some(self.state.shared_state.clone()));
 
         match lua_runtime.wrap(wrap_state, target_tokens) {
             Ok(result) => {
@@ -925,7 +934,10 @@ impl SshwarmaMcpServer {
                             format!("interval:{}ms", rule.interval_ms.unwrap_or(0))
                         }
                         TriggerKind::Row => {
-                            format!("row:{}", rule.match_content_method.as_deref().unwrap_or("*"))
+                            format!(
+                                "row:{}",
+                                rule.match_content_method.as_deref().unwrap_or("*")
+                            )
                         }
                     };
                     let name = rule.name.as_deref().unwrap_or("(unnamed)");
@@ -1030,7 +1042,10 @@ impl SshwarmaMcpServer {
             .collect();
 
         match matching.len() {
-            0 => format!("No rule matching '{}' in room '{}'.", params.rule_id, params.room),
+            0 => format!(
+                "No rule matching '{}' in room '{}'.",
+                params.rule_id, params.room
+            ),
             1 => {
                 let rule = matching[0];
                 match self.state.db.delete_rule(&rule.id) {
@@ -1059,12 +1074,19 @@ impl SshwarmaMcpServer {
             .collect();
 
         match matching.len() {
-            0 => format!("No rule matching '{}' in room '{}'.", params.rule_id, params.room),
+            0 => format!(
+                "No rule matching '{}' in room '{}'.",
+                params.rule_id, params.room
+            ),
             1 => {
                 let rule = matching[0];
                 match self.state.db.set_rule_enabled(&rule.id, params.enabled) {
                     Ok(_) => {
-                        let status = if params.enabled { "enabled" } else { "disabled" };
+                        let status = if params.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
                         format!("Rule {} {}.", &rule.id[..8], status)
                     }
                     Err(e) => format!("Error updating rule: {}", e),
@@ -1088,14 +1110,8 @@ impl SshwarmaMcpServer {
                 let mut output = "## Available Scripts\n\n".to_string();
                 for script in scripts {
                     let name = script.name.as_deref().unwrap_or("(anonymous)");
-                    let desc = script
-                        .description
-                        .as_deref()
-                        .unwrap_or("No description");
-                    output.push_str(&format!(
-                        "- **{}** ({:?}): {}\n",
-                        name, script.kind, desc
-                    ));
+                    let desc = script.description.as_deref().unwrap_or("No description");
+                    output.push_str(&format!("- **{}** ({:?}): {}\n", name, script.kind, desc));
                 }
                 output
             }
@@ -1139,10 +1155,7 @@ impl SshwarmaMcpServer {
     // =========================================================================
 
     #[tool(description = "List equipped tools in a room's inventory")]
-    async fn inventory_list(
-        &self,
-        Parameters(params): Parameters<InventoryListParams>,
-    ) -> String {
+    async fn inventory_list(&self, Parameters(params): Parameters<InventoryListParams>) -> String {
         use crate::db::things::ThingKind;
 
         // Ensure world is bootstrapped
@@ -1249,12 +1262,20 @@ impl SshwarmaMcpServer {
 
         // Find thing by qualified name
         let things = if params.qualified_name.contains('*') {
-            match self.state.db.find_things_by_qualified_name(&params.qualified_name) {
+            match self
+                .state
+                .db
+                .find_things_by_qualified_name(&params.qualified_name)
+            {
                 Ok(t) => t,
                 Err(e) => return format!("Error: {}", e),
             }
         } else {
-            match self.state.db.get_thing_by_qualified_name(&params.qualified_name) {
+            match self
+                .state
+                .db
+                .get_thing_by_qualified_name(&params.qualified_name)
+            {
                 Ok(Some(t)) => vec![t],
                 Ok(None) => return format!("Thing '{}' not found.", params.qualified_name),
                 Err(e) => return format!("Error: {}", e),
@@ -1309,12 +1330,20 @@ impl SshwarmaMcpServer {
 
         // Find thing by qualified name
         let things = if params.qualified_name.contains('*') {
-            match self.state.db.find_things_by_qualified_name(&params.qualified_name) {
+            match self
+                .state
+                .db
+                .find_things_by_qualified_name(&params.qualified_name)
+            {
                 Ok(t) => t,
                 Err(e) => return format!("Error: {}", e),
             }
         } else {
-            match self.state.db.get_thing_by_qualified_name(&params.qualified_name) {
+            match self
+                .state
+                .db
+                .get_thing_by_qualified_name(&params.qualified_name)
+            {
                 Ok(Some(t)) => vec![t],
                 Ok(None) => return format!("Thing '{}' not found.", params.qualified_name),
                 Err(e) => return format!("Error: {}", e),
