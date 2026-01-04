@@ -112,6 +112,11 @@ impl SshHandler {
                 "bring" => CommandResult::normal(self.cmd_bring(args).await),
                 "drop" => CommandResult::normal(self.cmd_drop(args).await),
                 "inspire" => CommandResult::normal(self.cmd_inspire(args).await),
+                // Inventory commands (things system)
+                "inv" | "inventory" => CommandResult::normal(self.cmd_inv(args).await),
+                "equip" => CommandResult::normal(self.cmd_equip(args).await),
+                "unequip" => CommandResult::normal(self.cmd_unequip(args).await),
+                "portal" => CommandResult::normal(self.cmd_portal(args).await),
                 "prompt" => CommandResult::normal(self.cmd_prompt(args).await),
                 "dig" => CommandResult::normal(self.cmd_dig(args).await),
                 "go" => CommandResult::normal(self.cmd_go(args).await),
@@ -147,6 +152,8 @@ Looking:
   /examine <role>     Inspect bound asset
   /who                Who's online
   /history [n]        Recent messages
+  /history --tools    Tool call history
+  /history --stats    Tool usage statistics
 
 Room Context:
   /vibe [text]        Set/view room vibe
@@ -159,6 +166,13 @@ Room Context:
   /drop <role>        Unbind asset
   /inspire <text>     Add to mood board
   /nav [on|off]       Toggle model navigation
+
+Inventory:
+  /inv                Show equipped tools in room
+  /inv all            Include available (not equipped)
+  /equip <thing>      Equip tool/data by qualified name
+  /unequip <thing>    Unequip from room
+  /portal <dir> <room>  Create exit to another room
 
 Prompts:
   /prompt                        List prompts and targets
@@ -367,7 +381,21 @@ MCP:
     }
 
     async fn cmd_history(&self, args: &str) -> String {
-        let limit: usize = args.trim().parse().unwrap_or(50);
+        let args = args.trim();
+
+        // Check for --tools flag
+        if args == "--tools" || args.starts_with("--tools ") {
+            return self
+                .cmd_history_tools(args.strip_prefix("--tools").unwrap_or(""))
+                .await;
+        }
+
+        // Check for --stats flag
+        if args == "--stats" {
+            return self.cmd_history_stats().await;
+        }
+
+        let limit: usize = args.parse().unwrap_or(50);
         let limit = limit.min(200);
 
         let room_name = match self.current_room() {
@@ -397,6 +425,117 @@ MCP:
             }
             Err(e) => format!("Error loading history: {}", e),
         }
+    }
+
+    async fn cmd_history_tools(&self, args: &str) -> String {
+        let limit: usize = args.trim().parse().unwrap_or(20);
+        let limit = limit.min(100);
+
+        let room_name = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to see tool history.".to_string(),
+        };
+
+        // Get buffer for room
+        let buffer = match self.state.db.get_or_create_room_buffer(&room_name) {
+            Ok(b) => b,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        // Get tool calls
+        let tool_rows = match self.state.db.list_tool_calls(&buffer.id, limit) {
+            Ok(rows) => rows,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        if tool_rows.is_empty() {
+            return "No tool calls in this room yet.".to_string();
+        }
+
+        let mut output = format!(
+            "─── Last {} tool calls in {} ───\r\n",
+            tool_rows.len(),
+            room_name
+        );
+
+        for row in &tool_rows {
+            let time = chrono::DateTime::from_timestamp_millis(row.created_at)
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "??:??:??".to_string());
+
+            match row.content_method.as_str() {
+                "tool.call" => {
+                    let tool_name = row.content.as_deref().unwrap_or("unknown");
+                    output.push_str(&format!("[{}] ▶ {}\r\n", time, tool_name));
+                }
+                "tool.result" => {
+                    // Parse content_meta for tool name and success
+                    let (tool, success) = if let Some(ref meta) = row.content_meta {
+                        let success = meta.contains("\"success\":true");
+                        let tool = meta
+                            .split("\"tool\":\"")
+                            .nth(1)
+                            .and_then(|s| s.split('"').next())
+                            .unwrap_or("unknown");
+                        (tool, success)
+                    } else {
+                        ("unknown", true)
+                    };
+                    let status = if success { "✓" } else { "✗" };
+                    let preview = row.content.as_deref().unwrap_or("");
+                    let preview = if preview.len() > 60 {
+                        format!("{}...", &preview[..57])
+                    } else {
+                        preview.to_string()
+                    };
+                    output.push_str(&format!("[{}] {} {} → {}\r\n", time, status, tool, preview));
+                }
+                _ => {}
+            }
+        }
+
+        output.push_str("──────────────────────────────\r\n");
+        output
+    }
+
+    async fn cmd_history_stats(&self) -> String {
+        let room_name = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to see stats.".to_string(),
+        };
+
+        // Get buffer for room
+        let buffer = match self.state.db.get_or_create_room_buffer(&room_name) {
+            Ok(b) => b,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        // Get tool call counts
+        let counts = match self.state.db.count_tool_calls(&buffer.id) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        if counts.is_empty() {
+            return format!("No tool calls recorded in {}.", room_name);
+        }
+
+        let mut output = format!("─── Tool Usage in {} ───\r\n", room_name);
+
+        // Sort by count descending
+        let mut items: Vec<_> = counts.into_iter().collect();
+        items.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let total: usize = items.iter().map(|(_, c)| c).sum();
+
+        for (tool, count) in &items {
+            let pct = (*count as f64 / total as f64) * 100.0;
+            output.push_str(&format!("  {:3} ({:5.1}%) {}\r\n", count, pct, tool));
+        }
+
+        output.push_str(&format!("──────────────────────────────\r\n"));
+        output.push_str(&format!("Total: {} calls\r\n", total));
+        output
     }
 
     async fn cmd_say(&mut self, message: &str) -> String {
@@ -987,6 +1126,342 @@ MCP:
             }
         } else {
             "Usage: /nav [on|off]".to_string()
+        }
+    }
+
+    // =========================================================================
+    // Inventory commands (things system)
+    // =========================================================================
+
+    async fn cmd_inv(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to view inventory.".to_string(),
+        };
+
+        let show_all = args.trim().to_lowercase() == "all";
+
+        // Get room's thing ID (need to look it up or bootstrap)
+        let db = &self.state.db;
+
+        // Ensure world is bootstrapped
+        if let Err(e) = db.bootstrap_world() {
+            return format!("Error bootstrapping: {}", e);
+        }
+
+        // Find room thing by name
+        let room_thing = match db.find_things_by_name(&room) {
+            Ok(things) => things
+                .into_iter()
+                .find(|t| t.kind == crate::db::things::ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let room_thing = match room_thing {
+            Some(t) => t,
+            None => {
+                // Room exists in old system but not in things - create it
+                let mut new_room =
+                    crate::db::things::Thing::room(&room).with_parent("rooms");
+                new_room.id = format!("room_{}", room);
+                if let Err(e) = db.insert_thing(&new_room) {
+                    return format!("Error creating room thing: {}", e);
+                }
+                // Copy equipped from defaults
+                if let Err(e) = db.copy_equipped("defaults", &new_room.id) {
+                    return format!("Error copying defaults: {}", e);
+                }
+                new_room
+            }
+        };
+
+        // Get equipped tools for this room
+        let equipped = match db.get_equipped_tools(&room_thing.id) {
+            Ok(e) => e,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let mut output = String::new();
+
+        // Show equipped
+        output.push_str("Equipped:\r\n");
+        if equipped.is_empty() {
+            output.push_str("  (none)\r\n");
+        } else {
+            for eq in &equipped {
+                let status = if eq.thing.available { "✓" } else { "○" };
+                let qname = eq.thing.qualified_name.as_deref().unwrap_or(&eq.thing.name);
+                output.push_str(&format!("  {} {}\r\n", status, qname));
+            }
+        }
+
+        // Show room contents (things parented to this room)
+        let contents = match db.get_thing_children(&room_thing.id) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        if !contents.is_empty() {
+            output.push_str("\r\nRoom contents:\r\n");
+            for thing in &contents {
+                let kind = thing.kind.as_str();
+                output.push_str(&format!("  · {} ({})\r\n", thing.name, kind));
+            }
+        }
+
+        // Show available (not equipped) if requested
+        if show_all {
+            // Get all available tools from MCPs and internal
+            let all_tools = match db.list_things_by_kind(crate::db::things::ThingKind::Tool) {
+                Ok(t) => t,
+                Err(e) => return format!("Error: {}", e),
+            };
+
+            let equipped_ids: std::collections::HashSet<_> =
+                equipped.iter().map(|e| e.thing.id.as_str()).collect();
+
+            let available: Vec<_> = all_tools
+                .iter()
+                .filter(|t| t.available && !equipped_ids.contains(t.id.as_str()))
+                .collect();
+
+            if !available.is_empty() {
+                output.push_str("\r\nAvailable to equip:\r\n");
+                for tool in available {
+                    let qname = tool.qualified_name.as_deref().unwrap_or(&tool.name);
+                    output.push_str(&format!("  ○ {}\r\n", qname));
+                }
+            }
+        }
+
+        output
+    }
+
+    async fn cmd_equip(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to equip things.".to_string(),
+        };
+
+        let pattern = args.trim();
+        if pattern.is_empty() {
+            return "Usage: /equip <qualified_name>\r\n\
+                    Example: /equip holler:sample\r\n\
+                    Use /inv all to see available things."
+                .to_string();
+        }
+
+        let db = &self.state.db;
+
+        // Ensure world exists
+        if let Err(e) = db.bootstrap_world() {
+            return format!("Error: {}", e);
+        }
+
+        // Find room thing
+        let room_thing = match db.find_things_by_name(&room) {
+            Ok(things) => things
+                .into_iter()
+                .find(|t| t.kind == crate::db::things::ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let room_thing = match room_thing {
+            Some(t) => t,
+            None => return format!("Room '{}' not found in things system.", room),
+        };
+
+        // Find things matching pattern (glob or exact)
+        let things = if pattern.contains('*') {
+            match db.find_things_by_qualified_name(pattern) {
+                Ok(t) => t,
+                Err(e) => return format!("Error: {}", e),
+            }
+        } else {
+            match db.get_thing_by_qualified_name(pattern) {
+                Ok(Some(t)) => vec![t],
+                Ok(None) => return format!("Thing '{}' not found.", pattern),
+                Err(e) => return format!("Error: {}", e),
+            }
+        };
+
+        if things.is_empty() {
+            return format!("No things matching '{}'", pattern);
+        }
+
+        // Equip each thing
+        let mut equipped_count = 0;
+        for thing in &things {
+            if let Err(e) = db.equip(&room_thing.id, &thing.id, 0.0) {
+                return format!("Error equipping {}: {}", thing.name, e);
+            }
+            equipped_count += 1;
+        }
+
+        if equipped_count == 1 {
+            let qname = things[0].qualified_name.as_deref().unwrap_or(&things[0].name);
+            format!("Equipped {}", qname)
+        } else {
+            format!("Equipped {} things matching '{}'", equipped_count, pattern)
+        }
+    }
+
+    async fn cmd_unequip(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to unequip things.".to_string(),
+        };
+
+        let pattern = args.trim();
+        if pattern.is_empty() {
+            return "Usage: /unequip <qualified_name>\r\n\
+                    Example: /unequip holler:sample\r\n\
+                    Use /inv to see equipped things."
+                .to_string();
+        }
+
+        let db = &self.state.db;
+
+        // Find room thing
+        let room_thing = match db.find_things_by_name(&room) {
+            Ok(things) => things
+                .into_iter()
+                .find(|t| t.kind == crate::db::things::ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let room_thing = match room_thing {
+            Some(t) => t,
+            None => return format!("Room '{}' not found in things system.", room),
+        };
+
+        // Find things matching pattern
+        let things = if pattern.contains('*') {
+            match db.find_things_by_qualified_name(pattern) {
+                Ok(t) => t,
+                Err(e) => return format!("Error: {}", e),
+            }
+        } else {
+            match db.get_thing_by_qualified_name(pattern) {
+                Ok(Some(t)) => vec![t],
+                Ok(None) => return format!("Thing '{}' not found.", pattern),
+                Err(e) => return format!("Error: {}", e),
+            }
+        };
+
+        if things.is_empty() {
+            return format!("No things matching '{}'", pattern);
+        }
+
+        // Unequip each thing
+        let mut unequipped_count = 0;
+        for thing in &things {
+            if let Err(e) = db.unequip(&room_thing.id, &thing.id) {
+                return format!("Error unequipping {}: {}", thing.name, e);
+            }
+            unequipped_count += 1;
+        }
+
+        if unequipped_count == 1 {
+            let qname = things[0].qualified_name.as_deref().unwrap_or(&things[0].name);
+            format!("Unequipped {}", qname)
+        } else {
+            format!(
+                "Unequipped {} things matching '{}'",
+                unequipped_count, pattern
+            )
+        }
+    }
+
+    async fn cmd_portal(&self, args: &str) -> String {
+        let room = match self.current_room() {
+            Some(r) => r,
+            None => return "You need to be in a room to create portals.".to_string(),
+        };
+
+        let parts: Vec<&str> = args.trim().splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return "Usage: /portal <direction> <target_room>\r\n\
+                    Example: /portal north studio\r\n\
+                    Use /exits to see existing exits."
+                .to_string();
+        }
+
+        let direction = crate::db::exits::normalize_direction(parts[0]);
+        let target_room = parts[1].trim();
+
+        let db = &self.state.db;
+
+        // Ensure world exists
+        if let Err(e) = db.bootstrap_world() {
+            return format!("Error: {}", e);
+        }
+
+        // Find source room thing
+        let source = match db.find_things_by_name(&room) {
+            Ok(things) => things
+                .into_iter()
+                .find(|t| t.kind == crate::db::things::ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let source = match source {
+            Some(t) => t,
+            None => return format!("Current room '{}' not in things system.", room),
+        };
+
+        // Find or create target room thing
+        let target = match db.find_things_by_name(target_room) {
+            Ok(things) => things
+                .into_iter()
+                .find(|t| t.kind == crate::db::things::ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let target = match target {
+            Some(t) => t,
+            None => {
+                // Check if room exists in old system
+                match db.get_room_by_name(target_room) {
+                    Ok(Some(_)) => {
+                        // Create thing for existing room
+                        let mut new_room = crate::db::things::Thing::room(target_room)
+                            .with_parent("rooms");
+                        new_room.id = format!("room_{}", target_room);
+                        if let Err(e) = db.insert_thing(&new_room) {
+                            return format!("Error creating room thing: {}", e);
+                        }
+                        if let Err(e) = db.copy_equipped("defaults", &new_room.id) {
+                            return format!("Error copying defaults: {}", e);
+                        }
+                        new_room
+                    }
+                    Ok(None) => return format!("Target room '{}' doesn't exist.", target_room),
+                    Err(e) => return format!("Error: {}", e),
+                }
+            }
+        };
+
+        // Create exit
+        if let Err(e) = db.create_exit(&source.id, &direction, &target.id) {
+            return format!("Error creating exit: {}", e);
+        }
+
+        // Optionally create reverse exit
+        if let Some(reverse) = crate::db::exits::opposite_direction(&direction) {
+            if let Err(e) = db.create_exit(&target.id, reverse, &source.id) {
+                // Non-fatal, just warn
+                return format!(
+                    "Created exit {} → {}, but failed to create reverse: {}",
+                    direction, target_room, e
+                );
+            }
+            format!(
+                "Created bidirectional exit: {} ↔ {} ↔ {}",
+                room, direction, target_room
+            )
+        } else {
+            format!("Created exit: {} → {}", direction, target_room)
         }
     }
 

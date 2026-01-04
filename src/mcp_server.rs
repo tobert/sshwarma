@@ -265,6 +265,35 @@ pub struct CreateScriptParams {
     pub description: Option<String>,
 }
 
+/// Parameters for inventory_list
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct InventoryListParams {
+    #[schemars(description = "Name of the room to list inventory for")]
+    pub room: String,
+    #[schemars(description = "Include available (unequipped) tools in list")]
+    pub include_available: Option<bool>,
+}
+
+/// Parameters for inventory_equip
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct InventoryEquipParams {
+    #[schemars(description = "Name of the room")]
+    pub room: String,
+    #[schemars(description = "Qualified name of the thing to equip (e.g. 'holler:sample')")]
+    pub qualified_name: String,
+    #[schemars(description = "Priority for ordering (lower = first)")]
+    pub priority: Option<f64>,
+}
+
+/// Parameters for inventory_unequip
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct InventoryUnequipParams {
+    #[schemars(description = "Name of the room")]
+    pub room: String,
+    #[schemars(description = "Qualified name of the thing to unequip")]
+    pub qualified_name: String,
+}
+
 #[tool_router]
 impl SshwarmaMcpServer {
     pub fn new(state: Arc<McpServerState>) -> Self {
@@ -1102,6 +1131,220 @@ impl SshwarmaMcpServer {
         match self.state.db.insert_script(&script) {
             Ok(_) => format!("Created script '{}'.", params.name),
             Err(e) => format!("Error creating script: {}", e),
+        }
+    }
+
+    // =========================================================================
+    // Inventory tools (things system)
+    // =========================================================================
+
+    #[tool(description = "List equipped tools in a room's inventory")]
+    async fn inventory_list(
+        &self,
+        Parameters(params): Parameters<InventoryListParams>,
+    ) -> String {
+        use crate::db::things::ThingKind;
+
+        // Ensure world is bootstrapped
+        if let Err(e) = self.state.db.bootstrap_world() {
+            return format!("Error bootstrapping: {}", e);
+        }
+
+        // Find room thing by name
+        let room_thing = match self.state.db.find_things_by_name(&params.room) {
+            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let room_thing = match room_thing {
+            Some(t) => t,
+            None => {
+                // Room might exist in old system but not in things
+                let world = self.state.world.read().await;
+                if world.get_room(&params.room).is_some() {
+                    drop(world);
+                    // Create thing for it
+                    let mut new_room =
+                        crate::db::things::Thing::room(&params.room).with_parent("rooms");
+                    new_room.id = format!("room_{}", params.room);
+                    if let Err(e) = self.state.db.insert_thing(&new_room) {
+                        return format!("Error creating room thing: {}", e);
+                    }
+                    if let Err(e) = self.state.db.copy_equipped("defaults", &new_room.id) {
+                        return format!("Error copying defaults: {}", e);
+                    }
+                    new_room
+                } else {
+                    return format!("Room '{}' does not exist.", params.room);
+                }
+            }
+        };
+
+        // Get equipped tools
+        let equipped = match self.state.db.get_equipped_tools(&room_thing.id) {
+            Ok(e) => e,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let mut output = format!("Inventory for '{}':\n\nEquipped:\n", params.room);
+        if equipped.is_empty() {
+            output.push_str("  (none)\n");
+        } else {
+            for eq in &equipped {
+                let status = if eq.thing.available { "✓" } else { "○" };
+                let qname = eq.thing.qualified_name.as_deref().unwrap_or(&eq.thing.name);
+                output.push_str(&format!("  {} {}\n", status, qname));
+            }
+        }
+
+        // Show available if requested
+        if params.include_available.unwrap_or(false) {
+            let all_tools = match self.state.db.list_things_by_kind(ThingKind::Tool) {
+                Ok(t) => t,
+                Err(e) => return format!("Error: {}", e),
+            };
+
+            let equipped_ids: std::collections::HashSet<_> =
+                equipped.iter().map(|e| e.thing.id.as_str()).collect();
+
+            let available: Vec<_> = all_tools
+                .iter()
+                .filter(|t| t.available && !equipped_ids.contains(t.id.as_str()))
+                .collect();
+
+            if !available.is_empty() {
+                output.push_str("\nAvailable to equip:\n");
+                for tool in available {
+                    let qname = tool.qualified_name.as_deref().unwrap_or(&tool.name);
+                    output.push_str(&format!("  ○ {}\n", qname));
+                }
+            }
+        }
+
+        output
+    }
+
+    #[tool(description = "Equip a tool in a room")]
+    async fn inventory_equip(
+        &self,
+        Parameters(params): Parameters<InventoryEquipParams>,
+    ) -> String {
+        use crate::db::things::ThingKind;
+
+        // Ensure world is bootstrapped
+        if let Err(e) = self.state.db.bootstrap_world() {
+            return format!("Error: {}", e);
+        }
+
+        // Find room thing
+        let room_thing = match self.state.db.find_things_by_name(&params.room) {
+            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let room_thing = match room_thing {
+            Some(t) => t,
+            None => return format!("Room '{}' not found in things system.", params.room),
+        };
+
+        // Find thing by qualified name
+        let things = if params.qualified_name.contains('*') {
+            match self.state.db.find_things_by_qualified_name(&params.qualified_name) {
+                Ok(t) => t,
+                Err(e) => return format!("Error: {}", e),
+            }
+        } else {
+            match self.state.db.get_thing_by_qualified_name(&params.qualified_name) {
+                Ok(Some(t)) => vec![t],
+                Ok(None) => return format!("Thing '{}' not found.", params.qualified_name),
+                Err(e) => return format!("Error: {}", e),
+            }
+        };
+
+        if things.is_empty() {
+            return format!("No things matching '{}'", params.qualified_name);
+        }
+
+        // Equip each thing
+        let priority = params.priority.unwrap_or(0.0);
+        let mut equipped_count = 0;
+        for thing in &things {
+            if let Err(e) = self.state.db.equip(&room_thing.id, &thing.id, priority) {
+                return format!("Error equipping {}: {}", thing.name, e);
+            }
+            equipped_count += 1;
+        }
+
+        if equipped_count == 1 {
+            let qname = things[0]
+                .qualified_name
+                .as_deref()
+                .unwrap_or(&things[0].name);
+            format!("Equipped {} in {}", qname, params.room)
+        } else {
+            format!(
+                "Equipped {} things matching '{}' in {}",
+                equipped_count, params.qualified_name, params.room
+            )
+        }
+    }
+
+    #[tool(description = "Unequip a tool from a room")]
+    async fn inventory_unequip(
+        &self,
+        Parameters(params): Parameters<InventoryUnequipParams>,
+    ) -> String {
+        use crate::db::things::ThingKind;
+
+        // Find room thing
+        let room_thing = match self.state.db.find_things_by_name(&params.room) {
+            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let room_thing = match room_thing {
+            Some(t) => t,
+            None => return format!("Room '{}' not found in things system.", params.room),
+        };
+
+        // Find thing by qualified name
+        let things = if params.qualified_name.contains('*') {
+            match self.state.db.find_things_by_qualified_name(&params.qualified_name) {
+                Ok(t) => t,
+                Err(e) => return format!("Error: {}", e),
+            }
+        } else {
+            match self.state.db.get_thing_by_qualified_name(&params.qualified_name) {
+                Ok(Some(t)) => vec![t],
+                Ok(None) => return format!("Thing '{}' not found.", params.qualified_name),
+                Err(e) => return format!("Error: {}", e),
+            }
+        };
+
+        if things.is_empty() {
+            return format!("No things matching '{}'", params.qualified_name);
+        }
+
+        // Unequip each thing
+        let mut unequipped_count = 0;
+        for thing in &things {
+            if let Err(e) = self.state.db.unequip(&room_thing.id, &thing.id) {
+                return format!("Error unequipping {}: {}", thing.name, e);
+            }
+            unequipped_count += 1;
+        }
+
+        if unequipped_count == 1 {
+            let qname = things[0]
+                .qualified_name
+                .as_deref()
+                .unwrap_or(&things[0].name);
+            format!("Unequipped {} from {}", qname, params.room)
+        } else {
+            format!(
+                "Unequipped {} things matching '{}' from {}",
+                unequipped_count, params.qualified_name, params.room
+            )
         }
     }
 }
