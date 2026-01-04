@@ -95,7 +95,10 @@ impl SshHandler {
             Ok(e) if !e.is_empty() => e,
             _ => {
                 // Fall back to defaults
-                self.state.db.get_equipped_tools("defaults").unwrap_or_default()
+                self.state
+                    .db
+                    .get_equipped_tools("defaults")
+                    .unwrap_or_default()
             }
         };
 
@@ -112,11 +115,13 @@ impl SshHandler {
         self.player = Some(PlayerSession::new(username.to_string()));
 
         // Create Lua runtime (automatically loads user-specific script)
-        let runtime = LuaRuntime::new_for_user(Some(username))
-            .expect("failed to create lua runtime");
+        let runtime =
+            LuaRuntime::new_for_user(Some(username)).expect("failed to create lua runtime");
 
         // Set shared state so sshwarma.call() has access to DB/MCP
-        runtime.tool_state().set_shared_state(Some(self.state.clone()));
+        runtime
+            .tool_state()
+            .set_shared_state(Some(self.state.clone()));
 
         let runtime = Arc::new(Mutex::new(runtime));
         self.lua_runtime = Some(runtime.clone());
@@ -147,11 +152,12 @@ impl SshHandler {
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
             if let Some(ref player) = self.player {
-                lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
-                    username: player.username.clone(),
-                    model: None,
-                    room_name: Some(room_name.to_string()),
-                }));
+                lua.tool_state()
+                    .set_session_context(Some(crate::lua::SessionContext {
+                        username: player.username.clone(),
+                        model: None,
+                        room_name: Some(room_name.to_string()),
+                    }));
             }
         }
 
@@ -221,11 +227,12 @@ impl SshHandler {
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
             if let Some(ref player) = self.player {
-                lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
-                    username: player.username.clone(),
-                    model: None,
-                    room_name: None,
-                }));
+                lua.tool_state()
+                    .set_session_context(Some(crate::lua::SessionContext {
+                        username: player.username.clone(),
+                        model: None,
+                        room_name: None,
+                    }));
             }
         }
 
@@ -287,7 +294,14 @@ impl SshHandler {
                 lua_runtime: lua_rt.clone(),
             };
             let config = InternalToolConfig::for_room(&state, &room_for_tools).await;
-            match crate::internal_tools::register_tools(&tool_server_handle, tool_ctx, &config, in_room).await {
+            match crate::internal_tools::register_tools(
+                &tool_server_handle,
+                tool_ctx,
+                &config,
+                in_room,
+            )
+            .await
+            {
                 Ok(count) => tracing::info!("registered {} internal tools for @mention", count),
                 Err(e) => tracing::error!("failed to register internal tools: {}", e),
             }
@@ -348,7 +362,8 @@ impl SshHandler {
 
                     tracing::info!(
                         "wrap() composed {} system tokens, {} context tokens",
-                        system_tokens, context_tokens
+                        system_tokens,
+                        context_tokens
                     );
 
                     (prompt, msg)
@@ -380,10 +395,14 @@ impl SshHandler {
         tokio::spawn(async move {
             // Get buffer_id and agent_id for tool call tracking
             let (buffer_id, agent_id) = if let Some(ref room) = room_for_tracking {
-                let buf_id = state.db.get_or_create_room_buffer(room)
+                let buf_id = state
+                    .db
+                    .get_or_create_room_buffer(room)
                     .map(|b| b.id)
                     .unwrap_or_default();
-                let agt_id = state.db.get_or_create_model_agent(&model_short)
+                let agt_id = state
+                    .db
+                    .get_or_create_model_agent(&model_short)
                     .map(|a| a.id)
                     .unwrap_or_default();
                 (buf_id, agt_id)
@@ -411,7 +430,8 @@ impl SshHandler {
                         tool_server_handle,
                         chunk_tx,
                         100, // max tool turns
-                    ).await
+                    )
+                    .await
                 }
             });
 
@@ -423,34 +443,40 @@ impl SshHandler {
                     StreamChunk::Text(text) => {
                         full_response.push_str(&text);
                         if let Some(ref row_id) = row_id {
-                            let _ = update_tx.send(RowUpdate::Chunk {
-                                row_id: row_id.clone(),
-                                text,
-                            }).await;
+                            let _ = update_tx
+                                .send(RowUpdate::Chunk {
+                                    row_id: row_id.clone(),
+                                    text,
+                                })
+                                .await;
                         }
                     }
                     StreamChunk::ToolCall { name, arguments } => {
                         last_tool_name = name.clone();
                         if let Some(ref row_id) = row_id {
-                            let _ = update_tx.send(RowUpdate::ToolCall {
-                                row_id: row_id.clone(),
-                                tool_name: name,
-                                tool_args: arguments,
-                                model_name: model_short.clone(),
-                                buffer_id: buffer_id.clone(),
-                                agent_id: agent_id.clone(),
-                            }).await;
+                            let _ = update_tx
+                                .send(RowUpdate::ToolCall {
+                                    row_id: row_id.clone(),
+                                    tool_name: name,
+                                    tool_args: arguments,
+                                    model_name: model_short.clone(),
+                                    buffer_id: buffer_id.clone(),
+                                    agent_id: agent_id.clone(),
+                                })
+                                .await;
                         }
                     }
                     StreamChunk::ToolResult(summary) => {
                         if let Some(ref row_id) = row_id {
-                            let _ = update_tx.send(RowUpdate::ToolResult {
-                                row_id: row_id.clone(),
-                                tool_name: last_tool_name.clone(),
-                                summary,
-                                success: true, // rig tool calls that reach here succeeded
-                                buffer_id: buffer_id.clone(),
-                            }).await;
+                            let _ = update_tx
+                                .send(RowUpdate::ToolResult {
+                                    row_id: row_id.clone(),
+                                    tool_name: last_tool_name.clone(),
+                                    summary,
+                                    success: true, // rig tool calls that reach here succeeded
+                                    buffer_id: buffer_id.clone(),
+                                })
+                                .await;
                         }
                     }
                     StreamChunk::Done => {
@@ -468,10 +494,12 @@ impl SshHandler {
 
             // Send completion to finalize the row
             if let Some(row_id) = row_id {
-                let _ = update_tx.send(RowUpdate::Complete {
-                    row_id,
-                    model_name: model_short,
-                }).await;
+                let _ = update_tx
+                    .send(RowUpdate::Complete {
+                        row_id,
+                        model_name: model_short,
+                    })
+                    .await;
             }
         });
 
@@ -590,16 +618,15 @@ impl server::Handler for SshHandler {
         if let Some(ref player) = self.player {
             if let Some(ref lua_runtime) = self.lua_runtime {
                 let lua = lua_runtime.lock().await;
-                lua.tool_state().set_session_context(Some(crate::lua::SessionContext {
-                    username: player.username.clone(),
-                    model: None,
-                    room_name: None,
-                }));
+                lua.tool_state()
+                    .set_session_context(Some(crate::lua::SessionContext {
+                        username: player.username.clone(),
+                        model: None,
+                        room_name: None,
+                    }));
                 // Welcome as notification
-                lua.tool_state().push_notification(
-                    format!("Welcome, {}!", player.username),
-                    5000,
-                );
+                lua.tool_state()
+                    .push_notification(format!("Welcome, {}!", player.username), 5000);
             }
         }
 
@@ -646,18 +673,40 @@ impl server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Flush any pending escape sequence from previous packet
-        // This detects bare ESC key when no follow-up bytes arrive
-        if let Some(event) = self.esc_parser.flush() {
-            let action = self.editor.handle_event(event);
-            self.handle_editor_action(channel, session, action).await;
-        }
-
-        for &byte in data {
-            if let Some(event) = self.esc_parser.feed(byte) {
-                let action = self.editor.handle_event(event);
-                self.handle_editor_action(channel, session, action).await;
+        // Forward raw bytes to Lua for parsing
+        if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            match lua.call_on_input(data) {
+                Ok(Some(lua_action)) => {
+                    // Convert Lua action to EditorAction
+                    let action = match lua_action {
+                        crate::lua::InputAction::None => EditorAction::None,
+                        crate::lua::InputAction::Redraw => EditorAction::Redraw,
+                        crate::lua::InputAction::Execute(text) => EditorAction::Execute(text),
+                        crate::lua::InputAction::Tab => EditorAction::Tab,
+                        crate::lua::InputAction::ClearScreen => EditorAction::ClearScreen,
+                        crate::lua::InputAction::Quit => EditorAction::Quit,
+                        crate::lua::InputAction::Escape => EditorAction::Escape,
+                        crate::lua::InputAction::PageUp => EditorAction::PageUp,
+                        crate::lua::InputAction::PageDown => EditorAction::PageDown,
+                    };
+                    drop(lua); // Release lock before handling action
+                    self.handle_lua_action(channel, session, action).await;
+                }
+                Ok(None) => {
+                    // No action needed, just mark input dirty for redraw
+                    lua.tool_state().mark_dirty("input");
+                }
+                Err(e) => {
+                    // Log error but don't crash - fall back to Rust parsing
+                    tracing::error!("Lua input handling failed: {}", e);
+                    drop(lua);
+                    self.handle_input_fallback(channel, session, data).await;
+                }
             }
+        } else {
+            // No Lua runtime - use Rust fallback
+            self.handle_input_fallback(channel, session, data).await;
         }
         Ok(())
     }
@@ -690,6 +739,27 @@ impl server::Handler for SshHandler {
 }
 
 impl SshHandler {
+    /// Fallback input handling using Rust parser (for when Lua is unavailable)
+    async fn handle_input_fallback(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+        data: &[u8],
+    ) {
+        // Flush any pending escape sequence from previous packet
+        if let Some(event) = self.esc_parser.flush() {
+            let action = self.editor.handle_event(event);
+            self.handle_editor_action(channel, session, action).await;
+        }
+
+        for &byte in data {
+            if let Some(event) = self.esc_parser.feed(byte) {
+                let action = self.editor.handle_event(event);
+                self.handle_editor_action(channel, session, action).await;
+            }
+        }
+    }
+
     async fn handle_editor_action(
         &mut self,
         channel: ChannelId,
@@ -718,7 +788,8 @@ impl SshHandler {
                     // Push error as notification for Lua to display
                     if let Some(ref lua_runtime) = self.lua_runtime {
                         let lua = lua_runtime.lock().await;
-                        lua.tool_state().push_notification(format!("Error: {}", e), 5000);
+                        lua.tool_state()
+                            .push_notification(format!("Error: {}", e), 5000);
                     }
                 }
 
@@ -785,6 +856,198 @@ impl SshHandler {
                         lua.tool_state().mark_dirty("chat");
                     }
                 }
+            }
+        }
+    }
+
+    /// Handle action from Lua input parser
+    ///
+    /// When Lua parses input, it returns an action that Rust needs to handle.
+    /// The input buffer is managed by Lua, so we don't update the Rust editor.
+    async fn handle_lua_action(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+        action: EditorAction,
+    ) {
+        match action {
+            EditorAction::None => {}
+
+            EditorAction::Redraw => {
+                // Clear completions when user types
+                self.clear_completions();
+                // Lua manages input state - just mark dirty
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().mark_dirty("input");
+                }
+            }
+
+            EditorAction::Execute(line) => {
+                // Handle /quit specially
+                if line.trim() == "/quit" {
+                    let _ = session.close(channel);
+                    return;
+                }
+
+                // Process the input - Lua renders results via tools.history()
+                if let Err(e) = self.process_input(channel, session, &line).await {
+                    // Push error as notification for Lua to display
+                    if let Some(ref lua_runtime) = self.lua_runtime {
+                        let lua = lua_runtime.lock().await;
+                        lua.tool_state()
+                            .push_notification(format!("Error: {}", e), 5000);
+                    }
+                }
+
+                // Mark input dirty for redraw (Lua already cleared the buffer)
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().mark_dirty("input");
+                    lua.tool_state().mark_dirty("chat");
+                }
+            }
+
+            EditorAction::Tab => {
+                // Tab completion still uses Rust for now (out of scope for this task)
+                self.handle_lua_tab_completion(channel, session).await;
+            }
+
+            EditorAction::ClearScreen => {
+                // Mark all regions dirty for full redraw
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().mark_dirty("chat");
+                    lua.tool_state().mark_dirty("status");
+                    lua.tool_state().mark_dirty("input");
+                }
+            }
+
+            EditorAction::Quit => {
+                let _ = session.close(channel);
+            }
+
+            EditorAction::Escape => {
+                // Close overlay if one is open
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    if lua.tool_state().has_overlay() {
+                        lua.tool_state().close_overlay();
+                    }
+                }
+            }
+
+            EditorAction::PageUp => {
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    if lua.tool_state().has_overlay() {
+                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
+                        lua.tool_state().overlay_scroll_up(page_size);
+                    } else {
+                        let scroll = lua.tool_state().chat_scroll();
+                        let inner = scroll.inner();
+                        let mut state = inner.lock().unwrap();
+                        state.page_up();
+                        drop(state);
+                        lua.tool_state().mark_dirty("chat");
+                    }
+                }
+            }
+
+            EditorAction::PageDown => {
+                if let Some(ref lua_runtime) = self.lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    if lua.tool_state().has_overlay() {
+                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
+                        lua.tool_state().overlay_scroll_down(page_size, page_size);
+                    } else {
+                        let scroll = lua.tool_state().chat_scroll();
+                        let inner = scroll.inner();
+                        let mut state = inner.lock().unwrap();
+                        state.page_down();
+                        drop(state);
+                        lua.tool_state().mark_dirty("chat");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle tab completion when Lua manages input
+    ///
+    /// Gets the current input state from Lua and performs completion.
+    /// TODO: Move tab completion to Lua in a future task.
+    async fn handle_lua_tab_completion(&mut self, channel: ChannelId, session: &mut Session) {
+        // Get input state from Lua
+        let (line, cursor) = if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            let input_state = lua.tool_state().input_state();
+            (input_state.text, input_state.cursor)
+        } else {
+            return;
+        };
+
+        let room: Option<String> = self.player.as_ref().and_then(|p| p.current_room.clone());
+
+        // If we already have completions and user pressed tab again, cycle
+        if !self.completions.is_empty() {
+            self.completion_index = (self.completion_index + 1) % self.completions.len();
+            self.apply_lua_completion(&line, cursor).await;
+            return;
+        }
+
+        // Get fresh completions
+        {
+            let ctx = CompletionContext {
+                line: &line,
+                cursor,
+                room: room.as_deref(),
+            };
+            self.completions = self.completer.complete(&ctx).await;
+        }
+        self.completion_index = 0;
+
+        if self.completions.is_empty() {
+            // No completions, beep
+            let _ = session.data(channel, CryptoVec::from(b"\x07".as_slice()));
+        } else if self.completions.len() == 1 {
+            // Single completion, apply it
+            self.apply_lua_completion(&line, cursor).await;
+            self.completions.clear();
+        } else {
+            // Multiple completions, apply first
+            self.apply_lua_completion(&line, cursor).await;
+        }
+    }
+
+    /// Apply completion to Lua-managed input buffer
+    async fn apply_lua_completion(&mut self, line: &str, cursor: usize) {
+        if let Some(completion) = self.completions.get(self.completion_index) {
+            let ctx = CompletionContext {
+                line,
+                cursor,
+                room: self.player.as_ref().and_then(|p| p.current_room.as_deref()),
+            };
+            let (start, _end) = self.completer.replacement_range(&ctx);
+
+            // Build new input text
+            let prefix = &line[..start];
+            let suffix = &line[cursor..];
+            let mut new_text = format!("{}{}", prefix, completion.text);
+
+            // Add space after completion if it's a command or mention
+            if completion.text.starts_with('/') || completion.text.starts_with('@') {
+                new_text.push(' ');
+            }
+
+            new_text.push_str(suffix);
+            let new_cursor = new_text.len() - suffix.len();
+
+            // Update Lua input state
+            if let Some(ref lua_runtime) = self.lua_runtime {
+                let lua = lua_runtime.lock().await;
+                lua.tool_state()
+                    .set_input(&new_text, new_cursor, &self.get_prompt());
             }
         }
     }
@@ -870,7 +1133,12 @@ impl SshHandler {
         }
     }
 
-    async fn apply_completion(&mut self, _channel: ChannelId, _session: &mut Session, ctx: &CompletionContext<'_>) {
+    async fn apply_completion(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+        ctx: &CompletionContext<'_>,
+    ) {
         if let Some(completion) = self.completions.get(self.completion_index) {
             let (start, _end) = self.completer.replacement_range(ctx);
             self.editor.replace_with_completion(start, &completion.text);
