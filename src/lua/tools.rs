@@ -1315,6 +1315,281 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("metric_histogram", metric_histogram_fn)?;
 
+    // =========================================================================
+    // Things system callbacks (inventory)
+    // =========================================================================
+
+    // things_get(qualified_name) -> thing table or nil
+    let things_get_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, qualified_name: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.get_thing_by_qualified_name(&qualified_name) {
+                Ok(Some(thing)) => {
+                    let t = lua.create_table()?;
+                    t.set("id", thing.id)?;
+                    t.set("parent_id", thing.parent_id)?;
+                    t.set("kind", thing.kind.as_str())?;
+                    t.set("name", thing.name)?;
+                    t.set("qualified_name", thing.qualified_name)?;
+                    t.set("description", thing.description)?;
+                    t.set("content", thing.content)?;
+                    t.set("available", thing.available)?;
+                    Ok(Value::Table(t))
+                }
+                _ => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("things_get", things_get_fn)?;
+
+    // things_children(parent_id) -> array of thing tables
+    let things_children_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, parent_id: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let children = shared.db.get_thing_children(&parent_id).unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, thing) in children.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", thing.id.clone())?;
+                t.set("kind", thing.kind.as_str())?;
+                t.set("name", thing.name.clone())?;
+                t.set("qualified_name", thing.qualified_name.clone())?;
+                t.set("available", thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("things_children", things_children_fn)?;
+
+    // things_find(pattern) -> array of thing tables (glob search on qualified_name)
+    let things_find_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, pattern: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let things = shared
+                .db
+                .find_things_by_qualified_name(&pattern)
+                .unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, thing) in things.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", thing.id.clone())?;
+                t.set("kind", thing.kind.as_str())?;
+                t.set("name", thing.name.clone())?;
+                t.set("qualified_name", thing.qualified_name.clone())?;
+                t.set("available", thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("things_find", things_find_fn)?;
+
+    // things_by_kind(kind) -> array of thing tables
+    let things_by_kind_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, kind_str: String| {
+            use crate::db::things::ThingKind;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let kind = match ThingKind::parse(&kind_str) {
+                Some(k) => k,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let things = shared.db.list_things_by_kind(kind).unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, thing) in things.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", thing.id.clone())?;
+                t.set("kind", thing.kind.as_str())?;
+                t.set("name", thing.name.clone())?;
+                t.set("qualified_name", thing.qualified_name.clone())?;
+                t.set("available", thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("things_by_kind", things_by_kind_fn)?;
+
+    // equipped_list(context_id) -> array of equipped thing tables
+    let equipped_list_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, context_id: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let equipped = shared.db.get_equipped(&context_id).unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, eq) in equipped.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("context_id", eq.context_id.clone())?;
+                t.set("priority", eq.priority)?;
+                t.set("id", eq.thing.id.clone())?;
+                t.set("kind", eq.thing.kind.as_str())?;
+                t.set("name", eq.thing.name.clone())?;
+                t.set("qualified_name", eq.thing.qualified_name.clone())?;
+                t.set("available", eq.thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("equipped_list", equipped_list_fn)?;
+
+    // equipped_tools(context_id) -> array of equipped tool tables (only available tools)
+    let equipped_tools_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, context_id: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let tools_list = shared.db.get_equipped_tools(&context_id).unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, eq) in tools_list.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", eq.thing.id.clone())?;
+                t.set("name", eq.thing.name.clone())?;
+                t.set("qualified_name", eq.thing.qualified_name.clone())?;
+                t.set("description", eq.thing.description.clone())?;
+                t.set("priority", eq.priority)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("equipped_tools", equipped_tools_fn)?;
+
+    // equipped_merged_tools(room_id, agent_id) -> merged tools from room + agent
+    let equipped_merged_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (room_id, agent_id): (String, String)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let tools_list = shared
+                .db
+                .get_merged_equipped_tools(&room_id, &agent_id)
+                .unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, eq) in tools_list.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", eq.thing.id.clone())?;
+                t.set("name", eq.thing.name.clone())?;
+                t.set("qualified_name", eq.thing.qualified_name.clone())?;
+                t.set("description", eq.thing.description.clone())?;
+                t.set("context_id", eq.context_id.clone())?;
+                t.set("priority", eq.priority)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("equipped_merged_tools", equipped_merged_fn)?;
+
+    // equip(context_id, thing_id, priority) -> bool success
+    let equip_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |_lua, (context_id, thing_id, priority): (String, String, Option<f64>)| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return Ok(false),
+                };
+
+                shared
+                    .db
+                    .equip(&context_id, &thing_id, priority.unwrap_or(0.0))
+                    .is_ok()
+                    .then_some(true)
+                    .ok_or_else(|| mlua::Error::external("equip failed"))
+            },
+        )?
+    };
+    tools.set("equip", equip_fn)?;
+
+    // unequip(context_id, thing_id) -> bool success
+    let unequip_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, (context_id, thing_id): (String, String)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(false),
+            };
+
+            shared
+                .db
+                .unequip(&context_id, &thing_id)
+                .is_ok()
+                .then_some(true)
+                .ok_or_else(|| mlua::Error::external("unequip failed"))
+        })?
+    };
+    tools.set("unequip", unequip_fn)?;
+
+    // exits_list(room_thing_id) -> array of {direction, target_name, target_id}
+    let exits_list_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, room_thing_id: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(lua.create_table()?),
+            };
+
+            let exits = shared.db.get_exits_from(&room_thing_id).unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, exit) in exits.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("direction", exit.direction.clone())?;
+                t.set("target_name", exit.target.name.clone())?;
+                t.set("target_id", exit.target.id.clone())?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("exits_list", exits_list_fn)?;
+
+    // bootstrap_world() -> bool success (ensure world structure exists)
+    let bootstrap_world_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, ()| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(false),
+            };
+
+            Ok(shared.db.bootstrap_world().is_ok())
+        })?
+    };
+    tools.set("bootstrap_world", bootstrap_world_fn)?;
+
     // Register tool middleware functions
     crate::lua::tool_middleware::register_middleware_tools(lua, &tools, state.middleware.clone())?;
 

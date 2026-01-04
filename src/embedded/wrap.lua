@@ -259,6 +259,169 @@ local function format_inspirations_layer()
     return layer_result(table.concat(lines, "\n"))
 end
 
+--- Find room thing ID by name
+--- Returns the thing ID for the room, or nil if not found
+local function get_room_thing_id(room_name)
+    if not room_name then return nil end
+
+    -- Try to find room in things system
+    local things = tools.things_find("*")  -- Get all things
+    if things then
+        for _, thing in ipairs(things) do
+            if thing.kind == "room" and thing.name == room_name then
+                return thing.id
+            end
+        end
+    end
+
+    -- Try room_{name} format (bootstrap convention)
+    return "room_" .. room_name
+end
+
+--- Format the equipped tools layer
+--- Shows what tools are available in the current room
+local function format_equipped_layer()
+    local look = tools.look()
+    if not look or not look.room then
+        return layer_result("")
+    end
+
+    -- Get room thing ID
+    local room_id = get_room_thing_id(look.room)
+    if not room_id then
+        return layer_result("")
+    end
+
+    -- Get equipped tools for this room
+    local equipped = tools.equipped_tools(room_id)
+    if not equipped or #equipped == 0 then
+        -- Check defaults if room has nothing
+        equipped = tools.equipped_tools("defaults")
+    end
+
+    if not equipped or #equipped == 0 then
+        return layer_result("")
+    end
+
+    local lines = {"## Your Functions"}
+    lines[2] = "You have access to the following tools in this room:"
+    lines[3] = ""
+
+    for _, eq in ipairs(equipped) do
+        local name = eq.qualified_name or eq.name
+        local desc = eq.description or ""
+        if desc ~= "" then
+            table.insert(lines, "- **" .. name .. "**: " .. desc)
+        else
+            table.insert(lines, "- **" .. name .. "**")
+        end
+    end
+
+    return layer_result(table.concat(lines, "\n"))
+end
+
+--- Format internal tools layer (sshwarma:* only)
+--- Shows only the internal navigation and room tools
+local function format_internal_tools_layer()
+    local look = tools.look()
+    if not look or not look.room then
+        return layer_result("")
+    end
+
+    -- Get room thing ID
+    local room_id = get_room_thing_id(look.room)
+    if not room_id then
+        return layer_result("")
+    end
+
+    -- Get equipped tools and filter to sshwarma:* only
+    local equipped = tools.equipped_tools(room_id)
+    if not equipped or #equipped == 0 then
+        equipped = tools.equipped_tools("defaults")
+    end
+
+    if not equipped or #equipped == 0 then
+        return layer_result("")
+    end
+
+    local internal = {}
+    for _, eq in ipairs(equipped) do
+        local name = eq.qualified_name or eq.name
+        if name:match("^sshwarma:") then
+            table.insert(internal, eq)
+        end
+    end
+
+    if #internal == 0 then
+        return layer_result("")
+    end
+
+    local lines = {"## Room Functions"}
+    lines[2] = "Built-in sshwarma functions for navigating and interacting:"
+    lines[3] = ""
+
+    for _, eq in ipairs(internal) do
+        local display = (eq.qualified_name or eq.name):gsub("^sshwarma:", "")
+        local desc = eq.description or ""
+        if desc ~= "" then
+            table.insert(lines, "- **" .. display .. "**: " .. desc)
+        else
+            table.insert(lines, "- **" .. display .. "**")
+        end
+    end
+
+    return layer_result(table.concat(lines, "\n"))
+end
+
+--- Format external tools layer (non-sshwarma:* tools)
+--- Shows MCP tools and other external capabilities
+local function format_external_tools_layer()
+    local look = tools.look()
+    if not look or not look.room then
+        return layer_result("")
+    end
+
+    -- Get room thing ID
+    local room_id = get_room_thing_id(look.room)
+    if not room_id then
+        return layer_result("")
+    end
+
+    -- Get equipped tools and filter to non-sshwarma:* only
+    local equipped = tools.equipped_tools(room_id)
+    if not equipped or #equipped == 0 then
+        return layer_result("")
+    end
+
+    local external = {}
+    for _, eq in ipairs(equipped) do
+        local name = eq.qualified_name or eq.name
+        if not name:match("^sshwarma:") then
+            table.insert(external, eq)
+        end
+    end
+
+    if #external == 0 then
+        return layer_result("")
+    end
+
+    local lines = {"## External Tools"}
+    lines[2] = "MCP tools available in this room:"
+    lines[3] = ""
+
+    for _, eq in ipairs(external) do
+        local name = eq.qualified_name or eq.name
+        local desc = eq.description or ""
+        if desc ~= "" then
+            table.insert(lines, "- **" .. name .. "**: " .. desc)
+        else
+            table.insert(lines, "- **" .. name .. "**")
+        end
+    end
+
+    return layer_result(table.concat(lines, "\n"))
+end
+
 --------------------------------------------------------------------------------
 -- ANSI formatters for /look command (TTY output)
 --------------------------------------------------------------------------------
@@ -582,6 +745,22 @@ function WrapBuilder:inspirations()
     return self:add_source("inspirations", 70, format_inspirations_layer, false)
 end
 
+-- Built-in source: Equipped tools (all tools in room)
+-- Priority 5 puts it early in system prompt (after system, before model)
+function WrapBuilder:equipped()
+    return self:add_source("equipped", 5, format_equipped_layer, true)
+end
+
+-- Built-in source: Internal sshwarma tools only
+function WrapBuilder:internal_tools()
+    return self:add_source("internal_tools", 5, format_internal_tools_layer, true)
+end
+
+-- Built-in source: External MCP tools only
+function WrapBuilder:external_tools()
+    return self:add_source("external_tools", 6, format_external_tools_layer, true)
+end
+
 -- Built-in source: Named prompts
 -- Adds model prompts to system prompt section
 function WrapBuilder:prompts()
@@ -670,6 +849,7 @@ end
 function default_wrap(target_tokens)
     return wrap(target_tokens)
         :system()
+        :equipped()          -- Show equipped tools from inventory (before model identity)
         :model_identity()
         :prompts()           -- Named prompts for this model (new system)
         :user_with_prompts() -- User info with their context prompts
