@@ -7,10 +7,13 @@ mod schema;
 
 pub mod agents;
 pub mod buffers;
+pub mod equipped;
+pub mod exits;
 pub mod rooms;
 pub mod rows;
 pub mod rules;
 pub mod scripts;
+pub mod things;
 pub mod view;
 
 use anyhow::{Context, Result};

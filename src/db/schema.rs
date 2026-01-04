@@ -4,7 +4,7 @@
 //! Uses UUIDv7 for primary keys (time-sortable) and fractional REAL for ordering.
 
 /// Schema version for migrations
-pub const SCHEMA_VERSION: i32 = 100; // Start fresh at 100 for the rewrite
+pub const SCHEMA_VERSION: i32 = 101; // 101: Add things, equipped, exits tables
 
 /// Complete schema SQL
 pub const SCHEMA: &str = r#"
@@ -282,6 +282,73 @@ CREATE TABLE IF NOT EXISTS room_rules (
 
 CREATE INDEX IF NOT EXISTS idx_room_rules_room ON room_rules(room_id, enabled, priority);
 CREATE INDEX IF NOT EXISTS idx_room_rules_trigger ON room_rules(trigger_kind);
+
+--------------------------------------------------------------------------------
+-- THINGS
+-- Tree of everything: rooms, agents, MCPs, tools, data, references
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS things (
+    id TEXT PRIMARY KEY,                    -- UUIDv7
+    parent_id TEXT REFERENCES things(id),   -- NULL = root (world)
+    kind TEXT NOT NULL,                     -- 'container', 'room', 'agent', 'mcp', 'tool', 'data', 'reference'
+    name TEXT NOT NULL,                     -- display name
+    qualified_name TEXT,                    -- unique: 'holler:sample', 'sshwarma:look'
+    description TEXT,
+
+    -- Kind-specific content
+    content TEXT,                           -- For 'data' kind: inline content
+    uri TEXT,                               -- For 'reference' kind: external URI
+    metadata TEXT,                          -- JSON: vibe, config, schema, etc.
+
+    -- Status
+    available INTEGER DEFAULT 1,            -- MCP connected? Tool working?
+
+    -- Lifecycle
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
+    deleted_at INTEGER                      -- NULL = not deleted (soft delete)
+);
+
+CREATE INDEX IF NOT EXISTS idx_things_parent ON things(parent_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_things_kind ON things(kind) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_things_qualified ON things(qualified_name)
+    WHERE deleted_at IS NULL AND qualified_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_things_name ON things(name) WHERE deleted_at IS NULL;
+
+--------------------------------------------------------------------------------
+-- EQUIPPED
+-- What's active in a context (room or agent equips tools/data)
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS equipped (
+    context_id TEXT NOT NULL REFERENCES things(id),  -- room or agent thing
+    thing_id TEXT NOT NULL REFERENCES things(id),    -- tool or data thing
+    priority REAL DEFAULT 0.0,                       -- ordering (lower = first)
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER,                              -- NULL = equipped (soft delete)
+    PRIMARY KEY (context_id, thing_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipped_context ON equipped(context_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_equipped_thing ON equipped(thing_id) WHERE deleted_at IS NULL;
+
+--------------------------------------------------------------------------------
+-- EXITS
+-- Room navigation connections
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS exits (
+    from_thing_id TEXT NOT NULL REFERENCES things(id),  -- source room thing
+    direction TEXT NOT NULL,                            -- 'north', 'studio', 'archive'
+    to_thing_id TEXT NOT NULL REFERENCES things(id),    -- target room thing
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER,                                 -- NULL = active (soft delete)
+    PRIMARY KEY (from_thing_id, direction)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exits_from ON exits(from_thing_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_exits_to ON exits(to_thing_id) WHERE deleted_at IS NULL;
 "#;
 
 /// CTE for computing row depth (nesting level)
