@@ -121,8 +121,11 @@ pub fn normalize_schema_for_llamacpp(tool: &Tool) -> Tool {
 pub enum StreamChunk {
     /// Text content from the model (incremental)
     Text(String),
-    /// Tool being called (name)
-    ToolCall(String),
+    /// Tool being called (name and arguments JSON)
+    ToolCall {
+        name: String,
+        arguments: Option<String>,
+    },
     /// Tool result summary
     ToolResult(String),
     /// Stream completed successfully
@@ -616,8 +619,16 @@ impl LlmClient {
                                 let _ = $tx.send(StreamChunk::Text(text)).await;
                             }
                             StreamedAssistantContent::ToolCall(tool_call) => {
+                                // Convert serde_json::Value arguments to Option<String>
+                                let args_str = match &tool_call.function.arguments {
+                                    serde_json::Value::Null => None,
+                                    v => Some(v.to_string()),
+                                };
                                 let _ = $tx
-                                    .send(StreamChunk::ToolCall(tool_call.function.name.clone()))
+                                    .send(StreamChunk::ToolCall {
+                                        name: tool_call.function.name.clone(),
+                                        arguments: args_str,
+                                    })
                                     .await;
                             }
                             StreamedAssistantContent::ToolCallDelta { .. } => {}

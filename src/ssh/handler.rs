@@ -67,6 +67,45 @@ impl SshHandler {
         }
     }
 
+    /// Get set of equipped tool qualified names for a room
+    ///
+    /// Returns empty set if room has no equipped tools or things system not initialized.
+    /// This is used to filter which MCP/internal tools are available during @mention.
+    fn get_equipped_tool_names(&self, room_name: &str) -> std::collections::HashSet<String> {
+        use crate::db::things::ThingKind;
+
+        // Ensure world is bootstrapped
+        if self.state.db.bootstrap_world().is_err() {
+            return std::collections::HashSet::new();
+        }
+
+        // Find room thing by name
+        let room_thing = match self.state.db.find_things_by_name(room_name) {
+            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
+            Err(_) => None,
+        };
+
+        // Get room ID, falling back to convention
+        let room_id = room_thing
+            .map(|t| t.id)
+            .unwrap_or_else(|| format!("room_{}", room_name));
+
+        // Get equipped tools for this room
+        let equipped = match self.state.db.get_equipped_tools(&room_id) {
+            Ok(e) if !e.is_empty() => e,
+            _ => {
+                // Fall back to defaults
+                self.state.db.get_equipped_tools("defaults").unwrap_or_default()
+            }
+        };
+
+        // Build set of qualified names
+        equipped
+            .into_iter()
+            .filter_map(|eq| eq.thing.qualified_name)
+            .collect()
+    }
+
     /// Initialize session after authentication
     pub async fn init_session(&mut self, username: &str) {
         // Create player session
@@ -210,14 +249,26 @@ impl SshHandler {
         // Get MCP tools for rig agent
         let mcp_context = self.state.mcp.rig_tools().await;
 
-        // Build ToolServer with MCP + internal tools
+        // Get equipped tools for this room to filter available tools
+        let room_for_tools = room_name.clone().unwrap_or_else(|| "lobby".to_string());
+        let equipped_tools = self.get_equipped_tool_names(&room_for_tools);
+
+        // Build ToolServer with MCP + internal tools (filtered by equipped)
         let tool_server_handle = {
             let mut server = ToolServer::new();
 
-            // Add MCP tools if available (each tool paired with its peer)
+            // Add MCP tools if available (filtered by equipped status)
             if let Some(ref ctx) = mcp_context {
                 for (tool, peer) in ctx.tools.iter() {
-                    server = server.rmcp_tool(tool.clone(), peer.clone());
+                    // Convert MCP tool name to qualified format: server__tool -> server:tool
+                    let qualified = tool.name.replace("__", ":");
+
+                    // Check if this tool is equipped (or if no filtering is active)
+                    if equipped_tools.is_empty() || equipped_tools.contains(&qualified) {
+                        server = server.rmcp_tool(tool.clone(), peer.clone());
+                    } else {
+                        tracing::debug!("skipping MCP tool {} (not equipped)", qualified);
+                    }
                 }
             }
 
@@ -324,8 +375,25 @@ impl SshHandler {
 
         let model_short = model.short_name.clone();
         let row_id = placeholder_row_id.clone();
+        let room_for_tracking = room_name.clone();
 
         tokio::spawn(async move {
+            // Get buffer_id and agent_id for tool call tracking
+            let (buffer_id, agent_id) = if let Some(ref room) = room_for_tracking {
+                let buf_id = state.db.get_or_create_room_buffer(room)
+                    .map(|b| b.id)
+                    .unwrap_or_default();
+                let agt_id = state.db.get_or_create_model_agent(&model_short)
+                    .map(|a| a.id)
+                    .unwrap_or_default();
+                (buf_id, agt_id)
+            } else {
+                (String::new(), String::new())
+            };
+
+            // Track last tool name for result matching
+            let mut last_tool_name = String::new();
+
             // Create channel for streaming chunks
             let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamChunk>(32);
 
@@ -361,12 +429,16 @@ impl SshHandler {
                             }).await;
                         }
                     }
-                    StreamChunk::ToolCall(name) => {
+                    StreamChunk::ToolCall { name, arguments } => {
+                        last_tool_name = name.clone();
                         if let Some(ref row_id) = row_id {
                             let _ = update_tx.send(RowUpdate::ToolCall {
                                 row_id: row_id.clone(),
                                 tool_name: name,
+                                tool_args: arguments,
                                 model_name: model_short.clone(),
+                                buffer_id: buffer_id.clone(),
+                                agent_id: agent_id.clone(),
                             }).await;
                         }
                     }
@@ -374,7 +446,10 @@ impl SshHandler {
                         if let Some(ref row_id) = row_id {
                             let _ = update_tx.send(RowUpdate::ToolResult {
                                 row_id: row_id.clone(),
+                                tool_name: last_tool_name.clone(),
                                 summary,
+                                success: true, // rig tool calls that reach here succeeded
+                                buffer_id: buffer_id.clone(),
                             }).await;
                         }
                     }

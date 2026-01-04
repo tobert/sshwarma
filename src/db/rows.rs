@@ -107,6 +107,72 @@ impl Row {
         row
     }
 
+    /// Create a tool call row
+    ///
+    /// Represents an invocation of a tool by an agent.
+    /// - `qualified_name`: The qualified tool name (e.g., "sshwarma:look", "holler:sample")
+    /// - `input_json`: Optional JSON string of tool arguments
+    pub fn tool_call(
+        buffer_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        qualified_name: impl Into<String>,
+        input_json: Option<impl Into<String>>,
+    ) -> Self {
+        let qualified = qualified_name.into();
+        let mut row = Self::new(buffer_id, "tool.call");
+        row.source_agent_id = Some(agent_id.into());
+        row.content = Some(qualified.clone());
+        row.content_format = "json".to_string();
+        // Store input in content_meta as JSON with tool info
+        if let Some(input) = input_json {
+            row.content_meta = Some(format!(
+                r#"{{"tool":"{}","input":{}}}"#,
+                qualified,
+                input.into()
+            ));
+        } else {
+            row.content_meta = Some(format!(r#"{{"tool":"{}"}}"#, qualified));
+        }
+        row.mutable = true; // Can be updated with result
+        row
+    }
+
+    /// Create a tool result row
+    ///
+    /// Represents the result of a tool invocation.
+    /// - `qualified_name`: The qualified tool name that produced this result
+    /// - `result`: The tool's output (text or JSON)
+    /// - `success`: Whether the tool call succeeded
+    pub fn tool_result(
+        buffer_id: impl Into<String>,
+        qualified_name: impl Into<String>,
+        result: impl Into<String>,
+        success: bool,
+    ) -> Self {
+        let qualified = qualified_name.into();
+        let mut row = Self::new(buffer_id, "tool.result");
+        row.content = Some(result.into());
+        row.content_format = "json".to_string();
+        row.content_meta = Some(format!(
+            r#"{{"tool":"{}","success":{}}}"#,
+            qualified, success
+        ));
+        row
+    }
+
+    /// Create a tool call row that links to a parent row (the model message that invoked it)
+    pub fn tool_call_with_parent(
+        buffer_id: impl Into<String>,
+        parent_row_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        qualified_name: impl Into<String>,
+        input_json: Option<impl Into<String>>,
+    ) -> Self {
+        let mut row = Self::tool_call(buffer_id, agent_id, qualified_name, input_json);
+        row.parent_row_id = Some(parent_row_id.into());
+        row
+    }
+
     /// Finalize this row (marks it as complete)
     pub fn finalize(&mut self) {
         self.finalized_at = Some(now_ms());
@@ -760,6 +826,70 @@ impl Database {
             .context("failed to list rows since")?;
 
         Ok(rows)
+    }
+
+    /// List tool call rows for a buffer (tool.call and tool.result)
+    /// Returns rows ordered by position (oldest first)
+    pub fn list_tool_calls(&self, buffer_id: &str, limit: usize) -> Result<Vec<Row>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+            SELECT id, buffer_id, parent_row_id, position,
+                   source_agent_id, source_session_id,
+                   content_method, content_format, content_meta, content,
+                   collapsed, ephemeral, mutable, pinned, hidden,
+                   token_count, cost_usd, latency_ms,
+                   created_at, updated_at, finalized_at
+            FROM rows
+            WHERE buffer_id = ?1 AND content_method LIKE 'tool.%'
+            ORDER BY position DESC
+            LIMIT ?2
+            "#,
+            )
+            .context("failed to prepare tool calls query")?;
+
+        let rows = stmt
+            .query(params![buffer_id, limit as i64])?
+            .mapped(Self::row_from_sqlite)
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to list tool calls")?;
+
+        // Return in chronological order (oldest first)
+        let mut rows = rows;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// Count tool calls by qualified name for a buffer
+    /// Returns map of tool_name -> call_count
+    pub fn count_tool_calls(&self, buffer_id: &str) -> Result<std::collections::HashMap<String, usize>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT content, COUNT(*) as cnt
+            FROM rows
+            WHERE buffer_id = ?1 AND content_method = 'tool.call'
+            GROUP BY content
+            ORDER BY cnt DESC
+            "#,
+        )?;
+
+        let mut counts = std::collections::HashMap::new();
+        let rows = stmt.query_map(params![buffer_id], |row| {
+            let tool_name: Option<String> = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((tool_name.unwrap_or_default(), count as usize))
+        })?;
+
+        for row in rows {
+            let (name, count) = row?;
+            if !name.is_empty() {
+                counts.insert(name, count);
+            }
+        }
+
+        Ok(counts)
     }
 
     /// List rows by content method pattern (LIKE query)
