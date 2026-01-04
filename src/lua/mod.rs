@@ -85,6 +85,160 @@ const DEFAULT_SCREEN_SCRIPT: &str = include_str!("../embedded/screen.lua");
 /// Embedded wrap script for context composition
 const DEFAULT_WRAP_SCRIPT: &str = include_str!("../embedded/wrap.lua");
 
+/// Embedded regions module for flexible layout
+const REGIONS_MODULE: &str = include_str!("../embedded/ui/regions.lua");
+
+/// Embedded input module for raw byte handling and escape sequence parsing
+const INPUT_MODULE: &str = include_str!("../embedded/ui/input.lua");
+
+/// Embedded bootstrap script for custom require system
+const BOOTSTRAP_SCRIPT: &str = include_str!("../embedded/init.lua");
+
+/// Embedded inspect.lua library
+const INSPECT_MODULE: &str = include_str!("../embedded/lib/inspect.lua");
+
+/// Embedded commands dispatcher
+const COMMANDS_MODULE: &str = include_str!("../embedded/commands/init.lua");
+
+/// Embedded navigation commands
+const COMMANDS_NAV_MODULE: &str = include_str!("../embedded/commands/nav.lua");
+
+/// Embedded room management commands
+const COMMANDS_ROOM_MODULE: &str = include_str!("../embedded/commands/room.lua");
+
+/// Embedded inventory commands
+const COMMANDS_INVENTORY_MODULE: &str = include_str!("../embedded/commands/inventory.lua");
+
+/// Embedded journal commands
+const COMMANDS_JOURNAL_MODULE: &str = include_str!("../embedded/commands/journal.lua");
+
+/// Embedded MCP commands
+const COMMANDS_MCP_MODULE: &str = include_str!("../embedded/commands/mcp.lua");
+
+/// Embedded history commands
+const COMMANDS_HISTORY_MODULE: &str = include_str!("../embedded/commands/history.lua");
+
+/// Embedded debug commands
+const COMMANDS_DEBUG_MODULE: &str = include_str!("../embedded/commands/debug.lua");
+
+/// Embedded prompt commands
+const COMMANDS_PROMPT_MODULE: &str = include_str!("../embedded/commands/prompt.lua");
+
+/// Embedded rules commands
+const COMMANDS_RULES_MODULE: &str = include_str!("../embedded/commands/rules.lua");
+
+/// Registry of embedded Lua modules
+///
+/// Provides module lookup for the custom require system.
+/// Modules are included at compile time via include_str!.
+pub struct EmbeddedModules {
+    modules: std::collections::HashMap<String, &'static str>,
+}
+
+impl EmbeddedModules {
+    /// Create a new registry with all embedded modules
+    pub fn new() -> Self {
+        let mut modules = std::collections::HashMap::new();
+
+        // Library modules
+        modules.insert("inspect".to_string(), INSPECT_MODULE);
+
+        // UI modules
+        modules.insert("ui.regions".to_string(), REGIONS_MODULE);
+        modules.insert("ui.input".to_string(), INPUT_MODULE);
+
+        // Command modules
+        modules.insert("commands".to_string(), COMMANDS_MODULE);
+        modules.insert("commands.nav".to_string(), COMMANDS_NAV_MODULE);
+        modules.insert("commands.room".to_string(), COMMANDS_ROOM_MODULE);
+        modules.insert("commands.inventory".to_string(), COMMANDS_INVENTORY_MODULE);
+        modules.insert("commands.journal".to_string(), COMMANDS_JOURNAL_MODULE);
+        modules.insert("commands.mcp".to_string(), COMMANDS_MCP_MODULE);
+        modules.insert("commands.history".to_string(), COMMANDS_HISTORY_MODULE);
+        modules.insert("commands.debug".to_string(), COMMANDS_DEBUG_MODULE);
+        modules.insert("commands.prompt".to_string(), COMMANDS_PROMPT_MODULE);
+        modules.insert("commands.rules".to_string(), COMMANDS_RULES_MODULE);
+
+        Self { modules }
+    }
+
+    /// Get an embedded module by name
+    ///
+    /// Module names use dot notation: "ui.regions", "commands.nav"
+    pub fn get(&self, name: &str) -> Option<&'static str> {
+        self.modules.get(name).copied()
+    }
+
+    /// List all embedded module names (for debugging)
+    pub fn list(&self) -> Vec<&str> {
+        self.modules.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+impl Default for EmbeddedModules {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Register embedded modules and sshwarma table for custom require
+///
+/// Sets up the `sshwarma` global table with:
+/// - `sshwarma.config_path`: User's config directory
+/// - `sshwarma.get_embedded_module(name)`: Get embedded module source
+/// - `sshwarma.list_embedded_modules()`: List all embedded modules
+fn register_embedded_modules(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+
+    // Get or create sshwarma table (may already exist from register_sshwarma_call)
+    let sshwarma: Table = match globals.get::<Value>("sshwarma")? {
+        Value::Table(t) => t,
+        _ => {
+            let t = lua.create_table()?;
+            globals.set("sshwarma", t.clone())?;
+            t
+        }
+    };
+
+    // Set config_path
+    let config_path = paths::config_dir();
+    sshwarma.set("config_path", config_path.to_string_lossy().to_string())?;
+
+    // Create embedded modules registry
+    let embedded = EmbeddedModules::new();
+
+    // get_embedded_module(name) -> string or nil
+    let modules_for_get = embedded.modules.clone();
+    let get_embedded =
+        lua.create_function(move |_, modname: String| Ok(modules_for_get.get(&modname).copied()))?;
+    sshwarma.set("get_embedded_module", get_embedded)?;
+
+    // list_embedded_modules() -> table of names
+    let modules_for_list = embedded.modules.clone();
+    let list_embedded = lua.create_function(move |lua, ()| {
+        let names = lua.create_table()?;
+        for (i, name) in modules_for_list.keys().enumerate() {
+            names.set(i + 1, name.as_str())?;
+        }
+        Ok(names)
+    })?;
+    sshwarma.set("list_embedded_modules", list_embedded)?;
+
+    Ok(())
+}
+
+/// Run the bootstrap script to set up custom require system
+///
+/// This installs a custom searcher in package.searchers that:
+/// 1. Checks user config directory (~/.config/sshwarma/lua/)
+/// 2. Checks embedded modules
+/// 3. Falls through to standard package.path
+fn run_bootstrap(lua: &Lua) -> mlua::Result<()> {
+    lua.load(BOOTSTRAP_SCRIPT)
+        .set_name("embedded:init.lua")
+        .exec()
+}
+
 /// Path to user's custom screen script
 pub fn user_screen_script_path() -> PathBuf {
     paths::config_dir().join("screen.lua")
@@ -129,6 +283,13 @@ impl LuaRuntime {
         tools::register_sshwarma_call(&lua, tool_state.clone())
             .map_err(|e| anyhow::anyhow!("failed to register sshwarma.call: {}", e))?;
 
+        // Register embedded modules for custom require system
+        register_embedded_modules(&lua)
+            .map_err(|e| anyhow::anyhow!("failed to register embedded modules: {}", e))?;
+
+        // Run bootstrap to install custom searcher in package.searchers
+        run_bootstrap(&lua).map_err(|e| anyhow::anyhow!("failed to run Lua bootstrap: {}", e))?;
+
         // Register scroll/view functions
         register_scroll_functions(&lua)
             .map_err(|e| anyhow::anyhow!("failed to register scroll functions: {}", e))?;
@@ -138,6 +299,40 @@ impl LuaRuntime {
             .set_name("embedded:wrap.lua")
             .exec()
             .map_err(|e| anyhow::anyhow!("failed to load embedded wrap script: {}", e))?;
+
+        // Load the regions module (provides regions.define, regions.show, etc.)
+        // Store in package.loaded so require('ui.regions') works
+        let regions_chunk = lua
+            .load(REGIONS_MODULE)
+            .set_name("embedded:ui/regions.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded regions module: {}", e))?;
+
+        // Register in package.loaded for require() access
+        let package: Table = lua.globals().get("package")?;
+        let loaded: Table = package.get("loaded")?;
+        loaded.set("ui.regions", regions_chunk.clone())?;
+        lua.globals().set("regions", regions_chunk)?;
+
+        // Load the input module (provides escape sequence parsing, input buffer)
+        let input_chunk = lua
+            .load(INPUT_MODULE)
+            .set_name("embedded:ui/input.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded input module: {}", e))?;
+
+        loaded.set("ui.input", input_chunk.clone())?;
+        lua.globals().set("input", input_chunk)?;
+
+        // Load the inspect module (for debugging, table formatting)
+        let inspect_chunk = lua
+            .load(INSPECT_MODULE)
+            .set_name("embedded:lib/inspect.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded inspect module: {}", e))?;
+
+        loaded.set("inspect", inspect_chunk.clone())?;
+        lua.globals().set("inspect", inspect_chunk)?;
 
         // Load the default screen script
         lua.load(DEFAULT_SCREEN_SCRIPT)
@@ -403,11 +598,7 @@ impl LuaRuntime {
     ///
     /// # Returns
     /// WrapResult with system_prompt (stable, for preamble) and context (dynamic)
-    pub fn wrap(
-        &self,
-        wrap_state: WrapState,
-        target_tokens: usize,
-    ) -> Result<WrapResult> {
+    pub fn wrap(&self, wrap_state: WrapState, target_tokens: usize) -> Result<WrapResult> {
         use crate::lua::tools::SessionContext;
 
         // Save current session context (don't clobber screen's context)
@@ -575,13 +766,14 @@ impl LuaRuntime {
             .clone();
 
         // Convert dirty_tags to Lua table: {status = true, chat = true, ...}
-        let tags_table = self.lua.create_table().map_err(|e| {
-            anyhow::anyhow!("failed to create tags table: {}", e)
-        })?;
+        let tags_table = self
+            .lua
+            .create_table()
+            .map_err(|e| anyhow::anyhow!("failed to create tags table: {}", e))?;
         for tag in dirty_tags {
-            tags_table.set(tag.as_str(), true).map_err(|e| {
-                anyhow::anyhow!("failed to set tag {}: {}", tag, e)
-            })?;
+            tags_table
+                .set(tag.as_str(), true)
+                .map_err(|e| anyhow::anyhow!("failed to set tag {}: {}", tag, e))?;
         }
 
         // Create draw context for full screen
@@ -595,7 +787,10 @@ impl LuaRuntime {
             // Try old signature (tick, ctx) for backwards compatibility
             let old_result = func.call::<()>((tick, ctx));
             if let Err(old_e) = old_result {
-                let msg = format!("on_tick() call failed: {} (also tried old signature: {})", e, old_e);
+                let msg = format!(
+                    "on_tick() call failed: {} (also tried old signature: {})",
+                    e, old_e
+                );
                 record_lua_error("on_tick", &msg);
                 return Err(anyhow::anyhow!("{}", msg));
             }
@@ -712,6 +907,176 @@ impl LuaRuntime {
             .get::<Value>("on_tick")
             .map(|v| v != Value::Nil)
             .unwrap_or(false)
+    }
+
+    /// Check if the script defines an on_input() function
+    pub fn has_on_input(&self) -> bool {
+        self.lua
+            .globals()
+            .get::<Value>("on_input")
+            .map(|v| v != Value::Nil)
+            .unwrap_or(false)
+    }
+
+    /// Forward raw input bytes to Lua's on_input() function
+    ///
+    /// Lua parses escape sequences and manages the input buffer.
+    /// Returns an action table describing what Rust should do (execute, tab, quit, etc.)
+    ///
+    /// # Returns
+    /// - `Ok(Some(action))` - Action table with `type` field
+    /// - `Ok(None)` - No action needed (just redraw)
+    /// - `Err(_)` - Lua error
+    pub fn call_on_input(&self, bytes: &[u8]) -> Result<Option<InputAction>> {
+        let globals = self.lua.globals();
+
+        // Check if on_input function exists
+        let on_input_fn: Value = globals
+            .get("on_input")
+            .map_err(|e| anyhow::anyhow!("failed to get on_input: {}", e))?;
+
+        if on_input_fn == Value::Nil {
+            // No on_input function defined - this is unexpected but handle gracefully
+            debug!("on_input function not defined");
+            return Ok(None);
+        }
+
+        let func: mlua::Function = on_input_fn
+            .as_function()
+            .ok_or_else(|| anyhow::anyhow!("on_input is not a function"))?
+            .clone();
+
+        // Convert bytes to Lua string
+        let lua_bytes = self
+            .lua
+            .create_string(bytes)
+            .map_err(|e| anyhow::anyhow!("failed to create Lua string: {}", e))?;
+
+        // Call on_input(bytes) -> action table or nil
+        let result: Value = func.call(lua_bytes).map_err(|e| {
+            let msg = format!("on_input() call failed: {}", e);
+            record_lua_error("on_input", &msg);
+            anyhow::anyhow!("{}", msg)
+        })?;
+
+        // Parse the action table
+        match result {
+            Value::Nil => Ok(None),
+            Value::Table(t) => {
+                let action_type: String = t
+                    .get("type")
+                    .map_err(|e| anyhow::anyhow!("action missing 'type': {}", e))?;
+
+                let action = match action_type.as_str() {
+                    "none" => InputAction::None,
+                    "redraw" => InputAction::Redraw,
+                    "execute" => {
+                        let text: String = t
+                            .get("text")
+                            .map_err(|e| anyhow::anyhow!("execute action missing 'text': {}", e))?;
+                        InputAction::Execute(text)
+                    }
+                    "tab" => InputAction::Tab,
+                    "clear_screen" => InputAction::ClearScreen,
+                    "quit" => InputAction::Quit,
+                    "escape" => InputAction::Escape,
+                    "page_up" => InputAction::PageUp,
+                    "page_down" => InputAction::PageDown,
+                    _ => {
+                        warn!("unknown input action type: {}", action_type);
+                        InputAction::None
+                    }
+                };
+
+                Ok(Some(action))
+            }
+            _ => {
+                warn!("on_input returned unexpected type: {:?}", result);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Dispatch a command through Lua's command system
+    ///
+    /// Loads the commands module and calls `commands.dispatch(name, args)`.
+    /// Returns the result table converted to CommandResult.
+    pub fn call_dispatch_command(&self, name: &str, args: &str) -> Result<Option<CommandResult>> {
+        // Load the commands module via embedded module system
+        let commands: Table = self
+            .lua
+            .load(
+                r#"
+                local code = sshwarma.get_embedded_module('commands')
+                if code then
+                    return load(code, "@embedded/commands/init.lua")()
+                end
+                return nil
+            "#,
+            )
+            .eval()
+            .map_err(|e| anyhow::anyhow!("failed to load commands module: {}", e))?;
+
+        // Check if dispatch function exists
+        let dispatch_fn: mlua::Function = commands
+            .get("dispatch")
+            .map_err(|e| anyhow::anyhow!("commands.dispatch not found: {}", e))?;
+
+        // Call dispatch(name, args)
+        let result: Table = dispatch_fn
+            .call::<Table>((name, args))
+            .map_err(|e| anyhow::anyhow!("commands.dispatch failed: {}", e))?;
+
+        // Parse result table {text, mode, title?}
+        let text: String = result.get("text").unwrap_or_default();
+        let mode: String = result.get("mode").unwrap_or_else(|_| "notification".to_string());
+        let title: Option<String> = result.get("title").ok();
+
+        Ok(Some(CommandResult { text, mode, title }))
+    }
+}
+
+/// Action returned by Lua input handler
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputAction {
+    /// No action needed
+    None,
+    /// Redraw the input line
+    Redraw,
+    /// Execute the given line
+    Execute(String),
+    /// Tab completion requested
+    Tab,
+    /// Clear screen requested
+    ClearScreen,
+    /// Quit (Ctrl+D on empty line)
+    Quit,
+    /// Escape key pressed (dismiss overlay, cancel, etc.)
+    Escape,
+    /// Scroll up one page
+    PageUp,
+    /// Scroll down one page
+    PageDown,
+}
+
+/// Result from Lua command dispatch
+#[derive(Debug, Clone)]
+pub struct CommandResult {
+    /// Output text to display
+    pub text: String,
+    /// Display mode: "overlay" or "notification"
+    pub mode: String,
+    /// Optional title for overlay mode
+    pub title: Option<String>,
+}
+
+impl Default for CommandResult {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            mode: "notification".to_string(),
+            title: None,
+        }
     }
 }
 
@@ -849,7 +1214,10 @@ mod tests {
         // Buffer should have content from drawing
         let buf = render_buffer.lock().unwrap();
         let output = buf.to_ansi();
-        assert!(!output.is_empty(), "Buffer should have content after on_tick");
+        assert!(
+            !output.is_empty(),
+            "Buffer should have content after on_tick"
+        );
     }
 
     #[test]
@@ -880,6 +1248,183 @@ mod tests {
         let value = cache.get_data_blocking("test_key");
         assert!(value.is_some());
         assert_eq!(value.unwrap(), serde_json::json!({"foo": "bar"}));
+    }
+
+    // =========================================================================
+    // Custom require system tests
+    // =========================================================================
+
+    #[test]
+    fn test_embedded_modules_registry() {
+        let modules = EmbeddedModules::new();
+
+        // Should have inspect module
+        assert!(
+            modules.get("inspect").is_some(),
+            "inspect module should exist"
+        );
+
+        // Should have ui.regions module
+        assert!(
+            modules.get("ui.regions").is_some(),
+            "ui.regions module should exist"
+        );
+
+        // Should have ui.input module
+        assert!(
+            modules.get("ui.input").is_some(),
+            "ui.input module should exist"
+        );
+
+        // List should include all modules
+        let list = modules.list();
+        assert!(list.len() >= 3, "should have at least 3 modules");
+    }
+
+    #[test]
+    fn test_inspect_available() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // inspect is loaded as a global by LuaRuntime::new()
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                return type(inspect) == 'table' and type(inspect.inspect) == 'function'
+            "#,
+            )
+            .eval()
+            .expect("inspect global should be available");
+
+        assert!(result, "inspect should be a table with inspect function");
+    }
+
+    #[test]
+    fn test_inspect_functionality() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test that inspect actually formats tables
+        let result: String = runtime
+            .lua
+            .load(
+                r#"
+                return inspect({a = 1, b = "hello"})
+            "#,
+            )
+            .eval()
+            .expect("inspect should format table");
+
+        assert!(result.contains("a = 1"), "should contain 'a = 1'");
+        assert!(
+            result.contains("b = \"hello\""),
+            "should contain 'b = \"hello\"'"
+        );
+    }
+
+    #[test]
+    fn test_sshwarma_config_path() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // sshwarma.config_path should be set
+        let result: String = runtime
+            .lua
+            .load(r#"return sshwarma.config_path"#)
+            .eval()
+            .expect("sshwarma.config_path should be set");
+
+        assert!(
+            result.contains("sshwarma"),
+            "config_path should contain 'sshwarma'"
+        );
+    }
+
+    #[test]
+    fn test_sshwarma_list_embedded_modules() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // sshwarma.list_embedded_modules() should return module names
+        let count: i64 = runtime
+            .lua
+            .load(
+                r#"
+                local modules = sshwarma.list_embedded_modules()
+                return #modules
+            "#,
+            )
+            .eval()
+            .expect("list_embedded_modules should work");
+
+        assert!(
+            count >= 3,
+            "should list at least 3 embedded modules, got {}",
+            count
+        );
+    }
+
+    #[test]
+    fn test_sshwarma_get_embedded_module() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // sshwarma.get_embedded_module('inspect') should return source code
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local code = sshwarma.get_embedded_module('inspect')
+                return type(code) == 'string' and #code > 100
+            "#,
+            )
+            .eval()
+            .expect("get_embedded_module should work");
+
+        assert!(
+            result,
+            "get_embedded_module('inspect') should return source code"
+        );
+    }
+
+    #[test]
+    fn test_require_ui_regions() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // require 'ui.regions' should work via custom searcher
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local regions = require 'ui.regions'
+                return type(regions) == 'table'
+            "#,
+            )
+            .eval()
+            .expect("require ui.regions should work");
+
+        assert!(result, "ui.regions should be a table");
+    }
+
+    #[test]
+    fn test_custom_searcher_or_embedded_fallback() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // In standard Lua, package.searchers has our custom searcher
+        // In Luau, package.searchers is nil but sshwarma.get_embedded_module works
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                -- Either custom searcher is installed OR embedded module fallback works
+                local has_searchers = package.searchers ~= nil
+                local has_embedded = sshwarma and sshwarma.get_embedded_module ~= nil
+                return has_searchers or has_embedded
+            "#,
+            )
+            .eval()
+            .expect("should check module loading capability");
+
+        assert!(
+            result,
+            "should have either custom searcher or embedded module fallback"
+        );
     }
 
     // =========================================================================

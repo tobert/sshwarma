@@ -42,12 +42,12 @@ pub struct InputState {
     pub prompt: String,
 }
 
-/// Overlay buffer state for modal displays (help, command output, etc.)
+/// Region content for overlay regions (help, command output, etc.)
 ///
-/// When active, renders over the chat area. Dismissed with Escape.
+/// Stored per-region-name. Visibility is controlled via Lua regions module.
 #[derive(Clone, Default)]
-pub struct OverlayState {
-    /// Title shown at top of overlay (e.g., "Help")
+pub struct RegionContent {
+    /// Title shown at top of region (e.g., "Help")
     pub title: String,
     /// Content lines (pre-split for rendering)
     pub lines: Vec<String>,
@@ -80,9 +80,9 @@ pub struct LuaToolState {
     dirty: Arc<DirtyState>,
     /// Chat scroll state (persists across renders)
     chat_scroll: crate::ui::scroll::LuaScrollState,
-    /// Overlay buffer state (help, command output, etc.)
-    /// None = no overlay active
-    overlay: Arc<std::sync::RwLock<Option<OverlayState>>>,
+    /// Region contents (keyed by region name like "overlay", "help", etc.)
+    /// Content is stored here, visibility is managed via Lua regions module
+    region_contents: Arc<std::sync::RwLock<std::collections::HashMap<String, RegionContent>>>,
 }
 
 impl LuaToolState {
@@ -98,7 +98,7 @@ impl LuaToolState {
             input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
             dirty: Arc::new(DirtyState::new()),
             chat_scroll: crate::ui::scroll::LuaScrollState::new(),
-            overlay: Arc::new(std::sync::RwLock::new(None)),
+            region_contents: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -140,61 +140,93 @@ impl LuaToolState {
             .unwrap_or_default()
     }
 
-    /// Show an overlay with the given title and content
+    /// Show content in a named region (overlay, help, etc.)
     ///
-    /// Content is split into lines for scrolling. Replaces any existing overlay.
-    pub fn show_overlay(&self, title: &str, content: &str) {
+    /// Content is split into lines for scrolling. Sets content and marks region visible.
+    /// Visibility is controlled via the Lua regions module.
+    pub fn show_region(&self, region: &str, title: &str, content: &str) {
         let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        if let Ok(mut guard) = self.overlay.write() {
-            *guard = Some(OverlayState {
-                title: title.to_string(),
-                lines,
-                scroll_offset: 0,
-            });
+        if let Ok(mut guard) = self.region_contents.write() {
+            guard.insert(
+                region.to_string(),
+                RegionContent {
+                    title: title.to_string(),
+                    lines,
+                    scroll_offset: 0,
+                },
+            );
         }
-        self.mark_dirty("overlay");
+        self.mark_dirty(region);
     }
 
-    /// Close the overlay
-    pub fn close_overlay(&self) {
-        if let Ok(mut guard) = self.overlay.write() {
-            *guard = None;
+    /// Hide a region and clear its content
+    pub fn hide_region(&self, region: &str) {
+        if let Ok(mut guard) = self.region_contents.write() {
+            guard.remove(region);
         }
-        self.mark_dirty("overlay");
+        self.mark_dirty(region);
     }
 
-    /// Check if an overlay is currently active
-    pub fn has_overlay(&self) -> bool {
-        self.overlay
+    /// Check if a region has content
+    pub fn has_region_content(&self, region: &str) -> bool {
+        self.region_contents
             .read()
-            .map(|guard| guard.is_some())
+            .map(|guard| guard.contains_key(region))
             .unwrap_or(false)
     }
 
-    /// Get the current overlay state
-    pub fn overlay_state(&self) -> Option<OverlayState> {
-        self.overlay.read().ok().and_then(|guard| guard.clone())
+    /// Get a region's content
+    pub fn region_content(&self, region: &str) -> Option<RegionContent> {
+        self.region_contents
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(region).cloned())
     }
 
-    /// Scroll overlay up by n lines
+    /// Scroll a region up by n lines
+    pub fn region_scroll_up(&self, region: &str, n: usize) {
+        if let Ok(mut guard) = self.region_contents.write() {
+            if let Some(ref mut content) = guard.get_mut(region) {
+                content.scroll_offset = content.scroll_offset.saturating_sub(n);
+            }
+        }
+        self.mark_dirty(region);
+    }
+
+    /// Scroll a region down by n lines
+    pub fn region_scroll_down(&self, region: &str, n: usize, viewport_height: usize) {
+        if let Ok(mut guard) = self.region_contents.write() {
+            if let Some(ref mut content) = guard.get_mut(region) {
+                let max_scroll = content.lines.len().saturating_sub(viewport_height);
+                content.scroll_offset = (content.scroll_offset + n).min(max_scroll);
+            }
+        }
+        self.mark_dirty(region);
+    }
+
+    /// Compatibility wrapper: show overlay (uses "overlay" region)
+    pub fn show_overlay(&self, title: &str, content: &str) {
+        self.show_region("overlay", title, content);
+    }
+
+    /// Compatibility wrapper: close overlay (hides "overlay" region)
+    pub fn close_overlay(&self) {
+        self.hide_region("overlay");
+    }
+
+    /// Compatibility wrapper: check if overlay has content
+    pub fn has_overlay(&self) -> bool {
+        self.has_region_content("overlay")
+    }
+
+    /// Compatibility wrapper: scroll overlay up
     pub fn overlay_scroll_up(&self, n: usize) {
-        if let Ok(mut guard) = self.overlay.write() {
-            if let Some(ref mut overlay) = *guard {
-                overlay.scroll_offset = overlay.scroll_offset.saturating_sub(n);
-            }
-        }
-        self.mark_dirty("overlay");
+        self.region_scroll_up("overlay", n);
     }
 
-    /// Scroll overlay down by n lines
+    /// Compatibility wrapper: scroll overlay down
     pub fn overlay_scroll_down(&self, n: usize, viewport_height: usize) {
-        if let Ok(mut guard) = self.overlay.write() {
-            if let Some(ref mut overlay) = *guard {
-                let max_scroll = overlay.lines.len().saturating_sub(viewport_height);
-                overlay.scroll_offset = (overlay.scroll_offset + n).min(max_scroll);
-            }
-        }
-        self.mark_dirty("overlay");
+        self.region_scroll_down("overlay", n, viewport_height);
     }
 
     /// Get a reference to the tool middleware
@@ -285,7 +317,8 @@ impl LuaToolState {
 
     /// Get a clone of the session context if set
     pub fn session_context(&self) -> Option<SessionContext> {
-        let ctx = self.session_context
+        let ctx = self
+            .session_context
             .read()
             .ok()
             .and_then(|guard| guard.clone());
@@ -608,6 +641,20 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("input", input_fn)?;
 
+    // tools.set_input(text, cursor, prompt) -> nil
+    // Update the input state (called from Lua input module)
+    let set_input_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |_lua, (text, cursor, prompt): (String, usize, Option<String>)| {
+                let prompt = prompt.unwrap_or_else(|| "> ".to_string());
+                state.set_input(&text, cursor, &prompt);
+                Ok(())
+            },
+        )?
+    };
+    tools.set("set_input", set_input_fn)?;
+
     // tools.scroll() -> persistent LuaScrollState
     // Returns the same scroll state across renders so position is maintained
     let scroll_fn = {
@@ -639,22 +686,57 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("mark_all_dirty", mark_all_dirty_fn)?;
 
-    // tools.overlay() -> {title, lines, scroll_offset} or nil
-    // Get current overlay state for rendering
-    let overlay_fn = {
+    // tools.region_content(name) -> {title, lines, scroll_offset, total_lines} or nil
+    // Get content for a named region
+    let region_content_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, ()| {
-            if let Some(overlay) = state.overlay_state() {
+        lua.create_function(move |lua, name: String| {
+            if let Some(content) = state.region_content(&name) {
                 let result = lua.create_table()?;
-                result.set("title", overlay.title)?;
+                result.set("title", content.title)?;
 
                 let lines_table = lua.create_table()?;
-                for (i, line) in overlay.lines.iter().enumerate() {
+                for (i, line) in content.lines.iter().enumerate() {
                     lines_table.set(i + 1, line.clone())?;
                 }
                 result.set("lines", lines_table)?;
-                result.set("scroll_offset", overlay.scroll_offset)?;
-                result.set("total_lines", overlay.lines.len())?;
+                result.set("scroll_offset", content.scroll_offset)?;
+                result.set("total_lines", content.lines.len())?;
+
+                Ok(Value::Table(result))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?
+    };
+    tools.set("region_content", region_content_fn)?;
+
+    // tools.hide_region(name) -> nil
+    // Hide a region and clear its content
+    let hide_region_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, name: String| {
+            state.hide_region(&name);
+            Ok(())
+        })?
+    };
+    tools.set("hide_region", hide_region_fn)?;
+
+    // Backwards compatibility: tools.overlay() uses "overlay" region
+    let overlay_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            if let Some(content) = state.region_content("overlay") {
+                let result = lua.create_table()?;
+                result.set("title", content.title)?;
+
+                let lines_table = lua.create_table()?;
+                for (i, line) in content.lines.iter().enumerate() {
+                    lines_table.set(i + 1, line.clone())?;
+                }
+                result.set("lines", lines_table)?;
+                result.set("scroll_offset", content.scroll_offset)?;
+                result.set("total_lines", content.lines.len())?;
 
                 Ok(Value::Table(result))
             } else {
@@ -664,12 +746,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("overlay", overlay_fn)?;
 
-    // tools.close_overlay() -> nil
-    // Close the overlay (if open)
+    // Backwards compatibility: tools.close_overlay() hides "overlay" region
     let close_overlay_fn = {
         let state = state.clone();
         lua.create_function(move |_lua, ()| {
-            state.close_overlay();
+            state.hide_region("overlay");
             Ok(())
         })?
     };
@@ -718,7 +799,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 // Get buffer for room
                 if let Ok(buffer) = shared.db.get_or_create_room_buffer(&room_name) {
                     // Get recent rows (fetch more than limit to account for filtering)
-                    let fetch_limit = if agent_filter.is_some() { limit * 3 } else { limit };
+                    let fetch_limit = if agent_filter.is_some() {
+                        limit * 3
+                    } else {
+                        limit
+                    };
                     if let Ok(rows) = shared.db.list_recent_buffer_rows(&buffer.id, fetch_limit) {
                         let mut idx = 1;
                         let mut count = 0;
@@ -762,7 +847,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             row.set("author", author)?;
                             row.set("content", text)?;
                             row.set("timestamp", db_row.created_at)?;
-                            row.set("is_model", is_message && db_row.content_method == "message.model" || is_thinking)?;
+                            row.set(
+                                "is_model",
+                                is_message && db_row.content_method == "message.model"
+                                    || is_thinking,
+                            )?;
                             row.set("is_thinking", is_thinking)?;
                             row.set("is_streaming", is_thinking && db_row.finalized_at.is_none())?;
                             list.set(idx, row)?;
@@ -777,6 +866,144 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("history", history_fn)?;
+
+    // tools.history_tools(limit?) -> [{tool, args, result, success, timestamp}]
+    // Returns recent MCP tool calls
+    let history_tools_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, limit: Option<usize>| {
+            let limit = limit.unwrap_or(20);
+            let list = lua.create_table()?;
+
+            // Get room from session context
+            let ctx = state.session_context();
+            let room_name = match ctx.and_then(|c| c.room_name) {
+                Some(name) => name,
+                None => return Ok(list),
+            };
+
+            if let Some(shared) = state.shared_state() {
+                // Get buffer for room
+                if let Ok(buffer) = shared.db.get_or_create_room_buffer(&room_name) {
+                    // Get recent tool calls
+                    if let Ok(rows) = shared.db.list_tool_calls(&buffer.id, limit) {
+                        let mut idx = 1;
+                        let mut current_call: Option<mlua::Table> = None;
+                        let mut current_tool: Option<String> = None;
+
+                        for row in rows {
+                            if row.content_method == "tool.call" {
+                                // Start a new tool call entry
+                                if let Some(call) = current_call.take() {
+                                    list.set(idx, call)?;
+                                    idx += 1;
+                                }
+
+                                let entry = lua.create_table()?;
+                                let tool_name = row.content.clone().unwrap_or_default();
+                                entry.set("tool", tool_name.clone())?;
+                                entry.set("timestamp", row.created_at)?;
+
+                                // Get args from content_meta if available
+                                if let Some(ref meta) = row.content_meta {
+                                    if let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(meta)
+                                    {
+                                        if let Some(args) = parsed.get("input") {
+                                            entry.set("args", args.to_string())?;
+                                        }
+                                    }
+                                }
+
+                                current_tool = Some(tool_name);
+                                current_call = Some(entry);
+                            } else if row.content_method == "tool.result" {
+                                // Attach result to current call if tool names match
+                                if let (Some(ref call), Some(ref tool)) =
+                                    (&current_call, &current_tool)
+                                {
+                                    let result_tool = row.content.clone().unwrap_or_default();
+                                    if result_tool == *tool {
+                                        if let Some(ref meta) = row.content_meta {
+                                            if let Ok(parsed) =
+                                                serde_json::from_str::<serde_json::Value>(meta)
+                                            {
+                                                if let Some(result) = parsed.get("result") {
+                                                    let result_str = match result {
+                                                        serde_json::Value::String(s) => s.clone(),
+                                                        _ => result.to_string(),
+                                                    };
+                                                    call.set("result", result_str)?;
+                                                }
+                                                if let Some(success) = parsed.get("success") {
+                                                    call.set(
+                                                        "success",
+                                                        success.as_bool().unwrap_or(true),
+                                                    )?;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Don't forget the last call
+                        if let Some(call) = current_call.take() {
+                            list.set(idx, call)?;
+                        }
+                    }
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("history_tools", history_tools_fn)?;
+
+    // tools.history_stats() -> {total, tools = [{name, count}]}
+    // Returns tool usage statistics
+    let history_stats_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+            result.set("total", 0)?;
+
+            // Get room from session context
+            let ctx = state.session_context();
+            let room_name = match ctx.and_then(|c| c.room_name) {
+                Some(name) => name,
+                None => return Ok(result),
+            };
+
+            if let Some(shared) = state.shared_state() {
+                // Get buffer for room
+                if let Ok(buffer) = shared.db.get_or_create_room_buffer(&room_name) {
+                    // Get tool call counts
+                    if let Ok(counts) = shared.db.count_tool_calls(&buffer.id) {
+                        let tools_table = lua.create_table()?;
+                        let mut total = 0usize;
+                        let mut idx = 1;
+
+                        for (tool_name, count) in counts {
+                            let entry = lua.create_table()?;
+                            entry.set("name", tool_name)?;
+                            entry.set("count", count)?;
+                            tools_table.set(idx, entry)?;
+                            idx += 1;
+                            total += count;
+                        }
+
+                        result.set("total", total)?;
+                        result.set("tools", tools_table)?;
+                    }
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("history_stats", history_stats_fn)?;
 
     // tools.journal(kind, n) -> [{kind, author, content, timestamp}]
     let journal_fn = {
@@ -1353,7 +1580,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, parent_id: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let children = shared.db.get_thing_children(&parent_id).unwrap_or_default();
@@ -1378,7 +1605,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, pattern: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let things = shared
@@ -1408,12 +1635,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let kind = match ThingKind::parse(&kind_str) {
                 Some(k) => k,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let things = shared.db.list_things_by_kind(kind).unwrap_or_default();
@@ -1438,7 +1665,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, context_id: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let equipped = shared.db.get_equipped(&context_id).unwrap_or_default();
@@ -1465,10 +1692,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, context_id: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
-            let tools_list = shared.db.get_equipped_tools(&context_id).unwrap_or_default();
+            let tools_list = shared
+                .db
+                .get_equipped_tools(&context_id)
+                .unwrap_or_default();
             let result = lua.create_table()?;
             for (i, eq) in tools_list.iter().enumerate() {
                 let t = lua.create_table()?;
@@ -1490,7 +1720,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, (room_id, agent_id): (String, String)| {
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let tools_list = shared
@@ -1559,7 +1789,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         lua.create_function(move |lua, room_thing_id: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
-                None => return Ok(lua.create_table()?),
+                None => return lua.create_table(),
             };
 
             let exits = shared.db.get_exits_from(&room_thing_id).unwrap_or_default();
@@ -1575,6 +1805,1697 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("exits_list", exits_list_fn)?;
+
+    // =========================================================================
+    // Command Operations (structured data, not formatted strings)
+    // =========================================================================
+
+    // tools.join(room_name) -> {success, room, error}
+    let join_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, room_name: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::join
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::join(
+                    &shared,
+                    &session.username,
+                    session.room_name.as_deref(),
+                    &room_name,
+                ))
+            }) {
+                Ok(room_summary) => {
+                    result.set("success", true)?;
+                    let room_table = lua.create_table()?;
+                    room_table.set("name", room_summary.name)?;
+                    if let Some(desc) = room_summary.description {
+                        room_table.set("description", desc)?;
+                    }
+                    if let Some(vibe) = room_summary.vibe {
+                        room_table.set("vibe", vibe)?;
+                    }
+                    let users_table = lua.create_table()?;
+                    for (i, user) in room_summary.users.iter().enumerate() {
+                        users_table.set(i + 1, user.clone())?;
+                    }
+                    room_table.set("users", users_table)?;
+                    let models_table = lua.create_table()?;
+                    for (i, model) in room_summary.models.iter().enumerate() {
+                        models_table.set(i + 1, model.clone())?;
+                    }
+                    room_table.set("models", models_table)?;
+                    result.set("room", room_table)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("join", join_fn)?;
+
+    // tools.create(room_name, description?) -> {success, room, error}
+    let create_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |lua, (room_name, _description): (String, Option<String>)| {
+                let result = lua.create_table()?;
+
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no shared state")?;
+                        return Ok(result);
+                    }
+                };
+
+                let session = match state.session_context() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no session context")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Use ops::create_room
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(crate::ops::create_room(
+                        &shared,
+                        &session.username,
+                        &room_name,
+                        session.room_name.as_deref(),
+                    ))
+                }) {
+                    Ok(room_summary) => {
+                        result.set("success", true)?;
+                        let room_table = lua.create_table()?;
+                        room_table.set("name", room_summary.name)?;
+                        result.set("room", room_table)?;
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                    }
+                }
+
+                Ok(result)
+            },
+        )?
+    };
+    tools.set("create", create_fn)?;
+
+    // tools.leave() -> {success, error}
+    let leave_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::leave
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::leave(
+                    &shared,
+                    &session.username,
+                    &room_name,
+                ))
+            }) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("leave", leave_fn)?;
+
+    // tools.go(direction) -> {success, room, error}
+    let go_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, direction: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::go
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::go(
+                    &shared,
+                    &session.username,
+                    &room_name,
+                    &direction,
+                ))
+            }) {
+                Ok(room_summary) => {
+                    result.set("success", true)?;
+                    let room_table = lua.create_table()?;
+                    room_table.set("name", room_summary.name)?;
+                    if let Some(desc) = room_summary.description {
+                        room_table.set("description", desc)?;
+                    }
+                    if let Some(vibe) = room_summary.vibe {
+                        room_table.set("vibe", vibe)?;
+                    }
+                    result.set("room", room_table)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("go", go_fn)?;
+
+    // tools.dig(direction, target_room, bidirectional?) -> {success, reverse, error}
+    let dig_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |lua, (direction, target_room, _bidirectional): (String, String, Option<bool>)| {
+                let result = lua.create_table()?;
+
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no shared state")?;
+                        return Ok(result);
+                    }
+                };
+
+                let session = match state.session_context() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no session context")?;
+                        return Ok(result);
+                    }
+                };
+
+                let room_name = match session.room_name {
+                    Some(ref r) => r.clone(),
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "not in a room")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Use ops::dig (always creates bidirectional)
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(crate::ops::dig(
+                        &shared,
+                        &room_name,
+                        &direction,
+                        &target_room,
+                    ))
+                }) {
+                    Ok(reverse) => {
+                        result.set("success", true)?;
+                        result.set("reverse", reverse)?;
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                    }
+                }
+
+                Ok(result)
+            },
+        )?
+    };
+    tools.set("dig", dig_fn)?;
+
+    // tools.fork(new_name) -> {success, room, error}
+    let fork_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, new_name: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::fork_room
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::fork_room(
+                    &shared,
+                    &session.username,
+                    &room_name,
+                    &new_name,
+                ))
+            }) {
+                Ok(room_summary) => {
+                    result.set("success", true)?;
+                    let room_table = lua.create_table()?;
+                    room_table.set("name", room_summary.name)?;
+                    if let Some(vibe) = room_summary.vibe {
+                        room_table.set("vibe", vibe)?;
+                    }
+                    result.set("room", room_table)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("fork", fork_fn)?;
+
+    // tools.inventory() -> {equipped = [...], available = [...]}
+    let inventory_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    return Ok(result);
+                }
+            };
+
+            // Get room thing ID if in a room
+            let room_name = session.room_name.as_deref().unwrap_or("lobby");
+            let context_id = room_name.to_string(); // Use room name as context_id
+
+            // Get equipped tools
+            let equipped_table = lua.create_table()?;
+            if let Ok(equipped) = shared.db.get_equipped_tools(&context_id) {
+                for (i, eq) in equipped.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("id", eq.thing.id.clone())?;
+                    t.set("name", eq.thing.name.clone())?;
+                    t.set("qualified_name", eq.thing.qualified_name.clone())?;
+                    t.set("description", eq.thing.description.clone())?;
+                    t.set("priority", eq.priority)?;
+                    equipped_table.set(i + 1, t)?;
+                }
+            }
+            result.set("equipped", equipped_table)?;
+
+            // Get available tools (all tools from things table)
+            let available_table = lua.create_table()?;
+            if let Ok(tools_list) = shared
+                .db
+                .list_things_by_kind(crate::db::things::ThingKind::Tool)
+            {
+                for (i, thing) in tools_list.iter().enumerate() {
+                    if thing.available {
+                        let t = lua.create_table()?;
+                        t.set("id", thing.id.clone())?;
+                        t.set("name", thing.name.clone())?;
+                        t.set("qualified_name", thing.qualified_name.clone())?;
+                        t.set("description", thing.description.clone())?;
+                        available_table.set(i + 1, t)?;
+                    }
+                }
+            }
+            result.set("available", available_table)?;
+
+            Ok(result)
+        })?
+    };
+    tools.set("inventory", inventory_fn)?;
+
+    // tools.equip_tool(qualified_name) -> {success, added, removed, equipped, error}
+    let equip_tool_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, qualified_name: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let context_id = session.room_name.as_deref().unwrap_or("lobby").to_string();
+
+            // Find the thing by qualified name
+            let thing = match shared.db.get_thing_by_qualified_name(&qualified_name) {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("tool not found: {}", qualified_name))?;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+            };
+
+            // Get max priority and equip
+            let priority = shared
+                .db
+                .max_equipped_priority(&context_id)
+                .ok()
+                .flatten()
+                .map(|p| p + 1.0)
+                .unwrap_or(0.0);
+
+            match shared.db.equip(&context_id, &thing.id, priority) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                    let added_table = lua.create_table()?;
+                    added_table.set(1, qualified_name)?;
+                    result.set("added", added_table)?;
+                    result.set("removed", lua.create_table()?)?;
+
+                    // Return updated equipped list
+                    let equipped_table = lua.create_table()?;
+                    if let Ok(equipped) = shared.db.get_equipped_tools(&context_id) {
+                        for (i, eq) in equipped.iter().enumerate() {
+                            equipped_table.set(i + 1, eq.thing.qualified_name.clone())?;
+                        }
+                    }
+                    result.set("equipped", equipped_table)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("equip_tool", equip_tool_fn)?;
+
+    // tools.unequip_tool(qualified_name) -> {success, removed, equipped, error}
+    let unequip_tool_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, qualified_name: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let context_id = session.room_name.as_deref().unwrap_or("lobby").to_string();
+
+            // Find the thing by qualified name
+            let thing = match shared.db.get_thing_by_qualified_name(&qualified_name) {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("tool not found: {}", qualified_name))?;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+            };
+
+            match shared.db.unequip(&context_id, &thing.id) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                    let removed_table = lua.create_table()?;
+                    removed_table.set(1, qualified_name)?;
+                    result.set("removed", removed_table)?;
+
+                    // Return updated equipped list
+                    let equipped_table = lua.create_table()?;
+                    if let Ok(equipped) = shared.db.get_equipped_tools(&context_id) {
+                        for (i, eq) in equipped.iter().enumerate() {
+                            equipped_table.set(i + 1, eq.thing.qualified_name.clone())?;
+                        }
+                    }
+                    result.set("equipped", equipped_table)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("unequip_tool", unequip_tool_fn)?;
+
+    // tools.journal_add(kind, content) -> {success, entry, error}
+    let journal_add_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (kind, content): (String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Parse kind
+            let ops_kind = match kind.as_str() {
+                "note" => crate::ops::JournalKind::Note,
+                "decision" => crate::ops::JournalKind::Decision,
+                "idea" => crate::ops::JournalKind::Idea,
+                "milestone" => crate::ops::JournalKind::Milestone,
+                _ => {
+                    result.set("success", false)?;
+                    result.set("error", format!("invalid journal kind: {}", kind))?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::add_journal
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::add_journal(
+                    &shared,
+                    &room_name,
+                    &session.username,
+                    &content,
+                    ops_kind,
+                ))
+            }) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                    let entry = lua.create_table()?;
+                    entry.set("kind", kind)?;
+                    entry.set("content", content)?;
+                    entry.set("author", session.username)?;
+                    result.set("entry", entry)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("journal_add", journal_add_fn)?;
+
+    // tools.set_vibe(text) -> {success, error}
+    let set_vibe_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, text: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::set_vibe
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(crate::ops::set_vibe(&shared, &room_name, &text))
+            }) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("set_vibe", set_vibe_fn)?;
+
+    // tools.inspire(text?) -> {inspirations = [...]} or {success, added, error}
+    let inspire_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, text: Option<String>| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    return Ok(result);
+                }
+            };
+
+            match text {
+                Some(content) => {
+                    // Add inspiration
+                    match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(crate::ops::add_inspiration(
+                            &shared,
+                            &room_name,
+                            &content,
+                            &session.username,
+                        ))
+                    }) {
+                        Ok(()) => {
+                            result.set("success", true)?;
+                            result.set("added", content)?;
+                        }
+                        Err(e) => {
+                            result.set("success", false)?;
+                            result.set("error", e.to_string())?;
+                        }
+                    }
+                }
+                None => {
+                    // Get inspirations
+                    let insps_table = lua.create_table()?;
+                    if let Ok(insps) = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(crate::ops::get_inspirations(&shared, &room_name))
+                    }) {
+                        for (i, insp) in insps.iter().enumerate() {
+                            insps_table.set(i + 1, insp.content.clone())?;
+                        }
+                    }
+                    result.set("inspirations", insps_table)?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("inspire", inspire_fn)?;
+
+    // tools.bring(artifact_id, role) -> {success, error}
+    let bring_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (artifact_id, role): (String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::bind_asset
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::bind_asset(
+                    &shared,
+                    &room_name,
+                    &role,
+                    &artifact_id,
+                    &session.username,
+                ))
+            }) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("bring", bring_fn)?;
+
+    // tools.drop_asset(role) -> {success, error}
+    let drop_asset_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, role: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::unbind_asset
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(crate::ops::unbind_asset(&shared, &room_name, &role))
+            }) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("drop_asset", drop_asset_fn)?;
+
+    // tools.examine(role) -> {asset, error}
+    let examine_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, role: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use ops::examine_asset
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(crate::ops::examine_asset(&shared, &room_name, &role))
+            }) {
+                Ok(Some(binding)) => {
+                    let asset = lua.create_table()?;
+                    asset.set("role", binding.role)?;
+                    asset.set("artifact_id", binding.artifact_id)?;
+                    if let Some(notes) = binding.notes {
+                        asset.set("notes", notes)?;
+                    }
+                    asset.set("bound_by", binding.bound_by)?;
+                    asset.set("bound_at", binding.bound_at)?;
+                    result.set("asset", asset)?;
+                }
+                Ok(None) => {
+                    // No binding found - result is just empty
+                }
+                Err(e) => {
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("examine", examine_fn)?;
+
+    // tools.mcp_servers() -> {servers = [{name, connected, tool_count}, ...]}
+    let mcp_servers_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+            let servers_table = lua.create_table()?;
+
+            if let Some(shared) = state.shared_state() {
+                for (i, server) in shared.mcp.list().iter().enumerate() {
+                    let s = lua.create_table()?;
+                    s.set("name", server.name.clone())?;
+                    s.set("connected", server.state == "connected")?;
+                    s.set("tool_count", server.tool_count)?;
+                    s.set("endpoint", server.endpoint.clone())?;
+                    if let Some(ref error) = server.error {
+                        s.set("error", error.clone())?;
+                    }
+                    servers_table.set(i + 1, s)?;
+                }
+            }
+
+            result.set("servers", servers_table)?;
+            Ok(result)
+        })?
+    };
+    tools.set("mcp_servers", mcp_servers_fn)?;
+
+    // tools.mcp_tools(server?) -> {tools = [{name, description, server}, ...]}
+    let mcp_tools_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, server_filter: Option<String>| {
+            let result = lua.create_table()?;
+            let tools_table = lua.create_table()?;
+
+            if let Some(shared) = state.shared_state() {
+                let tool_list = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(shared.mcp.list_tools())
+                });
+
+                let mut idx = 1;
+                for tool in tool_list {
+                    // Filter by server if specified
+                    if let Some(ref filter) = server_filter {
+                        if &tool.source != filter {
+                            continue;
+                        }
+                    }
+
+                    let t = lua.create_table()?;
+                    t.set("name", tool.name)?;
+                    t.set("description", tool.description)?;
+                    t.set("server", tool.source)?;
+                    tools_table.set(idx, t)?;
+                    idx += 1;
+                }
+            }
+
+            result.set("tools", tools_table)?;
+            Ok(result)
+        })?
+    };
+    tools.set("mcp_tools", mcp_tools_fn)?;
+
+    // tools.prompts(target?) -> {prompts = [{name, content, priority}, ...]}
+    let prompts_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, target: Option<String>| {
+            let result = lua.create_table()?;
+            let prompts_table = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("prompts", prompts_table)?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("prompts", prompts_table)?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("prompts", prompts_table)?;
+                    return Ok(result);
+                }
+            };
+
+            match target {
+                Some(t) => {
+                    // Get prompts for specific target
+                    if let Ok(slots) = shared.db.get_target_slots(&room_name, &t) {
+                        for (i, slot) in slots.iter().enumerate() {
+                            let p = lua.create_table()?;
+                            p.set("name", slot.prompt_name.clone())?;
+                            p.set("priority", slot.index)?;
+                            if let Some(ref content) = slot.content {
+                                p.set("content", content.clone())?;
+                            }
+                            prompts_table.set(i + 1, p)?;
+                        }
+                    }
+                }
+                None => {
+                    // List all prompts in room
+                    if let Ok(prompts_list) = shared.db.list_prompts(&room_name) {
+                        for (i, prompt) in prompts_list.iter().enumerate() {
+                            let p = lua.create_table()?;
+                            p.set("name", prompt.name.clone())?;
+                            p.set("content", prompt.content.clone())?;
+                            prompts_table.set(i + 1, p)?;
+                        }
+                    }
+                }
+            }
+
+            result.set("prompts", prompts_table)?;
+            Ok(result)
+        })?
+    };
+    tools.set("prompts", prompts_fn)?;
+
+    // tools.prompt_set(name, content) -> {success, error}
+    let prompt_set_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (name, content): (String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared
+                .db
+                .set_prompt(&room_name, &name, &content, &session.username)
+            {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("prompt_set", prompt_set_fn)?;
+
+    // tools.prompt_push(target, prompt_name) -> {success, error}
+    let prompt_push_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (target, prompt_name): (String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared
+                .db
+                .push_slot(&room_name, &target, "user", &prompt_name)
+            {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("prompt_push", prompt_push_fn)?;
+
+    // tools.prompt_pop(target) -> {success, removed, error}
+    let prompt_pop_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, target: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared.db.pop_slot(&room_name, &target) {
+                Ok(removed) => {
+                    result.set("success", true)?;
+                    result.set("removed", removed)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("prompt_pop", prompt_pop_fn)?;
+
+    // tools.prompt_delete(name) -> {success, error}
+    let prompt_delete_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, name: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared.db.delete_prompt(&room_name, &name) {
+                Ok(deleted) => {
+                    result.set("success", deleted)?;
+                    if !deleted {
+                        result.set("error", "prompt not found")?;
+                    }
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("prompt_delete", prompt_delete_fn)?;
+
+    // tools.prompt_rm(target, index) -> {success, error}
+    // Remove prompt from target by slot index (0-based)
+    let prompt_rm_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (target, index): (String, i64)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared.db.rm_slot(&room_name, &target, index) {
+                Ok(removed) => {
+                    result.set("success", removed)?;
+                    if !removed {
+                        result.set("error", "slot not found")?;
+                    }
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("prompt_rm", prompt_rm_fn)?;
+
+    // tools.prompt_insert(target, index, prompt_name) -> {success, error}
+    // Insert prompt into target at slot index
+    let prompt_insert_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (target, index, prompt_name): (String, i64, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            // Use "system" as default target_type for manual insertion
+            match shared.db.insert_slot(&room_name, &target, "system", index, &prompt_name) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("prompt_insert", prompt_insert_fn)?;
+
+    // tools.target_slots(target) -> [{slot, prompt_name}]
+    // Get slots for a specific target
+    let target_slots_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, target: String| {
+            let list = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(list),
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => return Ok(list),
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => return Ok(list),
+            };
+
+            if let Ok(slots) = shared.db.get_target_slots(&room_name, &target) {
+                let mut idx = 1;
+                for slot in slots {
+                    let entry = lua.create_table()?;
+                    entry.set("slot", slot.index)?;
+                    entry.set("prompt_name", slot.prompt_name)?;
+                    if let Some(ref content) = slot.content {
+                        entry.set("content", content.as_str())?;
+                    }
+                    list.set(idx, entry)?;
+                    idx += 1;
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("target_slots", target_slots_fn)?;
+
+    // tools.get_prompt(name) -> {name, content} or nil
+    // Get a specific named prompt
+    let get_prompt_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, name: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(mlua::Value::Nil),
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => return Ok(mlua::Value::Nil),
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => return Ok(mlua::Value::Nil),
+            };
+
+            match shared.db.get_prompt(&room_name, &name) {
+                Ok(Some(prompt)) => {
+                    let result = lua.create_table()?;
+                    result.set("name", prompt.name)?;
+                    result.set("content", prompt.content)?;
+                    Ok(mlua::Value::Table(result))
+                }
+                _ => Ok(mlua::Value::Nil),
+            }
+        })?
+    };
+    tools.set("get_prompt", get_prompt_fn)?;
+
+    // tools.rules() -> {rules = [{id, name, trigger, script, enabled}, ...]}
+    let rules_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+            let rules_table = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("rules", rules_table)?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("rules", rules_table)?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r.clone(),
+                None => {
+                    result.set("rules", rules_table)?;
+                    return Ok(result);
+                }
+            };
+
+            // Get room ID
+            if let Ok(Some(room)) = shared.db.get_room_by_name(&room_name) {
+                if let Ok(rules_list) = shared.db.list_room_rules(&room.id) {
+                    for (i, rule) in rules_list.iter().enumerate() {
+                        let r = lua.create_table()?;
+                        r.set("id", rule.id.clone())?;
+                        r.set("name", rule.name.clone())?;
+                        r.set("trigger", rule.trigger_kind.as_str())?;
+                        r.set("script_id", rule.script_id.clone())?;
+                        r.set("enabled", rule.enabled)?;
+                        r.set("priority", rule.priority)?;
+                        rules_table.set(i + 1, r)?;
+                    }
+                }
+            }
+
+            result.set("rules", rules_table)?;
+            Ok(result)
+        })?
+    };
+    tools.set("rules", rules_fn)?;
+
+    // tools.rules_add(trigger_kind, script_name, opts) -> {success, rule_id, error}
+    let rules_add_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |lua, (trigger_kind, script_name, opts): (String, String, Option<Table>)| {
+                use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
+
+                let result = lua.create_table()?;
+
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no shared state")?;
+                        return Ok(result);
+                    }
+                };
+
+                let session = match state.session_context() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no session context")?;
+                        return Ok(result);
+                    }
+                };
+
+                let room_name = match session.room_name {
+                    Some(ref r) => r.clone(),
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "not in a room")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Get room ID
+                let room = match shared.db.get_room_by_name(&room_name) {
+                    Ok(Some(r)) => r,
+                    _ => {
+                        result.set("success", false)?;
+                        result.set("error", "room not found")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Get script by name
+                let script = match shared.db.get_script_by_name(&script_name) {
+                    Ok(Some(s)) => s,
+                    _ => {
+                        result.set("success", false)?;
+                        result.set("error", format!("script not found: {}", script_name))?;
+                        return Ok(result);
+                    }
+                };
+
+                // Parse trigger kind
+                let kind = match TriggerKind::parse(&trigger_kind) {
+                    Some(k) => k,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", format!("invalid trigger kind: {}", trigger_kind))?;
+                        return Ok(result);
+                    }
+                };
+
+                // Create rule based on kind
+                let mut rule = match kind {
+                    TriggerKind::Row => {
+                        RoomRule::row_trigger(&room.id, &script.id, ActionSlot::Background)
+                    }
+                    TriggerKind::Tick => {
+                        let divisor: i32 = opts
+                            .as_ref()
+                            .and_then(|t| t.get::<i32>("tick_divisor").ok())
+                            .unwrap_or(1);
+                        RoomRule::tick_trigger(&room.id, &script.id, divisor)
+                    }
+                    TriggerKind::Interval => {
+                        let interval: i64 = opts
+                            .as_ref()
+                            .and_then(|t| t.get::<i64>("interval_ms").ok())
+                            .unwrap_or(1000);
+                        RoomRule::interval_trigger(&room.id, &script.id, interval)
+                    }
+                };
+
+                // Apply optional name
+                if let Some(ref t) = opts {
+                    if let Ok(name) = t.get::<String>("name") {
+                        rule.name = Some(name);
+                    }
+                }
+
+                match shared.db.insert_rule(&rule) {
+                    Ok(()) => {
+                        result.set("success", true)?;
+                        result.set("rule_id", rule.id)?;
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                    }
+                }
+
+                Ok(result)
+            },
+        )?
+    };
+    tools.set("rules_add", rules_add_fn)?;
+
+    // tools.rules_del(rule_id) -> {success, error}
+    let rules_del_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, rule_id: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared.db.delete_rule(&rule_id) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("rules_del", rules_del_fn)?;
+
+    // tools.rules_enable(rule_id, enabled) -> {success, error}
+    let rules_enable_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (rule_id, enabled): (String, bool)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            match shared.db.set_rule_enabled(&rule_id, enabled) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("rules_enable", rules_enable_fn)?;
+
+    // tools.scripts() -> {scripts = [{id, name, kind, description}, ...]}
+    let scripts_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let result = lua.create_table()?;
+            let scripts_table = lua.create_table()?;
+
+            if let Some(shared) = state.shared_state() {
+                if let Ok(scripts_list) = shared.db.list_scripts(None) {
+                    for (i, script) in scripts_list.iter().enumerate() {
+                        let s = lua.create_table()?;
+                        s.set("id", script.id.clone())?;
+                        s.set("name", script.name.clone())?;
+                        s.set("kind", script.kind.as_str())?;
+                        s.set("description", script.description.clone())?;
+                        scripts_table.set(i + 1, s)?;
+                    }
+                }
+            }
+
+            result.set("scripts", scripts_table)?;
+            Ok(result)
+        })?
+    };
+    tools.set("scripts", scripts_fn)?;
 
     // bootstrap_world() -> bool success (ensure world structure exists)
     let bootstrap_world_fn = {
@@ -1769,11 +3690,14 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 } else {
                     // Minimal context without SharedState - create empty world
                     ToolContext {
-                        db: std::sync::Arc::new(crate::db::Database::in_memory().map_err(|e| {
-                            mlua::Error::external(format!("db error: {}", e))
-                        })?),
+                        db: std::sync::Arc::new(
+                            crate::db::Database::in_memory()
+                                .map_err(|e| mlua::Error::external(format!("db error: {}", e)))?,
+                        ),
                         mcp: std::sync::Arc::new(crate::mcp::McpManager::new()),
-                        world: std::sync::Arc::new(tokio::sync::RwLock::new(crate::world::World::new())),
+                        world: std::sync::Arc::new(tokio::sync::RwLock::new(
+                            crate::world::World::new(),
+                        )),
                         status_tracker,
                         username: session.as_ref().map(|s| s.username.clone()),
                         room: session.as_ref().and_then(|s| s.room_name.clone()),
@@ -1942,7 +3866,12 @@ mod tests {
         }
 
         /// Add a thinking/streaming row (simulates model response in progress)
-        async fn add_thinking(&self, room: &str, model_name: &str, content: &str) -> Option<String> {
+        async fn add_thinking(
+            &self,
+            room: &str,
+            model_name: &str,
+            content: &str,
+        ) -> Option<String> {
             use crate::db::rows::Row;
 
             let buffer = self.db.get_or_create_room_buffer(room).ok()?;
