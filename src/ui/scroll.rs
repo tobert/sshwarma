@@ -963,7 +963,11 @@ mod tests {
         // So start=20, end=30 (exclusive)
         assert_eq!(start, 20, "start should be offset");
         assert_eq!(end, 30, "end should be offset + viewport_height");
-        assert_eq!(end - start, 10, "range should span exactly viewport_height lines");
+        assert_eq!(
+            end - start,
+            10,
+            "range should span exactly viewport_height lines"
+        );
     }
 
     #[test]
@@ -1081,7 +1085,10 @@ mod tests {
 
         // half_page_down = max(viewport/2, 1) = max(1, 1) = 1
         state.half_page_down();
-        assert_eq!(state.offset, 1, "half page on small viewport should move by at least 1");
+        assert_eq!(
+            state.offset, 1,
+            "half page on small viewport should move by at least 1"
+        );
 
         state.half_page_down();
         assert_eq!(state.offset, 2);
@@ -1172,7 +1179,11 @@ mod tests {
         state.scroll_down(1);
 
         assert_eq!(state.offset, 40, "should be at max_offset");
-        assert_eq!(state.mode, ScrollMode::Tail, "reaching bottom should enable tail mode");
+        assert_eq!(
+            state.mode,
+            ScrollMode::Tail,
+            "reaching bottom should enable tail mode"
+        );
     }
 
     #[test]
@@ -1187,6 +1198,10 @@ mod tests {
         state.scroll_up(1);
 
         assert_eq!(state.offset, 39);
-        assert_eq!(state.mode, ScrollMode::Pinned, "scrolling up from tail should pin");
+        assert_eq!(
+            state.mode,
+            ScrollMode::Pinned,
+            "scrolling up from tail should pin"
+        );
     }
 }

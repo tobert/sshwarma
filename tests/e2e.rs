@@ -443,7 +443,9 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
 
     // Create LuaRuntime with shared state
     let lua_runtime = LuaRuntime::new().expect("failed to create test Lua runtime");
-    lua_runtime.tool_state().set_shared_state(Some(shared_state.clone()));
+    lua_runtime
+        .tool_state()
+        .set_shared_state(Some(shared_state.clone()));
 
     let state = Arc::new(McpServerState {
         world,

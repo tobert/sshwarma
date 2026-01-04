@@ -110,12 +110,8 @@ pub async fn push_updates_task(
                 buffer_id,
             } => {
                 // Create a proper tool.result row
-                let mut result_row = crate::db::rows::Row::tool_result(
-                    &buffer_id,
-                    &tool_name,
-                    &summary,
-                    success,
-                );
+                let mut result_row =
+                    crate::db::rows::Row::tool_result(&buffer_id, &tool_name, &summary, success);
                 if let Err(e) = db.append_row(&mut result_row) {
                     tracing::error!("failed to create tool result row: {}", e);
                 }

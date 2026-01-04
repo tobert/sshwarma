@@ -3,8 +3,8 @@
 //! Exits connect rooms together for navigation.
 //! Each exit is a directed edge: from_thing_id → to_thing_id via direction.
 
-use super::{now_ms, Database};
 use super::things::Thing;
+use super::{now_ms, Database};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -155,7 +155,10 @@ impl Database {
     }
 
     /// Get exits as a simple direction → room_name map (for compatibility)
-    pub fn get_exits_map(&self, from_thing_id: &str) -> Result<std::collections::HashMap<String, String>> {
+    pub fn get_exits_map(
+        &self,
+        from_thing_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
         let exits = self.get_exits_from(from_thing_id)?;
         Ok(exits
             .into_iter()
@@ -229,8 +232,8 @@ pub fn normalize_direction(dir: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::things::Thing;
+    use super::*;
 
     #[test]
     fn test_exit_crud() -> Result<()> {

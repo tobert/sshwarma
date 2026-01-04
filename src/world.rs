@@ -202,7 +202,9 @@ impl Room {
     /// Get the buffer ID, panicking if not set
     /// Use this when you're certain the buffer has been initialized
     pub fn buffer_id(&self) -> &str {
-        self.buffer_id.as_deref().expect("room buffer not initialized")
+        self.buffer_id
+            .as_deref()
+            .expect("room buffer not initialized")
     }
 
     /// Set the buffer ID (typically after creating via db.get_or_create_room_buffer)

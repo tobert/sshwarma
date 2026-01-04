@@ -221,10 +221,7 @@ impl ToolRegistry {
                 .unwrap_or("")
                 .to_string();
             let _ttl = args.get("ttl").and_then(|v| v.as_i64()).unwrap_or(5000);
-            let _level = args
-                .get("level")
-                .and_then(|v| v.as_str())
-                .unwrap_or("info");
+            let _level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
 
             // TODO: Actually push notification via channel
             Ok(serde_json::json!({
@@ -235,10 +232,7 @@ impl ToolRegistry {
 
         // Dirty tool - mark a region as needing redraw
         self.register("dirty", |_ctx, args| {
-            let region = args
-                .get("region")
-                .and_then(|v| v.as_str())
-                .unwrap_or("all");
+            let region = args.get("region").and_then(|v| v.as_str()).unwrap_or("all");
 
             // TODO: Actually mark dirty via channel
             Ok(serde_json::json!({

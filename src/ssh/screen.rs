@@ -26,15 +26,7 @@ pub fn spawn_screen_refresh(
     term_height: u16,
 ) {
     tokio::spawn(async move {
-        screen_refresh_task(
-            handle,
-            channel,
-            lua_runtime,
-            state,
-            term_width,
-            term_height,
-        )
-        .await;
+        screen_refresh_task(handle, channel, lua_runtime, state, term_width, term_height).await;
     });
 }
 
@@ -157,6 +149,7 @@ async fn screen_refresh_task(
 
 /// Render the screen with tag-based dirty tracking and row diffing.
 /// Returns false if connection closed.
+#[allow(clippy::too_many_arguments)]
 async fn render_screen_with_tags(
     handle: &Handle,
     channel: ChannelId,
@@ -179,9 +172,13 @@ async fn render_screen_with_tags(
 
         // Call on_tick with dirty tags - Lua draws to full screen
         // Future: Lua can use dirty_tags to render only affected regions
-        if let Err(e) =
-            lua.call_on_tick_with_tags(dirty_tags, tick, current_buffer.clone(), term_width, term_height)
-        {
+        if let Err(e) = lua.call_on_tick_with_tags(
+            dirty_tags,
+            tick,
+            current_buffer.clone(),
+            term_width,
+            term_height,
+        ) {
             tracing::debug!("on_tick error: {}", e);
             return true; // Continue, just skip this frame
         }

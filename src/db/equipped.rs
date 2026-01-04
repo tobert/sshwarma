@@ -3,8 +3,8 @@
 //! Equipped represents what's active in a context (room or agent).
 //! This is a many-to-many relationship: multiple rooms can equip the same tool.
 
-use super::{now_ms, Database};
 use super::things::{Thing, ThingKind};
+use super::{now_ms, Database};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 /// An equipped relationship
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Equipped {
-    pub context_id: String,    // room or agent thing ID
-    pub thing_id: String,      // tool or data thing ID
-    pub priority: f64,         // ordering (lower = first)
+    pub context_id: String, // room or agent thing ID
+    pub thing_id: String,   // tool or data thing ID
+    pub priority: f64,      // ordering (lower = first)
     pub created_at: i64,
     pub deleted_at: Option<i64>,
 }

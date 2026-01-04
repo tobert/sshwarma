@@ -863,7 +863,10 @@ impl Database {
 
     /// Count tool calls by qualified name for a buffer
     /// Returns map of tool_name -> call_count
-    pub fn count_tool_calls(&self, buffer_id: &str) -> Result<std::collections::HashMap<String, usize>> {
+    pub fn count_tool_calls(
+        &self,
+        buffer_id: &str,
+    ) -> Result<std::collections::HashMap<String, usize>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"

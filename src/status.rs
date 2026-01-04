@@ -86,7 +86,12 @@ impl StatusTracker {
     pub fn snapshot(&self) -> HashMap<String, Status> {
         self.statuses
             .read()
-            .map(|guard| guard.iter().map(|(k, v)| (k.clone(), v.status.clone())).collect())
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.status.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

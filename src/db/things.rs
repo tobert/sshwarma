@@ -517,7 +517,10 @@ impl Database {
         // Copy equipped from defaults to lobby
         self.copy_equipped("defaults", "lobby")?;
 
-        tracing::info!("bootstrapped world structure with {} internal tools", tool_ids.len());
+        tracing::info!(
+            "bootstrapped world structure with {} internal tools",
+            tool_ids.len()
+        );
         Ok(())
     }
 

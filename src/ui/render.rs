@@ -877,7 +877,12 @@ fn render_status(status: &str, _width: usize) -> String {
 fn render_error(content: &str, width: usize) -> String {
     let prefix = "\x1b[31m"; // Red
     let reset = "\x1b[0m";
-    format!("{}❌ {}{}", prefix, wrap_text(content, width.saturating_sub(3)), reset)
+    format!(
+        "{}❌ {}{}",
+        prefix,
+        wrap_text(content, width.saturating_sub(3)),
+        reset
+    )
 }
 
 /// Render room header
@@ -924,14 +929,22 @@ fn render_presence(user: &str, action: &str, _width: usize) -> String {
 
 /// Render compaction summary
 fn render_compaction(summary: &str, width: usize) -> String {
-    format!("\x1b[2;3m[{}]\x1b[0m", wrap_text(summary, width.saturating_sub(2)))
+    format!(
+        "\x1b[2;3m[{}]\x1b[0m",
+        wrap_text(summary, width.saturating_sub(2))
+    )
 }
 
 /// Render note (journal entry)
 fn render_note(content: &str, width: usize) -> String {
     let prefix = "\x1b[35m📝 "; // Magenta with note emoji
     let reset = "\x1b[0m";
-    format!("{}{}{}", prefix, wrap_text(content, width.saturating_sub(4)), reset)
+    format!(
+        "{}{}{}",
+        prefix,
+        wrap_text(content, width.saturating_sub(4)),
+        reset
+    )
 }
 
 /// Render default (unknown content_method)
@@ -1141,12 +1154,24 @@ mod tests {
         // Row 16 -> ESC[17;1H (1-indexed)
         // Row 17 -> ESC[18;1H
         // Row 18 -> ESC[19;1H
-        assert!(ansi.contains("\x1b[17;1H"), "Should have cursor move to row 17");
-        assert!(ansi.contains("\x1b[18;1H"), "Should have cursor move to row 18");
-        assert!(ansi.contains("\x1b[19;1H"), "Should have cursor move to row 19");
+        assert!(
+            ansi.contains("\x1b[17;1H"),
+            "Should have cursor move to row 17"
+        );
+        assert!(
+            ansi.contains("\x1b[18;1H"),
+            "Should have cursor move to row 18"
+        );
+        assert!(
+            ansi.contains("\x1b[19;1H"),
+            "Should have cursor move to row 19"
+        );
 
         // Should NOT contain newlines (which would cause scrolling at bottom)
-        assert!(!ansi.contains("\r\n"), "Should not have \\r\\n that would cause scrolling");
+        assert!(
+            !ansi.contains("\r\n"),
+            "Should not have \\r\\n that would cause scrolling"
+        );
 
         // Should contain the content
         assert!(ansi.contains("Line0"));
@@ -2247,11 +2272,7 @@ mod tests {
         let ansi = buf.to_ansi_at(0);
         let positions = extract_cursor_positions(&ansi);
 
-        assert_eq!(
-            positions.len(),
-            1,
-            "should have exactly 1 cursor position"
-        );
+        assert_eq!(positions.len(), 1, "should have exactly 1 cursor position");
         assert_eq!(
             positions[0],
             (1, 1),
@@ -2536,16 +2557,8 @@ mod tests {
 
         let buf = buffer.lock().unwrap();
         // These positions in buffer coords should be unchanged
-        assert_eq!(
-            buf.get(15, 2).unwrap().char,
-            '\0',
-            "x=10 should be ignored"
-        );
-        assert_eq!(
-            buf.get(5, 7).unwrap().char,
-            '\0',
-            "y=5 should be ignored"
-        );
+        assert_eq!(buf.get(15, 2).unwrap().char, '\0', "x=10 should be ignored");
+        assert_eq!(buf.get(5, 7).unwrap().char, '\0', "y=5 should be ignored");
     }
 
     #[test]
@@ -2753,10 +2766,7 @@ mod tests {
 
         // Verify each row
         for y in 0..10 {
-            assert_eq!(
-                buf.get(0, y).unwrap().char,
-                ('0' as u8 + y as u8) as char
-            );
+            assert_eq!(buf.get(0, y).unwrap().char, ('0' as u8 + y as u8) as char);
         }
 
         let ansi_at = buf.to_ansi_at(0);
