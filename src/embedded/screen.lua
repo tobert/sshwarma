@@ -1,6 +1,7 @@
 -- sshwarma screen renderer
 --
 -- Full-screen layout with testable components.
+-- Uses ui.regions for flexible layout and z-ordering.
 --
 -- Module structure:
 --   M.wrap_text(text, width) -> {lines}
@@ -14,6 +15,9 @@
 --   background(tick)
 
 local M = {}
+
+-- Load regions module (available globally after Rust loads it)
+local regions = regions or require('ui.regions')
 
 --------------------------------------------------------------------------------
 -- Colors
@@ -31,6 +35,37 @@ M.colors = {
     statusfg = "#a9b1d6",
     cursor   = "#ff9e64",
 }
+
+--------------------------------------------------------------------------------
+-- Region Definitions
+--------------------------------------------------------------------------------
+
+-- Define base layout regions (z=0)
+regions.define('chat', {
+    top = 0,
+    bottom = -2,  -- Leave 2 lines for status and input
+    z = 0,
+})
+
+regions.define('status', {
+    bottom = -1,  -- 1 line above bottom
+    height = 1,
+    z = 0,
+})
+
+regions.define('input', {
+    bottom = 0,
+    height = 1,
+    z = 0,
+})
+
+-- Overlay region (hidden by default, z=10 renders on top)
+regions.define('overlay', {
+    top = 0,
+    bottom = -2,  -- Same area as chat
+    z = 10,
+    visible = false,
+})
 
 --------------------------------------------------------------------------------
 -- Pure Functions (testable without mocks)
@@ -487,45 +522,45 @@ function on_tick(dirty_tags, tick, ctx)
     local h = ctx.h
     local w = ctx.w
 
-    -- Layout:
-    --   [0 to h-3] Chat buffer (or overlay if active)
-    --   [h-2]      Status line
-    --   [h-1]      Input line
-
-    local chat_height = h - 2
-    local status_row = h - 2
-    local input_row = h - 1
+    -- Resolve all regions for current terminal size
+    regions.resolve(w, h)
 
     -- Fetch data
     local data = M.fetch_render_data()
     local session = data.status.session or {}
     local my_name = session.username or ""
 
-    -- Check for active overlay
-    local overlay = tools.overlay and tools.overlay()
-
-    if overlay then
-        -- Render overlay instead of chat
-        if chat_height > 0 then
-            M.render_overlay(ctx, overlay, chat_height)
-        end
+    -- Check if overlay has content (from Rust) and sync visibility
+    local overlay_content = tools.region_content and tools.region_content("overlay")
+    if overlay_content then
+        regions.show("overlay")
     else
-        -- Render chat
-        if chat_height > 0 and data.scroll then
-            local display_lines = M.build_display_lines(data.history, w, my_name)
-            M.render_chat(ctx, display_lines, data.scroll, chat_height)
+        regions.hide("overlay")
+    end
+
+    -- Get visible regions sorted by z-order (lower z first = background)
+    local visible = regions.visible_ordered()
+
+    -- Render each visible region
+    for _, r in ipairs(visible) do
+        local area = r.area
+        if area and area.h > 0 then
+            if r.name == "chat" then
+                -- Only render chat if overlay is not visible
+                if not regions.is_visible("overlay") and data.scroll then
+                    local display_lines = M.build_display_lines(data.history, area.w, my_name)
+                    M.render_chat(ctx, display_lines, data.scroll, area.h)
+                end
+            elseif r.name == "overlay" and overlay_content then
+                -- Render overlay content
+                M.render_overlay(ctx, overlay_content, area.h)
+            elseif r.name == "status" then
+                local status_data = M.prepare_status_data(data.status, data.mcp)
+                M.render_status(ctx, area.y, status_data)
+            elseif r.name == "input" then
+                M.render_input(ctx, area.y, data.input)
+            end
         end
-    end
-
-    -- Render status
-    if status_row >= 0 then
-        local status_data = M.prepare_status_data(data.status, data.mcp)
-        M.render_status(ctx, status_row, status_data)
-    end
-
-    -- Render input
-    if input_row >= 0 then
-        M.render_input(ctx, input_row, data.input)
     end
 end
 
