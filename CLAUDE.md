@@ -518,6 +518,24 @@ cargo test --test e2e   # Run e2e tests only
 
 Tests use in-memory SQLite databases. E2E tests are in `tests/e2e.rs` and test MCP server functionality.
 
+### SSH Test Client (sshtest)
+
+For testing UI changes against a running sshwarma server:
+
+```bash
+# Build with testing feature
+cargo build --features testing --bin sshtest
+
+# Send commands and capture output
+./target/debug/sshtest --cmd "/rooms"
+./target/debug/sshtest --cmd "/join test" --cmd "hello world"
+
+# Debug ANSI sequences with hex dump
+./target/debug/sshtest --cmd "/rooms" --raw --wait 1000
+```
+
+Uses SSH agent automatically (falls back to `~/.ssh/id_ed25519`). Useful for smoke-testing Lua UI changes without manual SSH sessions.
+
 ### Lua Gotchas
 
 **Multiple return values**: Many Lua functions return multiple values. When passing directly to another function, all values are passed as arguments:
