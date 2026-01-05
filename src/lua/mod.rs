@@ -315,14 +315,18 @@ impl LuaRuntime {
         lua.globals().set("regions", regions_chunk)?;
 
         // Load the input module (provides escape sequence parsing, input buffer)
-        let input_chunk = lua
-            .load(INPUT_MODULE)
+        // Use exec() to run in global context so on_input() is available globally
+        lua.load(INPUT_MODULE)
             .set_name("embedded:ui/input.lua")
-            .eval::<Table>()
+            .exec()
             .map_err(|e| anyhow::anyhow!("failed to load embedded input module: {}", e))?;
 
-        loaded.set("ui.input", input_chunk.clone())?;
-        lua.globals().set("input", input_chunk)?;
+        // Get the module table that was set as global 'input'
+        let input_chunk: Table = lua
+            .globals()
+            .get("input")
+            .map_err(|e| anyhow::anyhow!("input module not set globally: {}", e))?;
+        loaded.set("ui.input", input_chunk)?;
 
         // Load the inspect module (for debugging, table formatting)
         let inspect_chunk = lua
