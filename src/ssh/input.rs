@@ -181,14 +181,22 @@ impl SshHandler {
         name: &str,
         args: &str,
     ) -> Result<()> {
+        tracing::info!("dispatch_command: name={} args={}", name, args);
+
         let Some(ref lua_runtime) = self.lua_runtime else {
             tracing::error!("No Lua runtime available for command dispatch");
             return Ok(());
         };
 
         let lua = lua_runtime.lock().await;
+        tracing::info!("dispatch_command: calling lua.call_dispatch_command");
         match lua.call_dispatch_command(name, args) {
             Ok(Some(cmd_result)) => {
+                tracing::info!(
+                    "dispatch_command: got result mode={} text_len={}",
+                    cmd_result.mode,
+                    cmd_result.text.len()
+                );
                 if !cmd_result.text.is_empty() {
                     if cmd_result.mode == "overlay" {
                         let title = cmd_result.title.unwrap_or_else(|| name.to_string());

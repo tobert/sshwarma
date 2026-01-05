@@ -14,16 +14,29 @@
 
 -- Custom searcher for sshwarma modules
 -- Inserted at position 2 (after preload, before standard path searchers)
+--
+-- Note: Luau doesn't have `load()` - must use loadstring or have Rust pre-load modules
+local load_fn = load or loadstring
+
 local function sshwarma_searcher(modname)
     -- Try embedded modules first (always available, no io needed)
     if sshwarma and sshwarma.get_embedded_module then
         local embedded = sshwarma.get_embedded_module(modname)
         if embedded then
-            local loader, err = load(embedded, "@embedded/" .. modname:gsub("%.", "/") .. ".lua")
-            if loader then
-                return loader, "embedded:" .. modname
+            -- In Luau sandbox, load/loadstring may not exist
+            -- Fall back to having Rust load the module via sshwarma.load_module
+            if load_fn then
+                local loader, err = load_fn(embedded, "@embedded/" .. modname:gsub("%.", "/") .. ".lua")
+                if loader then
+                    return loader, "embedded:" .. modname
+                end
+                return "\n\tcannot load embedded module '" .. modname .. "': " .. (err or "unknown error")
+            elseif sshwarma.load_module then
+                -- Rust-side loader for Luau
+                return function() return sshwarma.load_module(modname) end, "embedded:" .. modname
+            else
+                return "\n\tno loader available for embedded module '" .. modname .. "'"
             end
-            return "\n\tcannot load embedded module '" .. modname .. "': " .. (err or "unknown error")
         end
     end
 

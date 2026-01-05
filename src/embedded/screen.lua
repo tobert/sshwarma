@@ -525,9 +525,28 @@ function on_tick(dirty_tags, tick, ctx)
     -- Resolve all regions for current terminal size
     regions.resolve(w, h)
 
-    -- Fetch data
+    -- DEBUG: Show resolved regions and data
+    local visible = regions.visible_ordered()
+    local debug_parts = {string.format("w=%d h=%d regions=%d:", w, h, #visible)}
+    for _, r in ipairs(visible) do
+        if r.area then
+            table.insert(debug_parts, string.format("%s(y=%d,h=%d)", r.name, r.area.y, r.area.h))
+        else
+            table.insert(debug_parts, string.format("%s(nil)", r.name))
+        end
+    end
+    ctx:print(0, 0, table.concat(debug_parts, " "), {fg = "#ff0000"})
+
+    -- Fetch data early for debug
     local data = M.fetch_render_data()
     local session = data.status.session or {}
+    local room = data.status.room or {}
+    local hist_count = data.history and #data.history or 0
+    local room_name = room.name or session.room or "nil"
+    local scroll_ok = data.scroll and "yes" or "no"
+    ctx:print(0, 1, string.format("room=%s history=%d scroll=%s", room_name, hist_count, scroll_ok), {fg = "#ff0000"})
+
+    -- Already fetched data above for debug
     local my_name = session.username or ""
 
     -- Check if overlay has content (from Rust) and sync visibility
@@ -549,6 +568,8 @@ function on_tick(dirty_tags, tick, ctx)
                 -- Only render chat if overlay is not visible
                 if not regions.is_visible("overlay") and data.scroll then
                     local display_lines = M.build_display_lines(data.history, area.w, my_name)
+                    -- DEBUG: Show chat region info
+                    ctx:print(0, 2, string.format("CHAT: y=%d h=%d lines=%d", area.y, area.h, #display_lines), {fg = "#00ff00"})
                     M.render_chat(ctx, display_lines, data.scroll, area.h)
                 end
             elseif r.name == "overlay" and overlay_content then

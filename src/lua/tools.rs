@@ -1844,6 +1844,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(room_summary) => {
+                    // Update session context with new room
+                    state.set_session_context(Some(crate::lua::SessionContext {
+                        username: session.username.clone(),
+                        model: None,
+                        room_name: Some(room_name.clone()),
+                    }));
+
                     result.set("success", true)?;
                     let room_table = lua.create_table()?;
                     room_table.set("name", room_summary.name)?;
@@ -1911,6 +1918,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                     ))
                 }) {
                     Ok(room_summary) => {
+                        // Update session context with new room (create auto-joins)
+                        state.set_session_context(Some(crate::lua::SessionContext {
+                            username: session.username.clone(),
+                            model: None,
+                            room_name: Some(room_name.clone()),
+                        }));
+
                         result.set("success", true)?;
                         let room_table = lua.create_table()?;
                         room_table.set("name", room_summary.name)?;
@@ -1970,6 +1984,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(()) => {
+                    // Clear room from session context
+                    state.set_session_context(Some(crate::lua::SessionContext {
+                        username: session.username.clone(),
+                        model: None,
+                        room_name: None,
+                    }));
+
                     result.set("success", true)?;
                 }
                 Err(e) => {
@@ -2026,6 +2047,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(room_summary) => {
+                    // Update session context with new room
+                    state.set_session_context(Some(crate::lua::SessionContext {
+                        username: session.username.clone(),
+                        model: None,
+                        room_name: Some(room_summary.name.clone()),
+                    }));
+
                     result.set("success", true)?;
                     let room_table = lua.create_table()?;
                     room_table.set("name", room_summary.name)?;
@@ -2150,6 +2178,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(room_summary) => {
+                    // Update session context with new room (fork auto-joins)
+                    state.set_session_context(Some(crate::lua::SessionContext {
+                        username: session.username.clone(),
+                        model: None,
+                        room_name: Some(new_name.clone()),
+                    }));
+
                     result.set("success", true)?;
                     let room_table = lua.create_table()?;
                     room_table.set("name", room_summary.name)?;

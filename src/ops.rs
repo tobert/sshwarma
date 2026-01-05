@@ -331,17 +331,24 @@ pub async fn join(
     current_room: Option<&str>,
     target_room: &str,
 ) -> Result<RoomSummary> {
+    tracing::info!("ops::join: entering, target={}", target_room);
+
     // Leave current room if in one
     if let Some(current) = current_room {
+        tracing::info!("ops::join: leaving current room {}", current);
         let mut world = state.world.write().await;
+        tracing::info!("ops::join: got write lock for leave");
         if let Some(room) = world.get_room_mut(current) {
             room.remove_user(username);
         }
     }
 
     // Check target exists
+    tracing::info!("ops::join: checking target exists");
     {
+        tracing::info!("ops::join: acquiring read lock");
         let world = state.world.read().await;
+        tracing::info!("ops::join: got read lock");
         if world.get_room(target_room).is_none() {
             return Err(anyhow!(
                 "No room named '{}'. Use /create {} to make one.",
@@ -350,13 +357,18 @@ pub async fn join(
             ));
         }
     }
+    tracing::info!("ops::join: target exists");
 
     // Ensure room buffer exists in database
+    tracing::info!("ops::join: getting room buffer");
     let buffer = state.db.get_or_create_room_buffer(target_room)?;
+    tracing::info!("ops::join: got room buffer");
 
     // Join target room
+    tracing::info!("ops::join: acquiring write lock for join");
     {
         let mut world = state.world.write().await;
+        tracing::info!("ops::join: got write lock for join");
         if let Some(room) = world.get_room_mut(target_room) {
             room.add_user(username.to_string());
             // Set buffer ID if not already set

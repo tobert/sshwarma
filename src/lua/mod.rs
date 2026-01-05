@@ -344,6 +344,38 @@ impl LuaRuntime {
         loaded.set("inspect", inspect_chunk.clone())?;
         lua.globals().set("inspect", inspect_chunk)?;
 
+        // Pre-load all command modules into package.loaded
+        // This avoids needing load() which isn't available in Luau sandbox
+        let cmd_modules: &[(&str, &str, &str)] = &[
+            ("commands.nav", COMMANDS_NAV_MODULE, "embedded:commands/nav.lua"),
+            ("commands.room", COMMANDS_ROOM_MODULE, "embedded:commands/room.lua"),
+            ("commands.inventory", COMMANDS_INVENTORY_MODULE, "embedded:commands/inventory.lua"),
+            ("commands.journal", COMMANDS_JOURNAL_MODULE, "embedded:commands/journal.lua"),
+            ("commands.mcp", COMMANDS_MCP_MODULE, "embedded:commands/mcp.lua"),
+            ("commands.history", COMMANDS_HISTORY_MODULE, "embedded:commands/history.lua"),
+            ("commands.debug", COMMANDS_DEBUG_MODULE, "embedded:commands/debug.lua"),
+            ("commands.prompt", COMMANDS_PROMPT_MODULE, "embedded:commands/prompt.lua"),
+            ("commands.rules", COMMANDS_RULES_MODULE, "embedded:commands/rules.lua"),
+        ];
+
+        for (name, code, chunk_name) in cmd_modules {
+            let module: Table = lua
+                .load(*code)
+                .set_name(*chunk_name)
+                .eval()
+                .map_err(|e| anyhow::anyhow!("failed to load {}: {}", name, e))?;
+            loaded.set(*name, module)?;
+        }
+
+        // Now load the main commands module (it will find submodules in package.loaded)
+        let commands_module: Table = lua
+            .load(COMMANDS_MODULE)
+            .set_name("embedded:commands/init.lua")
+            .eval()
+            .map_err(|e| anyhow::anyhow!("failed to load commands module: {}", e))?;
+        loaded.set("commands", commands_module.clone())?;
+        lua.globals().set("commands", commands_module)?;
+
         // Load the default screen script
         lua.load(DEFAULT_SCREEN_SCRIPT)
             .set_name("embedded:screen.lua")
@@ -1012,30 +1044,30 @@ impl LuaRuntime {
     /// Loads the commands module and calls `commands.dispatch(name, args)`.
     /// Returns the result table converted to CommandResult.
     pub fn call_dispatch_command(&self, name: &str, args: &str) -> Result<Option<CommandResult>> {
-        // Load the commands module via embedded module system
+        tracing::info!("call_dispatch_command: getting commands module");
+        // Use require() to get cached commands module (or load if first time)
         let commands: Table = self
             .lua
             .load(
                 r#"
-                local code = sshwarma.get_embedded_module('commands')
-                if code then
-                    return load(code, "@embedded/commands/init.lua")()
-                end
-                return nil
+                return require('commands')
             "#,
             )
             .eval()
-            .map_err(|e| anyhow::anyhow!("failed to load commands module: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to get commands module: {}", e))?;
+        tracing::info!("call_dispatch_command: got commands module");
 
         // Check if dispatch function exists
         let dispatch_fn: mlua::Function = commands
             .get("dispatch")
             .map_err(|e| anyhow::anyhow!("commands.dispatch not found: {}", e))?;
+        tracing::info!("call_dispatch_command: calling dispatch({}, {})", name, args);
 
         // Call dispatch(name, args)
         let result: Table = dispatch_fn
             .call::<Table>((name, args))
             .map_err(|e| anyhow::anyhow!("commands.dispatch failed: {}", e))?;
+        tracing::info!("call_dispatch_command: dispatch returned");
 
         // Parse result table {text, mode, title?}
         let text: String = result.get("text").unwrap_or_default();
@@ -2070,5 +2102,164 @@ end
             .expect("should get display width");
 
         assert_eq!(result, 0);
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn test_require_commands_module() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        println!("Testing require('commands')...");
+        let result: Result<mlua::Table, _> = runtime
+            .lua
+            .load("return require('commands')")
+            .eval();
+
+        match &result {
+            Ok(t) => {
+                println!("Commands loaded!");
+                let has_dispatch: bool = t.contains_key("dispatch").unwrap_or(false);
+                println!("Has dispatch: {}", has_dispatch);
+                assert!(has_dispatch, "commands module should have dispatch function");
+            }
+            Err(e) => {
+                println!("Error loading commands: {}", e);
+                panic!("Failed to load commands module: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_region_visible() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Check what regions are visible after resolving
+        let result: String = runtime
+            .lua
+            .load(
+                r#"
+            local output = {}
+
+            -- Check regions module
+            table.insert(output, "regions type: " .. type(regions))
+
+            if regions then
+                -- List defined regions
+                local defined = regions.list()
+                table.insert(output, "defined regions: " .. table.concat(defined, ", "))
+
+                -- Resolve for 80x24 terminal
+                regions.resolve(80, 24)
+
+                -- Get visible ordered
+                local visible = regions.visible_ordered()
+                table.insert(output, "visible regions (" .. #visible .. "):")
+                for _, r in ipairs(visible) do
+                    if r.area then
+                        table.insert(output, string.format("  %s: x=%d y=%d w=%d h=%d z=%d",
+                            r.name, r.area.x, r.area.y, r.area.w, r.area.h, r.z))
+                    else
+                        table.insert(output, string.format("  %s: area=nil z=%d", r.name, r.z))
+                    end
+                end
+            end
+
+            -- Check scroll
+            if tools and tools.scroll then
+                local scroll = tools.scroll()
+                table.insert(output, "scroll type: " .. type(scroll))
+                table.insert(output, "scroll truthy: " .. tostring(scroll and true or false))
+            end
+
+            return table.concat(output, "\n")
+        "#,
+            )
+            .eval()
+            .expect("should run");
+
+        println!("{}", result);
+
+        // Should have chat, status, input regions visible
+        assert!(
+            result.contains("chat:"),
+            "chat region should be visible: {}",
+            result
+        );
+        assert!(
+            result.contains("status:"),
+            "status region should be visible: {}",
+            result
+        );
+        assert!(
+            result.contains("input:"),
+            "input region should be visible: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_on_tick_draws_status_and_input() {
+        use std::sync::{Arc, Mutex};
+
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Create a render buffer
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 24)));
+
+        // First call on_tick
+        runtime
+            .call_on_tick(1, render_buffer.clone(), 80, 24)
+            .expect("should call on_tick");
+
+        // Check the buffer content
+        let buf = render_buffer.lock().unwrap();
+
+        // Get raw output to see what was drawn
+        let output = buf.to_ansi();
+        println!("Buffer output length: {}", output.len());
+
+        // Helper to extract a line
+        fn get_line(buf: &crate::ui::RenderBuffer, y: u16) -> String {
+            let mut line = String::new();
+            for x in 0..buf.width() {
+                if let Some(cell) = buf.get(x, y) {
+                    line.push(cell.char);
+                }
+            }
+            line
+        }
+
+        // Check if specific regions have content
+        // The chat region is y=0 to y=21 (22 lines)
+        // The status is y=22
+        // The input is y=23
+
+        // Extract status line (y=22) - should have room info
+        let status_str = get_line(&buf, 22);
+        println!("Status line: '{}'", status_str.trim());
+
+        // Extract input line (y=23)
+        let input_str = get_line(&buf, 23);
+        println!("Input line: '{}'", input_str.trim());
+
+        // Check first line of chat (y=0)
+        let chat_str = get_line(&buf, 0);
+        println!("First chat line: '{}'", chat_str.trim());
+
+        // We expect status and input to have content
+        assert!(
+            !status_str.trim().is_empty(),
+            "status line should have content"
+        );
+        assert!(
+            !input_str.trim().is_empty(),
+            "input line should have content (at least prompt)"
+        );
+
+        // Chat may be empty if no history (which is expected without room)
     }
 }
