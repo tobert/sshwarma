@@ -1235,6 +1235,67 @@ mod tests {
     }
 
     #[test]
+    fn test_screen_refresh_initial_render() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Simulate screen refresh: mark all regions dirty FIRST (as screen.rs does)
+        let dirty = runtime.tool_state().dirty();
+        dirty.mark_many(["status", "chat", "input"]);
+
+        // Take dirty tags (as screen refresh loop does after waiting)
+        let dirty_tags = dirty.take();
+
+        // Should have all 3 tags
+        assert!(
+            dirty_tags.contains("status"),
+            "should have status tag marked dirty"
+        );
+        assert!(
+            dirty_tags.contains("chat"),
+            "should have chat tag marked dirty"
+        );
+        assert!(
+            dirty_tags.contains("input"),
+            "should have input tag marked dirty"
+        );
+
+        // Now call on_tick_with_tags (as render_screen_with_tags does)
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 24)));
+        runtime
+            .call_on_tick_with_tags(&dirty_tags, 1, render_buffer.clone(), 80, 24)
+            .expect("should call on_tick_with_tags");
+
+        // Check that output was produced
+        let buf = render_buffer.lock().unwrap();
+        let output = buf.to_ansi();
+        assert!(
+            !output.is_empty(),
+            "screen should produce output on initial render"
+        );
+    }
+
+    #[test]
+    fn test_on_input_exists() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Verify on_input function is globally available
+        let globals = runtime.lua.globals();
+        let on_input: mlua::Value = globals.get("on_input").expect("should get on_input");
+
+        assert!(
+            on_input != mlua::Value::Nil,
+            "on_input should be defined as a global function"
+        );
+        assert!(
+            on_input.is_function(),
+            "on_input should be a function"
+        );
+    }
+
+    #[test]
     fn test_user_config_path() {
         let path = user_screen_script_path();
         assert!(path.to_string_lossy().contains("sshwarma"));
