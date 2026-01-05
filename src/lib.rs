@@ -24,3 +24,6 @@ pub mod state;
 pub mod status;
 pub mod ui;
 pub mod world;
+
+#[cfg(feature = "testing")]
+pub mod testing;

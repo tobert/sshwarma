@@ -76,5 +76,23 @@ unicode-width = "0.2"
 mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 
+[features]
+default = []
+testing = ["dirs", "whoami"]
+
 [dev-dependencies]
 tokio-test = "0.4"
+
+# Optional deps for testing feature
+[dependencies.dirs]
+version = "6"
+optional = true
+
+[dependencies.whoami]
+version = "1"
+optional = true
+
+[[bin]]
+name = "sshtest"
+path = "src/bin/sshtest.rs"
+required-features = ["testing"]
