@@ -57,6 +57,26 @@ async fn screen_refresh_task(
     // Mark all regions dirty for initial render
     dirty.mark_many(["status", "chat", "input"]);
 
+    // Do initial render immediately (don't wait for notify - it was already sent)
+    let dirty_tags = dirty.take();
+    if !dirty_tags.is_empty() {
+        if !render_screen_with_tags(
+            &handle,
+            channel,
+            &lua_runtime,
+            &current_buffer,
+            &mut last_buffer,
+            &dirty_tags,
+            0,
+            term_width,
+            term_height,
+        )
+        .await
+        {
+            return; // Connection closed
+        }
+    }
+
     loop {
         // Wait for either:
         // 1. Dirty signal (something changed, redraw)
