@@ -15,6 +15,6 @@ pub mod render;
 pub mod scroll;
 
 pub use input::{CompletionItem, CompletionState, InputBuffer, KeyEvent, LuaInputBuffer};
-pub use layout::{Layout, LuaArea, Rect, RegionDef};
+pub use layout::{register_layout_functions, Layout, LuaArea, Rect, RegionDef};
 pub use render::{Cell, LuaDrawContext, RenderBuffer, Style};
 pub use scroll::{LuaScrollState, LuaViewStack, ScrollMode, ScrollState, ViewLayer, ViewStack};

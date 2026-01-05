@@ -24,6 +24,8 @@ pub use tool_middleware::{ToolContext, ToolMiddleware};
 pub use tools::{register_mcp_tools, InputState, LuaToolState, SessionContext};
 pub use wrap::{WrapResult, WrapState};
 
+use crate::ui::register_layout_functions;
+
 // Re-export startup script path for main.rs
 pub use self::startup_script_path as get_startup_script_path;
 
@@ -293,6 +295,10 @@ impl LuaRuntime {
         // Register scroll/view functions
         register_scroll_functions(&lua)
             .map_err(|e| anyhow::anyhow!("failed to register scroll functions: {}", e))?;
+
+        // Register layout functions (sshwarma.layout for region resolution)
+        register_layout_functions(&lua)
+            .map_err(|e| anyhow::anyhow!("failed to register layout functions: {}", e))?;
 
         // Load the wrap script first (provides wrap() and default_wrap())
         lua.load(DEFAULT_WRAP_SCRIPT)

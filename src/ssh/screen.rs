@@ -56,10 +56,13 @@ async fn screen_refresh_task(
 
     // Mark all regions dirty for initial render
     dirty.mark_many(["status", "chat", "input"]);
+    tracing::info!("screen_refresh_task: marked initial dirty tags");
 
     // Do initial render immediately (don't wait for notify - it was already sent)
     let dirty_tags = dirty.take();
+    tracing::info!("screen_refresh_task: initial dirty_tags = {:?}", dirty_tags);
     if !dirty_tags.is_empty() {
+        tracing::info!("screen_refresh_task: doing initial render");
         if !render_screen_with_tags(
             &handle,
             channel,
@@ -192,6 +195,7 @@ async fn render_screen_with_tags(
 
         // Call on_tick with dirty tags - Lua draws to full screen
         // Future: Lua can use dirty_tags to render only affected regions
+        tracing::debug!("render_screen_with_tags: calling on_tick");
         if let Err(e) = lua.call_on_tick_with_tags(
             dirty_tags,
             tick,
@@ -199,9 +203,10 @@ async fn render_screen_with_tags(
             term_width,
             term_height,
         ) {
-            tracing::debug!("on_tick error: {}", e);
+            tracing::warn!("on_tick error: {}", e);
             return true; // Continue, just skip this frame
         }
+        tracing::debug!("render_screen_with_tags: on_tick completed");
 
         // Generate diff ANSI - only rows that changed
         let buf = current_buffer.lock().unwrap();
@@ -231,6 +236,7 @@ async fn render_screen_with_tags(
     };
 
     // Only send if there are changes
+    tracing::debug!("render_screen_with_tags: diff_output len = {}", diff_output.len());
     if !diff_output.is_empty() {
         // Wrap in synchronized output to prevent tearing
         // Position hardware cursor at input line - this overlays the visual cursor
