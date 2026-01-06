@@ -52,7 +52,18 @@ impl SshHandler {
             return Ok(());
         };
 
-        let Some(ref room_name) = player.current_room else {
+        // Get room from Lua session context (updated by tools.join)
+        // Fall back to player.current_room for backward compatibility
+        let room_name = if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            lua.tool_state()
+                .session_context()
+                .and_then(|ctx| ctx.room_name.clone())
+        } else {
+            player.current_room.clone()
+        };
+
+        let Some(ref room_name) = room_name else {
             self.send_error(channel, session, "Not in a room. Use /join <room>")
                 .await;
             return Ok(());
@@ -119,7 +130,15 @@ impl SshHandler {
             }
         };
 
-        let room_name = player.current_room.clone();
+        // Get room from Lua session context (updated by tools.join)
+        let room_name = if let Some(ref lua_runtime) = self.lua_runtime {
+            let lua = lua_runtime.lock().await;
+            lua.tool_state()
+                .session_context()
+                .and_then(|ctx| ctx.room_name.clone())
+        } else {
+            player.current_room.clone()
+        };
         let username = player.username.clone();
 
         // Add user's message to buffer
