@@ -2,31 +2,28 @@
 # Test input handling by sending various text patterns
 set -e
 
-# Use release binary (systemd runs release)
-SSHTEST="./target/release/sshtest"
+SSHTEST="${SSHTEST:-./target/debug/sshtest}"
 
 echo "==> Test 1: Basic text input"
-$SSHTEST --wait 1000 \
-    --cmd "/join test" \
-    --cmd "hello world"
+$SSHTEST --cmd "/join test" --wait-for "test>" \
+    --cmd "hello world" --wait-for "hello world"
 
 echo ""
 echo "==> Test 2: Unicode input"
-$SSHTEST --wait 1000 \
-    --cmd "/join test" \
-    --cmd "emoji: 🎵🎹🎸"
+$SSHTEST --cmd "/join test" --wait-for "test>" \
+    --cmd "emoji: 🎵🎹🎸" --wait-for "🎵"
 
 echo ""
 echo "==> Test 3: Long line input"
-$SSHTEST --wait 1000 \
-    --cmd "/join test" \
-    --cmd "This is a longer message that tests how the input buffer handles text that spans a reasonable length"
+$SSHTEST --cmd "/join test" --wait-for "test>" \
+    --cmd "This is a longer message that tests how the input buffer handles text that spans a reasonable length" \
+    --wait-for "longer message"
 
 echo ""
 echo "==> Test 4: Special characters"
-$SSHTEST --wait 1000 \
-    --cmd "/join test" \
-    --cmd "special: /path/to/file.txt (with parens) [and brackets] {and braces}"
+$SSHTEST --cmd "/join test" --wait-for "test>" \
+    --cmd "special: /path/to/file.txt (with parens) [and brackets]" \
+    --wait-for "/path/to/file.txt"
 
 echo ""
 echo "NOTE: To test backspace/arrow keys, SSH in manually and verify:"

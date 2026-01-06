@@ -111,7 +111,7 @@ OPTIONS:
     -k, --key <PATH>         SSH private key [default: ~/.ssh/id_ed25519]
     -u, --user <NAME>        Username [default: current user]
     -c, --cmd <COMMAND>      Command to send (can be repeated)
-    -f, --wait-for <PATTERN> Wait until pattern appears in output
+    -f, --wait-for <PATTERN> Wait until pattern appears (matches plain text, ANSI stripped)
     -t, --timeout <MS>       Max wait time [default: 5000]
     -r, --raw                Print raw bytes (hex dump)
     -o, --offset <N>         Skip first N lines of output
@@ -119,14 +119,22 @@ OPTIONS:
     -h, --help               Print help
 
 OUTPUT:
-    Default output shows ANSI escapes as readable \e[...m sequences.
+    Default shows escaped ANSI: \e[38;2;125;207;255mlobby>\e[0m
+    Pattern matching (--wait-for) strips ANSI to match visible text.
     Use --raw for hex dump when debugging binary data.
 
 EXAMPLES:
-    sshtest --cmd "/rooms"
+    # Basic command, wait for timeout
+    sshtest --cmd "/rooms" --timeout 1000
+
+    # Wait for prompt (more reliable than fixed timeout)
     sshtest --cmd "/join test" --wait-for "test>"
-    sshtest --cmd "/rooms" --offset 5 --limit 10
-    sshtest --cmd "/who" --raw
+
+    # Multi-step interaction
+    sshtest --cmd "/join test" --wait-for "test>" --cmd "hello" --wait-for "hello"
+
+    # Debug with hex dump
+    sshtest --cmd "/rooms" --raw
 "#
     );
 }

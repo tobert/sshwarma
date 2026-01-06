@@ -1,31 +1,28 @@
 #!/bin/bash
-# Test chat rendering specifically - send multiple messages and check output
+# Test chat rendering - send messages and verify they appear
 set -e
 
-# Use release binary (systemd runs release)
-SSHTEST="./target/release/sshtest"
+SSHTEST="${SSHTEST:-./target/debug/sshtest}"
 
 echo "==> Sending messages and checking for chat content..."
 
-# Join room and send a few messages, longer wait to see if chat appears
-OUTPUT=$($SSHTEST --wait 3000 \
-    --cmd "/join test" \
-    --cmd "message one" \
-    --cmd "message two" \
-    --cmd "message three" \
+# Join room and send messages, wait for each to appear
+OUTPUT=$($SSHTEST \
+    --cmd "/join test" --wait-for "test>" \
+    --cmd "message one" --wait-for "message one" \
+    --cmd "message two" --wait-for "message two" \
+    --cmd "message three" --wait-for "message three" \
     2>&1)
 
 echo "$OUTPUT"
 
 echo ""
 echo "==> Checking for message content in output..."
-if echo "$OUTPUT" | grep -a "message"; then
-    echo "SUCCESS: Found message text in output"
+if echo "$OUTPUT" | grep -q "message one" && \
+   echo "$OUTPUT" | grep -q "message two" && \
+   echo "$OUTPUT" | grep -q "message three"; then
+    echo "SUCCESS: All messages found in output"
 else
-    echo "FAIL: No message text found - chat not rendering"
+    echo "FAIL: Some messages missing"
+    exit 1
 fi
-
-echo ""
-echo "==> Checking which rows have content..."
-# Look for row positioning escapes [row;colH
-echo "$OUTPUT" | grep -oE '\[([0-9]+);[0-9]+H' | sort -u | head -20

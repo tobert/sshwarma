@@ -526,13 +526,20 @@ For testing UI changes against a running sshwarma server:
 # Build with testing feature
 cargo build --features testing --bin sshtest
 
-# Send commands and capture output
-./target/debug/sshtest --cmd "/rooms"
-./target/debug/sshtest --cmd "/join test" --cmd "hello world"
+# Wait for pattern (preferred - more reliable than fixed timeout)
+./target/debug/sshtest --cmd "/join test" --wait-for "test>"
 
-# Debug ANSI sequences with hex dump
-./target/debug/sshtest --cmd "/rooms" --raw --wait 1000
+# Multi-step: join room, wait for prompt, send message
+./target/debug/sshtest --cmd "/join test" --wait-for "test>" --cmd "hello"
+
+# Fixed timeout when no pattern to match
+./target/debug/sshtest --cmd "/rooms" --timeout 1000
+
+# Debug - hex dump of raw bytes
+./target/debug/sshtest --cmd "/rooms" --raw
 ```
+
+**Output format**: Default shows escaped ANSI codes (`\e[32m` visible). Pattern matching (`--wait-for`) strips ANSI to match plain text.
 
 Uses SSH agent automatically (falls back to `~/.ssh/id_ed25519`). Useful for smoke-testing Lua UI changes without manual SSH sessions.
 

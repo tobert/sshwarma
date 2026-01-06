@@ -1,17 +1,16 @@
 #!/bin/bash
+# Basic UI smoke tests
 set -e
 
-# Use release binary (systemd runs release)
-SSHTEST="./target/release/sshtest"
-WAIT="${1:-1000}"  # Default 1 second wait
+SSHTEST="${SSHTEST:-./target/debug/sshtest}"
 
 echo "==> Test 1: Initial screen (lobby)"
-$SSHTEST --wait "$WAIT" --cmd "/look"
+$SSHTEST --cmd "/look" --wait-for "lobby"
 
 echo ""
 echo "==> Test 2: Join room"
-$SSHTEST --wait "$WAIT" --cmd "/join test"
+$SSHTEST --cmd "/join test" --wait-for "test>"
 
 echo ""
 echo "==> Test 3: Send message"
-$SSHTEST --wait "$WAIT" --cmd "/join test" --cmd "hello from sshtest"
+$SSHTEST --cmd "/join test" --wait-for "test>" --cmd "hello from sshtest"
