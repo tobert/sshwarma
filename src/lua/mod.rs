@@ -347,15 +347,51 @@ impl LuaRuntime {
         // Pre-load all command modules into package.loaded
         // This avoids needing load() which isn't available in Luau sandbox
         let cmd_modules: &[(&str, &str, &str)] = &[
-            ("commands.nav", COMMANDS_NAV_MODULE, "embedded:commands/nav.lua"),
-            ("commands.room", COMMANDS_ROOM_MODULE, "embedded:commands/room.lua"),
-            ("commands.inventory", COMMANDS_INVENTORY_MODULE, "embedded:commands/inventory.lua"),
-            ("commands.journal", COMMANDS_JOURNAL_MODULE, "embedded:commands/journal.lua"),
-            ("commands.mcp", COMMANDS_MCP_MODULE, "embedded:commands/mcp.lua"),
-            ("commands.history", COMMANDS_HISTORY_MODULE, "embedded:commands/history.lua"),
-            ("commands.debug", COMMANDS_DEBUG_MODULE, "embedded:commands/debug.lua"),
-            ("commands.prompt", COMMANDS_PROMPT_MODULE, "embedded:commands/prompt.lua"),
-            ("commands.rules", COMMANDS_RULES_MODULE, "embedded:commands/rules.lua"),
+            (
+                "commands.nav",
+                COMMANDS_NAV_MODULE,
+                "embedded:commands/nav.lua",
+            ),
+            (
+                "commands.room",
+                COMMANDS_ROOM_MODULE,
+                "embedded:commands/room.lua",
+            ),
+            (
+                "commands.inventory",
+                COMMANDS_INVENTORY_MODULE,
+                "embedded:commands/inventory.lua",
+            ),
+            (
+                "commands.journal",
+                COMMANDS_JOURNAL_MODULE,
+                "embedded:commands/journal.lua",
+            ),
+            (
+                "commands.mcp",
+                COMMANDS_MCP_MODULE,
+                "embedded:commands/mcp.lua",
+            ),
+            (
+                "commands.history",
+                COMMANDS_HISTORY_MODULE,
+                "embedded:commands/history.lua",
+            ),
+            (
+                "commands.debug",
+                COMMANDS_DEBUG_MODULE,
+                "embedded:commands/debug.lua",
+            ),
+            (
+                "commands.prompt",
+                COMMANDS_PROMPT_MODULE,
+                "embedded:commands/prompt.lua",
+            ),
+            (
+                "commands.rules",
+                COMMANDS_RULES_MODULE,
+                "embedded:commands/rules.lua",
+            ),
         ];
 
         for (name, code, chunk_name) in cmd_modules {
@@ -1061,7 +1097,11 @@ impl LuaRuntime {
         let dispatch_fn: mlua::Function = commands
             .get("dispatch")
             .map_err(|e| anyhow::anyhow!("commands.dispatch not found: {}", e))?;
-        tracing::info!("call_dispatch_command: calling dispatch({}, {})", name, args);
+        tracing::info!(
+            "call_dispatch_command: calling dispatch({}, {})",
+            name,
+            args
+        );
 
         // Call dispatch(name, args)
         let result: Table = dispatch_fn
@@ -1071,7 +1111,9 @@ impl LuaRuntime {
 
         // Parse result table {text, mode, title?}
         let text: String = result.get("text").unwrap_or_default();
-        let mode: String = result.get("mode").unwrap_or_else(|_| "notification".to_string());
+        let mode: String = result
+            .get("mode")
+            .unwrap_or_else(|_| "notification".to_string());
         let title: Option<String> = result.get("title").ok();
 
         Ok(Some(CommandResult { text, mode, title }))
@@ -1274,7 +1316,6 @@ mod tests {
 
     #[test]
     fn test_screen_refresh_initial_render() {
-        use std::collections::HashSet;
         use std::sync::{Arc, Mutex};
 
         let runtime = LuaRuntime::new().expect("should create runtime");
@@ -1327,10 +1368,7 @@ mod tests {
             on_input != mlua::Value::Nil,
             "on_input should be defined as a global function"
         );
-        assert!(
-            on_input.is_function(),
-            "on_input should be a function"
-        );
+        assert!(on_input.is_function(), "on_input should be a function");
     }
 
     #[test]
@@ -1503,6 +1541,68 @@ mod tests {
             .expect("require ui.regions should work");
 
         assert!(result, "ui.regions should be a table");
+    }
+
+    #[test]
+    fn test_regions_show_invalidates_cache() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // This test verifies that regions.show() invalidates the cache
+        // so that visible_ordered() includes newly-shown regions.
+        // Bug: If cache isn't invalidated, overlay won't appear in visible_ordered()
+        // after being shown, because resolve() only includes visible regions.
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local regions = require 'ui.regions'
+                regions.clear()  -- start fresh
+
+                -- Define overlay as hidden
+                regions.define('overlay', {
+                    top = 0,
+                    bottom = -2,
+                    z = 10,
+                    visible = false,
+                })
+
+                -- Define chat as visible
+                regions.define('chat', {
+                    top = 0,
+                    bottom = -2,
+                    z = 0,
+                })
+
+                -- Resolve with overlay hidden
+                regions.resolve(80, 24)
+
+                -- visible_ordered should NOT include overlay
+                local before = regions.visible_ordered()
+                local overlay_before = false
+                for _, r in ipairs(before) do
+                    if r.name == "overlay" then overlay_before = true end
+                end
+                assert(not overlay_before, "overlay should not be visible before show()")
+
+                -- Now show overlay
+                regions.show('overlay')
+
+                -- Resolve again (cache should have been invalidated by show())
+                regions.resolve(80, 24)
+
+                -- visible_ordered should NOW include overlay
+                local after = regions.visible_ordered()
+                local overlay_after = false
+                for _, r in ipairs(after) do
+                    if r.name == "overlay" then overlay_after = true end
+                end
+                return overlay_after
+            "#,
+            )
+            .eval()
+            .expect("regions show cache test should run");
+
+        assert!(result, "overlay should be visible after show() - cache must be invalidated");
     }
 
     #[test]
@@ -2114,17 +2214,17 @@ mod debug_tests {
         let runtime = LuaRuntime::new().expect("should create runtime");
 
         println!("Testing require('commands')...");
-        let result: Result<mlua::Table, _> = runtime
-            .lua
-            .load("return require('commands')")
-            .eval();
+        let result: Result<mlua::Table, _> = runtime.lua.load("return require('commands')").eval();
 
         match &result {
             Ok(t) => {
                 println!("Commands loaded!");
                 let has_dispatch: bool = t.contains_key("dispatch").unwrap_or(false);
                 println!("Has dispatch: {}", has_dispatch);
-                assert!(has_dispatch, "commands module should have dispatch function");
+                assert!(
+                    has_dispatch,
+                    "commands module should have dispatch function"
+                );
             }
             Err(e) => {
                 println!("Error loading commands: {}", e);
@@ -2261,5 +2361,69 @@ mod debug_tests {
         );
 
         // Chat may be empty if no history (which is expected without room)
+    }
+
+    #[test]
+    fn test_chat_region_no_debug_output() {
+        use std::sync::{Arc, Mutex};
+
+        let runtime = LuaRuntime::new().expect("should create runtime");
+        let render_buffer = Arc::new(Mutex::new(crate::ui::RenderBuffer::new(80, 24)));
+
+        // Call on_tick
+        runtime
+            .call_on_tick(1, render_buffer.clone(), 80, 24)
+            .expect("should call on_tick");
+
+        // Helper to get line content
+        fn get_line(buf: &crate::ui::RenderBuffer, y: u16) -> String {
+            let mut line = String::new();
+            for x in 0..buf.width() {
+                if let Some(cell) = buf.get(x, y) {
+                    line.push(cell.char);
+                }
+            }
+            line
+        }
+
+        let buf = render_buffer.lock().unwrap();
+
+        // Check first few lines don't have debug markers
+        // Debug output used to have "w=" "h=" "regions=" markers
+        let line0 = get_line(&buf, 0);
+        let line1 = get_line(&buf, 1);
+        let line2 = get_line(&buf, 2);
+
+        assert!(
+            !line0.contains("w=") && !line0.contains("regions="),
+            "line 0 should not have debug output: '{}'",
+            line0.trim()
+        );
+        assert!(
+            !line1.contains("room=") && !line1.contains("history="),
+            "line 1 should not have debug output: '{}'",
+            line1.trim()
+        );
+        assert!(
+            !line2.contains("CHAT:"),
+            "line 2 should not have CHAT debug output: '{}'",
+            line2.trim()
+        );
+
+        // Status should be at y=22
+        let status = get_line(&buf, 22);
+        assert!(
+            status.contains("[") || status.contains("─"),
+            "status line (y=22) should have status content"
+        );
+
+        // Input should be at y=23 (may be empty prompt or have content)
+        let input = get_line(&buf, 23);
+        // Just verify it doesn't have debug output
+        assert!(
+            !input.contains("CHAT:") && !input.contains("regions="),
+            "input line (y=23) should not have debug output: '{}'",
+            input.trim()
+        );
     }
 }

@@ -38,8 +38,9 @@ end
 --- Show a region
 ---@param name string Region name
 function M.show(name)
-    if definitions[name] then
+    if definitions[name] and not visibility[name] then
         visibility[name] = true
+        resolved = {}  -- invalidate cache so resolve() includes this region
         if tools and tools.mark_dirty then
             tools.mark_dirty(name)
         end
@@ -49,8 +50,9 @@ end
 --- Hide a region
 ---@param name string Region name
 function M.hide(name)
-    if definitions[name] then
+    if definitions[name] and visibility[name] then
         visibility[name] = false
+        resolved = {}  -- invalidate cache so resolve() excludes this region
         if tools and tools.mark_dirty then
             tools.mark_dirty(name)
         end

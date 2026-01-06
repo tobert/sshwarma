@@ -145,6 +145,13 @@ impl LuaToolState {
     /// Content is split into lines for scrolling. Sets content and marks region visible.
     /// Visibility is controlled via the Lua regions module.
     pub fn show_region(&self, region: &str, title: &str, content: &str) {
+        tracing::info!(
+            region = %region,
+            title = %title,
+            content_len = content.len(),
+            content_preview = %content.chars().take(50).collect::<String>(),
+            "show_region called"
+        );
         let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         if let Ok(mut guard) = self.region_contents.write() {
             guard.insert(
@@ -795,7 +802,8 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Try to get history from database
-            if let Some(shared) = state.shared_state() {
+            let shared = state.shared_state();
+            if let Some(shared) = shared {
                 // Get buffer for room
                 if let Ok(buffer) = shared.db.get_or_create_room_buffer(&room_name) {
                     // Get recent rows (fetch more than limit to account for filtering)
@@ -812,10 +820,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                                 break;
                             }
 
-                            // Include message rows and thinking/streaming rows
+                            // Only include finalized message rows
+                            // Skip thinking.stream (internal streaming chunks) and other non-message types
                             let is_message = db_row.content_method.starts_with("message.");
-                            let is_thinking = db_row.content_method.starts_with("thinking.");
-                            if !is_message && !is_thinking {
+                            if !is_message {
                                 continue;
                             }
 
@@ -849,11 +857,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             row.set("timestamp", db_row.created_at)?;
                             row.set(
                                 "is_model",
-                                is_message && db_row.content_method == "message.model"
-                                    || is_thinking,
+                                db_row.content_method == "message.model",
                             )?;
-                            row.set("is_thinking", is_thinking)?;
-                            row.set("is_streaming", is_thinking && db_row.finalized_at.is_none())?;
+                            row.set("is_thinking", false)?;
+                            row.set("is_streaming", db_row.content_method == "message.model.chunk")?;
                             list.set(idx, row)?;
                             idx += 1;
                             count += 1;
@@ -3162,49 +3169,54 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // Insert prompt into target at slot index
     let prompt_insert_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, (target, index, prompt_name): (String, i64, String)| {
-            let result = lua.create_table()?;
+        lua.create_function(
+            move |lua, (target, index, prompt_name): (String, i64, String)| {
+                let result = lua.create_table()?;
 
-            let shared = match state.shared_state() {
-                Some(s) => s,
-                None => {
-                    result.set("success", false)?;
-                    result.set("error", "no shared state")?;
-                    return Ok(result);
-                }
-            };
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no shared state")?;
+                        return Ok(result);
+                    }
+                };
 
-            let session = match state.session_context() {
-                Some(s) => s,
-                None => {
-                    result.set("success", false)?;
-                    result.set("error", "no session context")?;
-                    return Ok(result);
-                }
-            };
+                let session = match state.session_context() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no session context")?;
+                        return Ok(result);
+                    }
+                };
 
-            let room_name = match session.room_name {
-                Some(ref r) => r.clone(),
-                None => {
-                    result.set("success", false)?;
-                    result.set("error", "not in a room")?;
-                    return Ok(result);
-                }
-            };
+                let room_name = match session.room_name {
+                    Some(ref r) => r.clone(),
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "not in a room")?;
+                        return Ok(result);
+                    }
+                };
 
-            // Use "system" as default target_type for manual insertion
-            match shared.db.insert_slot(&room_name, &target, "system", index, &prompt_name) {
-                Ok(()) => {
-                    result.set("success", true)?;
+                // Use "system" as default target_type for manual insertion
+                match shared
+                    .db
+                    .insert_slot(&room_name, &target, "system", index, &prompt_name)
+                {
+                    Ok(()) => {
+                        result.set("success", true)?;
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                    }
                 }
-                Err(e) => {
-                    result.set("success", false)?;
-                    result.set("error", e.to_string())?;
-                }
-            }
 
-            Ok(result)
-        })?
+                Ok(result)
+            },
+        )?
     };
     tools.set("prompt_insert", prompt_insert_fn)?;
 
@@ -3898,28 +3910,6 @@ mod tests {
                     let _ = self.db.append_row(&mut row);
                 }
             }
-        }
-
-        /// Add a thinking/streaming row (simulates model response in progress)
-        async fn add_thinking(
-            &self,
-            room: &str,
-            model_name: &str,
-            content: &str,
-        ) -> Option<String> {
-            use crate::db::rows::Row;
-
-            let buffer = self.db.get_or_create_room_buffer(room).ok()?;
-            let agent = self.db.get_or_create_model_agent(model_name).ok()?;
-            let mut row = Row::thinking(&buffer.id, &agent.id);
-            row.content = Some(content.to_string());
-            self.db.append_row(&mut row).ok()?;
-            Some(row.id)
-        }
-
-        /// Finalize a thinking row (simulates streaming complete)
-        fn finalize_thinking(&self, row_id: &str) {
-            let _ = self.db.finalize_row(row_id);
         }
 
         /// Add journal entry

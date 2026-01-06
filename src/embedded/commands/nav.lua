@@ -61,17 +61,17 @@ function M.join(args)
 
     local result = tools.join(room_name)
 
-    -- DEBUG: Show what tools.join returned
-    local debug_msg = string.format("DEBUG join: room=%s success=%s error=%s",
-        room_name,
-        tostring(result.success),
-        tostring(result.error or "nil"))
-
     if result.success then
-        -- Build room summary
-        local entry = format_room_entry(result.room)
-        entry.text = debug_msg .. "\n" .. entry.text
-        return entry
+        -- Brief notification - chat area stays visible
+        local room = result.room
+        local msg = string.format("Joined %s", room and room.name or room_name)
+        if room and room.vibe then
+            msg = msg .. string.format(" (%s)", room.vibe)
+        end
+        return {
+            text = msg,
+            mode = "notification"
+        }
     else
         local err = result.error or "unknown error"
         if err:find("not found") or err:find("doesn't exist") then

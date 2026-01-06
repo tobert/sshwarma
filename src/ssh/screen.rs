@@ -236,7 +236,10 @@ async fn render_screen_with_tags(
     };
 
     // Only send if there are changes
-    tracing::debug!("render_screen_with_tags: diff_output len = {}", diff_output.len());
+    tracing::debug!(
+        "render_screen_with_tags: diff_output len = {}",
+        diff_output.len()
+    );
     if !diff_output.is_empty() {
         // Wrap in synchronized output to prevent tearing
         // Position hardware cursor at input line - this overlays the visual cursor
