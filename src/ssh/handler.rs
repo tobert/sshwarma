@@ -478,6 +478,8 @@ impl SshHandler {
         let room_for_tracking = room_name.clone();
 
         tokio::spawn(async move {
+            tracing::info!("spawn_model_response: background task started");
+
             // Get buffer_id and agent_id for tool call tracking
             let (buffer_id, agent_id) = if let Some(ref room) = room_for_tracking {
                 let buf_id = state
@@ -502,13 +504,15 @@ impl SshHandler {
             let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamChunk>(32);
 
             // Spawn the streaming LLM call
+            tracing::info!("spawn_model_response: starting LLM stream");
             let stream_handle = tokio::spawn({
                 let llm = llm.clone();
                 let model = model.clone();
                 let system_prompt = system_prompt.clone();
                 let full_message = full_message.clone();
                 async move {
-                    llm.stream_with_tool_server(
+                    tracing::info!("spawn_model_response: calling stream_with_tool_server");
+                    let result = llm.stream_with_tool_server(
                         &model,
                         &system_prompt,
                         &full_message,
@@ -516,16 +520,21 @@ impl SshHandler {
                         chunk_tx,
                         100, // max tool turns
                     )
-                    .await
+                    .await;
+                    tracing::info!("spawn_model_response: stream_with_tool_server returned: {:?}", result.is_ok());
+                    result
                 }
             });
 
             // Process streaming chunks
             let mut full_response = String::new();
+            tracing::info!("spawn_model_response: waiting for chunks");
 
             while let Some(chunk) = chunk_rx.recv().await {
+                tracing::info!("spawn_model_response: received chunk: {:?}", std::mem::discriminant(&chunk));
                 match chunk {
                     StreamChunk::Text(text) => {
+                        tracing::info!("spawn_model_response: text chunk len={}", text.len());
                         full_response.push_str(&text);
                         if let Some(ref row_id) = row_id {
                             let _ = update_tx

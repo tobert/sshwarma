@@ -632,8 +632,16 @@ impl LlmClient {
                                     .await;
                             }
                             StreamedAssistantContent::ToolCallDelta { .. } => {}
-                            StreamedAssistantContent::Reasoning(_) => {}
-                            StreamedAssistantContent::ReasoningDelta { .. } => {}
+                            StreamedAssistantContent::Reasoning(reasoning) => {
+                                // Send reasoning content as text (Qwen3 thinking mode)
+                                for text in reasoning.reasoning {
+                                    let _ = $tx.send(StreamChunk::Text(text)).await;
+                                }
+                            }
+                            StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                                // Send reasoning deltas as text chunks
+                                let _ = $tx.send(StreamChunk::Text(reasoning)).await;
+                            }
                             StreamedAssistantContent::Final(_) => {}
                         },
                         Ok(MultiTurnStreamItem::StreamUserItem(

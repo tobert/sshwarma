@@ -128,7 +128,30 @@ pub async fn push_updates_task(
             }
 
             RowUpdate::Complete { row_id, model_name } => {
-                // Finalize the row
+                // Get the thinking.stream row content to create final message
+                if let Ok(Some(thinking_row)) = db.get_row(&row_id) {
+                    if let Some(content) = thinking_row.content {
+                        // Create a new message.model row with the final content
+                        let mut message_row = crate::db::rows::Row::new(
+                            &thinking_row.buffer_id,
+                            "message.model",
+                        );
+                        message_row.source_agent_id = thinking_row.source_agent_id.clone();
+                        message_row.content = Some(content);
+                        message_row.mutable = false;
+
+                        if let Err(e) = db.append_row(&mut message_row) {
+                            tracing::error!("failed to create message.model row: {}", e);
+                        }
+
+                        // Mark the thinking.stream row as ephemeral (won't show in history)
+                        if let Err(e) = db.set_row_ephemeral(&row_id, true) {
+                            tracing::error!("failed to mark thinking row ephemeral: {}", e);
+                        }
+                    }
+                }
+
+                // Finalize the thinking row
                 if let Err(e) = db.finalize_row(&row_id) {
                     tracing::error!("failed to finalize row: {}", e);
                 }
@@ -137,6 +160,7 @@ pub async fn push_updates_task(
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;
                     lua.tool_state().set_status(&model_name, Status::Idle);
+                    lua.tool_state().mark_dirty("chat");
                 }
             }
         }

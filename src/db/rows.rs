@@ -783,6 +783,26 @@ impl Database {
         Ok(())
     }
 
+    /// Set ephemeral flag on a row
+    ///
+    /// Ephemeral rows are filtered out of history queries.
+    /// Used for thinking.stream rows after creating the final message.model row.
+    pub fn set_row_ephemeral(&self, row_id: &str, ephemeral: bool) -> Result<()> {
+        let conn = self.conn()?;
+        let now = now_ms();
+        conn.execute(
+            r#"
+            UPDATE rows SET
+                ephemeral = ?2,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![row_id, ephemeral, now],
+        )
+        .context("failed to set row ephemeral")?;
+        Ok(())
+    }
+
     /// Get rows since a specific row ID (for incremental rendering)
     ///
     /// Returns rows with position > the position of the given row.
