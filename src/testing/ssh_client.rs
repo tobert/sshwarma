@@ -128,14 +128,56 @@ impl SshTestClient {
     ///
     /// Collects data from the channel until timeout expires.
     pub async fn wait_and_collect(&mut self, duration: std::time::Duration) -> Result<Vec<u8>> {
-        let mut output = Vec::new();
+        self.wait_internal(duration, None).await
+    }
 
-        // Use tokio::select to either receive data or timeout
+    /// Wait until pattern appears in output, or timeout
+    ///
+    /// Returns all collected output once pattern is found.
+    /// Pattern is matched against the visible text (ANSI codes stripped).
+    pub async fn wait_for_pattern(
+        &mut self,
+        pattern: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>> {
+        self.wait_internal(timeout, Some(pattern)).await
+    }
+
+    /// Internal wait implementation
+    async fn wait_internal(
+        &mut self,
+        duration: std::time::Duration,
+        pattern: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
         let deadline = tokio::time::Instant::now() + duration;
 
         loop {
+            // Check if pattern matched
+            if let Some(pat) = pattern {
+                let text = strip_ansi(&output);
+                if text.contains(pat) {
+                    // Give a tiny bit more time for any trailing output
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    // Drain any remaining data
+                    while let Ok(msg) =
+                        tokio::time::timeout(std::time::Duration::from_millis(10), self.channel.wait()).await
+                    {
+                        if let Some(russh::ChannelMsg::Data { data }) = msg {
+                            output.extend_from_slice(&data);
+                        } else {
+                            break;
+                        }
+                    }
+                    return Ok(output);
+                }
+            }
+
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
+                if pattern.is_some() {
+                    anyhow::bail!("timeout waiting for pattern");
+                }
                 break;
             }
 
@@ -158,6 +200,9 @@ impl SshTestClient {
                     }
                 }
                 _ = tokio::time::sleep(remaining) => {
+                    if pattern.is_some() {
+                        anyhow::bail!("timeout waiting for pattern");
+                    }
                     break;
                 }
             }
@@ -174,6 +219,33 @@ impl SshTestClient {
             .context("failed to disconnect")?;
         Ok(())
     }
+}
+
+/// Strip ANSI escape sequences from bytes, return as string
+fn strip_ansi(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut result = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequence
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Skip until we hit a letter (the terminator)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 /// Load a private key from a file path
