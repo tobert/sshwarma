@@ -43,34 +43,22 @@ impl SshHandler {
     /// Handle chat message (add to room buffer)
     async fn handle_chat(
         &mut self,
-        channel: ChannelId,
-        session: &mut Session,
+        _channel: ChannelId,
+        _session: &mut Session,
         message: &str,
     ) -> Result<()> {
         let Some(ref player) = self.player else {
-            self.send_error(channel, session, "Not authenticated").await;
+            self.push_error("Not authenticated").await;
             return Ok(());
         };
 
-        // Get room from Lua session context (updated by tools.join)
-        // Fall back to player.current_room for backward compatibility
-        let room_name = if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            lua.tool_state()
-                .session_context()
-                .and_then(|ctx| ctx.room_name.clone())
-        } else {
-            player.current_room.clone()
-        };
-
-        let Some(ref room_name) = room_name else {
-            self.send_error(channel, session, "Not in a room. Use /join <room>")
-                .await;
+        let Some(room_name) = self.current_room().await else {
+            self.push_error("Not in a room. Use /join <room>").await;
             return Ok(());
         };
 
         // Get buffer
-        let buffer = self.state.db.get_or_create_room_buffer(room_name)?;
+        let buffer = self.state.db.get_or_create_room_buffer(&room_name)?;
 
         // Get agent
         let agent = self.state.db.get_or_create_human_agent(&player.username)?;
@@ -85,23 +73,19 @@ impl SshHandler {
     /// Handle @mention (spawn model response)
     async fn handle_mention(
         &mut self,
-        channel: ChannelId,
-        session: &mut Session,
+        _channel: ChannelId,
+        _session: &mut Session,
         model_name: &str,
         message: &str,
     ) -> Result<()> {
         let Some(ref player) = self.player else {
-            self.send_error(channel, session, "Not authenticated").await;
+            self.push_error("Not authenticated").await;
             return Ok(());
         };
 
         if message.is_empty() {
-            self.send_error(
-                channel,
-                session,
-                &format!("Usage: @{} <message>", model_name),
-            )
-            .await;
+            self.push_error(format!("Usage: @{} <message>", model_name))
+                .await;
             return Ok(());
         }
 
@@ -116,29 +100,17 @@ impl SshHandler {
                     .iter()
                     .map(|m| m.short_name.as_str())
                     .collect();
-                self.send_error(
-                    channel,
-                    session,
-                    &format!(
-                        "Unknown model '{}'. Available: {}",
-                        model_name,
-                        available.join(", ")
-                    ),
-                )
+                self.push_error(format!(
+                    "Unknown model '{}'. Available: {}",
+                    model_name,
+                    available.join(", ")
+                ))
                 .await;
                 return Ok(());
             }
         };
 
-        // Get room from Lua session context (updated by tools.join)
-        let room_name = if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            lua.tool_state()
-                .session_context()
-                .and_then(|ctx| ctx.room_name.clone())
-        } else {
-            player.current_room.clone()
-        };
+        let room_name = self.current_room().await;
         let username = player.username.clone();
 
         // Add user's message to buffer
@@ -166,9 +138,7 @@ impl SshHandler {
         };
 
         // Update session context with model and status
-        if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            // Set full session context including model for wrap()
+        self.with_lua(|lua| {
             lua.tool_state()
                 .set_session_context(Some(crate::lua::SessionContext {
                     username: username.clone(),
@@ -177,7 +147,8 @@ impl SshHandler {
                 }));
             lua.tool_state()
                 .set_status(&model.short_name, Status::Thinking);
-        }
+        })
+        .await;
 
         // Spawn background task for model response
         self.spawn_model_response(
@@ -240,17 +211,5 @@ impl SshHandler {
         }
 
         Ok(())
-    }
-
-    /// Send error message via notification
-    async fn send_error(&self, _channel: ChannelId, _session: &mut Session, msg: &str) {
-        if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            lua.tool_state().push_notification_with_level(
-                msg.to_string(),
-                5000,
-                crate::lua::NotificationLevel::Error,
-            );
-        }
     }
 }

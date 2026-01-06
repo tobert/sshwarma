@@ -67,6 +67,91 @@ impl SshHandler {
         }
     }
 
+    // =========================================================================
+    // Lua Helper Methods
+    // =========================================================================
+
+    /// Execute a closure with the Lua runtime locked.
+    ///
+    /// Returns None if no Lua runtime is available.
+    pub async fn with_lua<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&LuaRuntime) -> R,
+    {
+        let lua_runtime = self.lua_runtime.as_ref()?;
+        let lua = lua_runtime.lock().await;
+        Some(f(&lua))
+    }
+
+    /// Get the current room name from Lua session context.
+    ///
+    /// Falls back to player.current_room for backward compatibility.
+    pub async fn current_room(&self) -> Option<String> {
+        // Try Lua session context first
+        if let Some(room) = self
+            .with_lua(|lua| {
+                lua.tool_state()
+                    .session_context()
+                    .and_then(|ctx| ctx.room_name.clone())
+            })
+            .await
+            .flatten()
+        {
+            return Some(room);
+        }
+        // Fall back to player state
+        self.player.as_ref().and_then(|p| p.current_room.clone())
+    }
+
+    /// Mark a UI region as dirty for redraw.
+    pub async fn mark_dirty(&self, tag: &str) {
+        self.with_lua(|lua| lua.tool_state().mark_dirty(tag)).await;
+    }
+
+    /// Push a notification to the UI.
+    pub async fn push_notification(&self, msg: impl Into<String>, duration_ms: i64) {
+        let msg = msg.into();
+        self.with_lua(|lua| lua.tool_state().push_notification(msg, duration_ms))
+            .await;
+    }
+
+    /// Push an error notification to the UI.
+    pub async fn push_error(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.with_lua(|lua| {
+            lua.tool_state().push_notification_with_level(
+                msg,
+                5000,
+                crate::lua::NotificationLevel::Error,
+            )
+        })
+        .await;
+    }
+
+    /// Check if an overlay is currently visible.
+    pub async fn has_overlay(&self) -> bool {
+        self.with_lua(|lua| lua.tool_state().has_overlay())
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Close any open overlay.
+    pub async fn close_overlay(&self) {
+        self.with_lua(|lua| lua.tool_state().close_overlay()).await;
+    }
+
+    /// Show an overlay with title and content.
+    pub async fn show_overlay(&self, title: &str, content: &str) {
+        let title = title.to_string();
+        let content = content.to_string();
+        self.with_lua(|lua| lua.tool_state().show_overlay(&title, &content))
+            .await;
+    }
+
+    // =========================================================================
+    // Other Methods
+    // =========================================================================
+
     /// Get set of equipped tool qualified names for a room
     ///
     /// Returns empty set if room has no equipped tools or things system not initialized.
@@ -877,53 +962,32 @@ impl SshHandler {
             EditorAction::None => {}
 
             EditorAction::Redraw => {
-                // Clear completions when user types
                 self.clear_completions();
-                // Lua manages input state - just mark dirty
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    lua.tool_state().mark_dirty("input");
-                }
+                self.mark_dirty("input").await;
             }
 
             EditorAction::Execute(line) => {
-                // Handle /quit specially
                 if line.trim() == "/quit" {
                     let _ = session.close(channel);
                     return;
                 }
 
-                // Process the input - Lua renders results via tools.history()
                 if let Err(e) = self.process_input(channel, session, &line).await {
-                    // Push error as notification for Lua to display
-                    if let Some(ref lua_runtime) = self.lua_runtime {
-                        let lua = lua_runtime.lock().await;
-                        lua.tool_state()
-                            .push_notification(format!("Error: {}", e), 5000);
-                    }
+                    self.push_notification(format!("Error: {}", e), 5000).await;
                 }
 
-                // Mark input dirty for redraw (Lua already cleared the buffer)
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    lua.tool_state().mark_dirty("input");
-                    lua.tool_state().mark_dirty("chat");
-                }
+                self.mark_dirty("input").await;
+                self.mark_dirty("chat").await;
             }
 
             EditorAction::Tab => {
-                // Tab completion still uses Rust for now (out of scope for this task)
                 self.handle_lua_tab_completion(channel, session).await;
             }
 
             EditorAction::ClearScreen => {
-                // Mark all regions dirty for full redraw
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    lua.tool_state().mark_dirty("chat");
-                    lua.tool_state().mark_dirty("status");
-                    lua.tool_state().mark_dirty("input");
-                }
+                self.mark_dirty("chat").await;
+                self.mark_dirty("status").await;
+                self.mark_dirty("input").await;
             }
 
             EditorAction::Quit => {
@@ -931,46 +995,44 @@ impl SshHandler {
             }
 
             EditorAction::Escape => {
-                // Close overlay if one is open
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    if lua.tool_state().has_overlay() {
-                        lua.tool_state().close_overlay();
-                    }
+                if self.has_overlay().await {
+                    self.close_overlay().await;
                 }
             }
 
             EditorAction::PageUp => {
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    if lua.tool_state().has_overlay() {
-                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
-                        lua.tool_state().overlay_scroll_up(page_size);
-                    } else {
+                if self.has_overlay().await {
+                    let page_size = (self.term_size.1 as usize).saturating_sub(4);
+                    self.with_lua(|lua| lua.tool_state().overlay_scroll_up(page_size))
+                        .await;
+                } else {
+                    self.with_lua(|lua| {
                         let scroll = lua.tool_state().chat_scroll();
                         let inner = scroll.inner();
                         let mut state = inner.lock().unwrap();
                         state.page_up();
-                        drop(state);
-                        lua.tool_state().mark_dirty("chat");
-                    }
+                    })
+                    .await;
+                    self.mark_dirty("chat").await;
                 }
             }
 
             EditorAction::PageDown => {
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    if lua.tool_state().has_overlay() {
-                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
-                        lua.tool_state().overlay_scroll_down(page_size, page_size);
-                    } else {
+                if self.has_overlay().await {
+                    let page_size = (self.term_size.1 as usize).saturating_sub(4);
+                    self.with_lua(|lua| {
+                        lua.tool_state().overlay_scroll_down(page_size, page_size)
+                    })
+                    .await;
+                } else {
+                    self.with_lua(|lua| {
                         let scroll = lua.tool_state().chat_scroll();
                         let inner = scroll.inner();
                         let mut state = inner.lock().unwrap();
                         state.page_down();
-                        drop(state);
-                        lua.tool_state().mark_dirty("chat");
-                    }
+                    })
+                    .await;
+                    self.mark_dirty("chat").await;
                 }
             }
         }
