@@ -319,7 +319,8 @@ end
 --- Delete character before cursor (backspace)
 function M.backspace()
     if state.cursor > 0 then
-        local prev_start = M.prev_utf8_start(state.text, state.cursor)
+        -- prev_utf8_start expects 1-indexed position, cursor is 0-indexed byte offset
+        local prev_start = M.prev_utf8_start(state.text, state.cursor + 1)
         state.text = state.text:sub(1, prev_start - 1) .. state.text:sub(state.cursor + 1)
         state.cursor = prev_start - 1
         state.history_pos = nil
@@ -339,7 +340,8 @@ end
 --- Move cursor left one character
 function M.left()
     if state.cursor > 0 then
-        state.cursor = M.prev_utf8_start(state.text, state.cursor) - 1
+        -- prev_utf8_start expects 1-indexed position, cursor is 0-indexed byte offset
+        state.cursor = M.prev_utf8_start(state.text, state.cursor + 1) - 1
         sync_state()
     end
 end

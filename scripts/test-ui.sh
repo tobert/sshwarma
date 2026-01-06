@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-SSHTEST="./target/debug/sshtest"
+# Use release binary (systemd runs release)
+SSHTEST="./target/release/sshtest"
 WAIT="${1:-1000}"  # Default 1 second wait
 
 echo "==> Test 1: Initial screen (lobby)"

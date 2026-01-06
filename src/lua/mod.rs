@@ -1606,6 +1606,134 @@ mod tests {
     }
 
     #[test]
+    fn test_input_cursor_movement() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test that cursor movement works correctly with 0-based cursor
+        // Bug: prev_utf8_start expects 1-indexed position but cursor is 0-indexed
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local input = require 'ui.input'
+
+                -- Start fresh
+                input.clear()
+
+                -- Insert "ab"
+                input.insert("a")
+                input.insert("b")
+
+                local state = input.get_state()
+                assert(state.text == "ab", "text should be 'ab', got: " .. state.text)
+                assert(state.cursor == 2, "cursor should be 2 after inserting 'ab', got: " .. state.cursor)
+
+                -- Move left once - should go from cursor=2 to cursor=1
+                input.left()
+                state = input.get_state()
+                assert(state.cursor == 1, "cursor should be 1 after left(), got: " .. state.cursor)
+
+                -- Move left again - should go from cursor=1 to cursor=0
+                input.left()
+                state = input.get_state()
+                assert(state.cursor == 0, "cursor should be 0 after second left(), got: " .. state.cursor)
+
+                -- Move right - should go back to cursor=1
+                input.right()
+                state = input.get_state()
+                assert(state.cursor == 1, "cursor should be 1 after right(), got: " .. state.cursor)
+
+                return true
+            "#,
+            )
+            .eval()
+            .expect("input cursor movement test should pass");
+
+        assert!(result, "cursor movement should work correctly");
+    }
+
+    #[test]
+    fn test_input_backspace() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test that backspace works correctly
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local input = require 'ui.input'
+
+                -- Start fresh
+                input.clear()
+
+                -- Insert "ab"
+                input.insert("a")
+                input.insert("b")
+
+                local state = input.get_state()
+                assert(state.text == "ab", "text should be 'ab'")
+                assert(state.cursor == 2, "cursor should be 2")
+
+                -- Backspace at end - should delete 'b', leaving "a"
+                input.backspace()
+                state = input.get_state()
+                assert(state.text == "a", "text should be 'a' after backspace, got: " .. state.text)
+                assert(state.cursor == 1, "cursor should be 1 after backspace, got: " .. state.cursor)
+
+                -- Backspace again - should delete 'a', leaving ""
+                input.backspace()
+                state = input.get_state()
+                assert(state.text == "", "text should be '' after second backspace, got: " .. state.text)
+                assert(state.cursor == 0, "cursor should be 0 after second backspace, got: " .. state.cursor)
+
+                return true
+            "#,
+            )
+            .eval()
+            .expect("input backspace test should pass");
+
+        assert!(result, "backspace should work correctly");
+    }
+
+    #[test]
+    fn test_input_delete() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test that delete key works correctly
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local input = require 'ui.input'
+
+                -- Start fresh
+                input.clear()
+
+                -- Insert "ab"
+                input.insert("a")
+                input.insert("b")
+
+                -- Move to start
+                input.home()
+                local state = input.get_state()
+                assert(state.cursor == 0, "cursor should be 0 at home")
+
+                -- Delete at start - should delete 'a', leaving "b"
+                input.delete()
+                state = input.get_state()
+                assert(state.text == "b", "text should be 'b' after delete, got: " .. state.text)
+                assert(state.cursor == 0, "cursor should still be 0 after delete")
+
+                return true
+            "#,
+            )
+            .eval()
+            .expect("input delete test should pass");
+
+        assert!(result, "delete should work correctly");
+    }
+
+    #[test]
     fn test_custom_searcher_or_embedded_fallback() {
         let runtime = LuaRuntime::new().expect("should create runtime");
 

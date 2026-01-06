@@ -2,7 +2,8 @@
 # Test chat rendering with a haiku
 set -e
 
-SSHTEST="./target/debug/sshtest"
+# Use release binary (systemd runs release)
+SSHTEST="./target/release/sshtest"
 
 echo "==> Sending haiku to chat..."
 $SSHTEST --wait 2000 \

@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-SSHTEST="./target/debug/sshtest"
+# Use release binary (systemd runs release)
+SSHTEST="./target/release/sshtest"
 
 echo "==> Connecting and capturing initial screen (raw)..."
 $SSHTEST --wait 1500 --raw --cmd "/look" 2>&1 | tee /tmp/sshwarma-initial.txt

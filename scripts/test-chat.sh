@@ -2,7 +2,8 @@
 # Test chat rendering specifically - send multiple messages and check output
 set -e
 
-SSHTEST="./target/debug/sshtest"
+# Use release binary (systemd runs release)
+SSHTEST="./target/release/sshtest"
 
 echo "==> Sending messages and checking for chat content..."
 
