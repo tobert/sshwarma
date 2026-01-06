@@ -2773,4 +2773,96 @@ mod tests {
         let positions = extract_cursor_positions(&ansi_at);
         assert_eq!(positions.len(), 10);
     }
+
+    // --------------------------------------------------------------------------
+    // Sub-context offset tests (for region-based rendering)
+    // --------------------------------------------------------------------------
+
+    #[test]
+    fn test_sub_context_offsets_drawing() {
+        use std::sync::{Arc, Mutex};
+
+        let buffer = Arc::new(Mutex::new(RenderBuffer::new(80, 24)));
+
+        // Create sub-context at y=5 (simulating chat region below header)
+        let ctx = LuaDrawContext::new(buffer.clone(), 0, 5, 80, 15);
+
+        // Draw at sub-context local (0, 0) using the Lua method interface
+        {
+            let mut buf = buffer.lock().unwrap();
+            // Simulate what ctx.print(0, 0, "Hello") does via translate
+            let (bx, by) = (ctx.x + 0, ctx.y + 0); // translate(0, 0) -> (0, 5)
+            buf.print(bx, by, "Hello", &Style::new());
+        }
+
+        // Should appear at buffer y=5, not y=0
+        let buf = buffer.lock().unwrap();
+        assert_ne!(buf.get(0, 0).unwrap().char, 'H', "y=0 should NOT have 'H'");
+        assert_eq!(buf.get(0, 5).unwrap().char, 'H', "y=5 should have 'H'");
+        assert_eq!(buf.get(1, 5).unwrap().char, 'e', "y=5 should have 'e'");
+    }
+
+    #[test]
+    fn test_sub_context_clips_out_of_bounds() {
+        use std::sync::{Arc, Mutex};
+
+        let buffer = Arc::new(Mutex::new(RenderBuffer::new(80, 24)));
+
+        // Create sub-context at y=10 with height=5 (so valid y range is 0-4)
+        let ctx = LuaDrawContext::new(buffer.clone(), 0, 10, 80, 5);
+
+        // Draw within bounds (y=0 to y=4) - should work
+        {
+            let mut buf = buffer.lock().unwrap();
+            buf.print(ctx.x, ctx.y + 0, "Line0", &Style::new()); // y=10 in buffer
+            buf.print(ctx.x, ctx.y + 4, "Line4", &Style::new()); // y=14 in buffer
+        }
+
+        let buf = buffer.lock().unwrap();
+        assert_eq!(
+            buf.get(0, 10).unwrap().char,
+            'L',
+            "y=10 should have content"
+        );
+        assert_eq!(
+            buf.get(0, 14).unwrap().char,
+            'L',
+            "y=14 should have content"
+        );
+
+        // y=15 is outside our sub-context bounds (height=5 starting at y=10)
+        // If we tried to draw there via sub(), it would clip
+        // But direct buffer access at y=15 should still be empty (outside region)
+        assert_ne!(
+            buf.get(0, 15).unwrap().char,
+            'L',
+            "y=15 should NOT have content"
+        );
+    }
+
+    #[test]
+    fn test_sub_context_nested() {
+        use std::sync::{Arc, Mutex};
+
+        let buffer = Arc::new(Mutex::new(RenderBuffer::new(80, 24)));
+
+        // Create parent context at y=5
+        let parent = LuaDrawContext::new(buffer.clone(), 0, 5, 80, 15);
+
+        // Create child context relative to parent at y=2
+        // Child should be at absolute y = 5 + 2 = 7
+        let child_x = parent.x + 0;
+        let child_y = parent.y + 2;
+        let child = LuaDrawContext::new(buffer.clone(), child_x, child_y, 80, 10);
+
+        // Draw at child (0, 0) should appear at buffer y=7
+        {
+            let mut buf = buffer.lock().unwrap();
+            let (bx, by) = (child.x + 0, child.y + 0);
+            buf.print(bx, by, "Nested", &Style::new());
+        }
+
+        let buf = buffer.lock().unwrap();
+        assert_eq!(buf.get(0, 7).unwrap().char, 'N', "y=7 should have 'N'");
+    }
 }

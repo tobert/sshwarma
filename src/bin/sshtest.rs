@@ -32,16 +32,26 @@ fn parse_args() -> Result<Args> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--addr" | "-a" => {
-                args.addr = iter.next().ok_or_else(|| anyhow::anyhow!("--addr requires value"))?;
+                args.addr = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--addr requires value"))?;
             }
             "--key" | "-k" => {
-                args.key = Some(iter.next().ok_or_else(|| anyhow::anyhow!("--key requires value"))?);
+                args.key = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow::anyhow!("--key requires value"))?,
+                );
             }
             "--user" | "-u" => {
-                args.username = iter.next().ok_or_else(|| anyhow::anyhow!("--user requires value"))?;
+                args.username = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--user requires value"))?;
             }
             "--cmd" | "-c" => {
-                args.commands.push(iter.next().ok_or_else(|| anyhow::anyhow!("--cmd requires value"))?);
+                args.commands.push(
+                    iter.next()
+                        .ok_or_else(|| anyhow::anyhow!("--cmd requires value"))?,
+                );
             }
             "--wait" | "-w" => {
                 args.wait_ms = iter
@@ -103,12 +113,8 @@ async fn main() -> Result<()> {
 
     eprintln!("connecting to {} as {}...", args.addr, args.username);
 
-    let mut client = SshTestClient::connect(
-        &args.addr,
-        args.key.as_deref(),
-        &args.username,
-    )
-    .await?;
+    let mut client =
+        SshTestClient::connect(&args.addr, args.key.as_deref(), &args.username).await?;
 
     eprintln!("connected, sending {} command(s)...", args.commands.len());
 
@@ -123,7 +129,9 @@ async fn main() -> Result<()> {
     }
 
     // Wait for output
-    let output = client.wait_and_collect(Duration::from_millis(args.wait_ms)).await?;
+    let output = client
+        .wait_and_collect(Duration::from_millis(args.wait_ms))
+        .await?;
 
     eprintln!("--- output ({} bytes) ---", output.len());
 

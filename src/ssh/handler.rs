@@ -609,9 +609,12 @@ impl server::Handler for SshHandler {
         self.session_handle = Some(session.handle());
         self.main_channel = Some(channel);
 
-        // Enter alternate screen buffer (separates from scrollback, better for selection)
-        // Also hide cursor initially - screen refresh will show it at input position
-        let init_seq = "\x1b[?1049h\x1b[?25l";
+        // Enter alternate screen buffer, clear it, and hide cursor
+        // \x1b[?1049h = enter alternate screen buffer
+        // \x1b[2J = clear entire screen
+        // \x1b[H = cursor to home (0,0)
+        // \x1b[?25l = hide cursor (screen refresh will show it at input position)
+        let init_seq = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l";
         let _ = session.data(channel, CryptoVec::from(init_seq.as_bytes()));
 
         // Set session context and send welcome notification
