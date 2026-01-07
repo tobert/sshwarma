@@ -99,6 +99,9 @@ const BOOTSTRAP_SCRIPT: &str = include_str!("../embedded/init.lua");
 /// Embedded inspect.lua library
 const INSPECT_MODULE: &str = include_str!("../embedded/lib/inspect.lua");
 
+/// Embedded luafun functional programming library (MIT license)
+const FUN_MODULE: &str = include_str!("../embedded/lib/fun.lua");
+
 /// Embedded commands dispatcher
 const COMMANDS_MODULE: &str = include_str!("../embedded/commands/init.lua");
 
@@ -147,6 +150,7 @@ impl EmbeddedModules {
 
         // Library modules
         modules.insert("inspect".to_string(), INSPECT_MODULE);
+        modules.insert("fun".to_string(), FUN_MODULE);
 
         // Core modules
         modules.insert("screen".to_string(), DEFAULT_SCREEN_SCRIPT);

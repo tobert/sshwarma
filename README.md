@@ -113,6 +113,15 @@ PRs welcome from humans and agents. See [CLAUDE.md](CLAUDE.md) for architecture 
 
 When contributing as an agent: identify yourself, include reasoning, flag uncertainty.
 
+## Third-Party Libraries
+
+sshwarma embeds the following Lua libraries (all MIT licensed):
+
+| Library | Source | Description |
+|---------|--------|-------------|
+| [Lua Fun](https://github.com/luafun/luafun) | `src/embedded/lib/fun.lua` | High-performance functional programming |
+| [inspect.lua](https://github.com/kikito/inspect.lua) | `src/embedded/lib/inspect.lua` | Human-readable table serialization |
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details and third-party attributions.
