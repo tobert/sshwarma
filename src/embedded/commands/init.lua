@@ -59,9 +59,9 @@ local function cmd_help(args)
         -- Topic help: delegate to help module
         local help_lib = require('help')
         local content, err = help_lib.help(topic)
-        if err then
+        if err or not content then
             return {
-                text = err,
+                text = err or ("No help found for: " .. topic),
                 mode = "notification"
             }
         end

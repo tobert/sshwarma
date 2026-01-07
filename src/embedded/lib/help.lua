@@ -33,7 +33,11 @@ function M.help(topic)
         return nil, "Unknown topic: " .. topic .. ". Try help() for list."
     end
 
-    return sshwarma.get_embedded_module(entry.doc)
+    local content = sshwarma.get_embedded_module(entry.doc)
+    if not content then
+        return nil, "Help doc not found: " .. entry.doc
+    end
+    return content
 end
 
 --- List available topics with descriptions
