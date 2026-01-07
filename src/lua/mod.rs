@@ -84,9 +84,6 @@ const DEFAULT_SCREEN_SCRIPT: &str = include_str!("../embedded/screen.lua");
 /// Embedded wrap script for context composition
 const DEFAULT_WRAP_SCRIPT: &str = include_str!("../embedded/wrap.lua");
 
-/// Embedded regions module for flexible layout
-const REGIONS_MODULE: &str = include_str!("../embedded/ui/regions.lua");
-
 /// Embedded input module for raw byte handling and escape sequence parsing
 const INPUT_MODULE: &str = include_str!("../embedded/ui/input.lua");
 
@@ -204,7 +201,6 @@ impl EmbeddedModules {
         modules.insert("screen".to_string(), DEFAULT_SCREEN_SCRIPT);
 
         // UI modules
-        modules.insert("ui.regions".to_string(), REGIONS_MODULE);
         modules.insert("ui.input".to_string(), INPUT_MODULE);
         modules.insert("ui.layout".to_string(), LAYOUT_MODULE);
         modules.insert("ui.bars".to_string(), BARS_MODULE);
@@ -230,7 +226,7 @@ impl EmbeddedModules {
 
     /// Get an embedded module by name
     ///
-    /// Module names use dot notation: "ui.regions", "commands.nav"
+    /// Module names use dot notation: "ui.input", "commands.nav"
     pub fn get(&self, name: &str) -> Option<&'static str> {
         self.modules.get(name).copied()
     }
@@ -362,19 +358,9 @@ impl LuaRuntime {
             .exec()
             .map_err(|e| anyhow::anyhow!("failed to load embedded wrap script: {}", e))?;
 
-        // Load the regions module (provides regions.define, regions.show, etc.)
-        // Store in package.loaded so require('ui.regions') works
-        let regions_chunk = lua
-            .load(REGIONS_MODULE)
-            .set_name("embedded:ui/regions.lua")
-            .eval::<Table>()
-            .map_err(|e| anyhow::anyhow!("failed to load embedded regions module: {}", e))?;
-
-        // Register in package.loaded for require() access
+        // Get package.loaded for registering modules
         let package: Table = lua.globals().get("package")?;
         let loaded: Table = package.get("loaded")?;
-        loaded.set("ui.regions", regions_chunk.clone())?;
-        lua.globals().set("regions", regions_chunk)?;
 
         // Load the input module (provides escape sequence parsing, input buffer)
         lua.load(INPUT_MODULE)
@@ -1665,12 +1651,6 @@ mod tests {
             "inspect module should exist"
         );
 
-        // Should have ui.regions module
-        assert!(
-            modules.get("ui.regions").is_some(),
-            "ui.regions module should exist"
-        );
-
         // Should have ui.input module
         assert!(
             modules.get("ui.input").is_some(),
@@ -1782,25 +1762,6 @@ mod tests {
             result,
             "get_embedded_module('inspect') should return source code"
         );
-    }
-
-    #[test]
-    fn test_require_ui_regions() {
-        let runtime = LuaRuntime::new().expect("should create runtime");
-
-        // require 'ui.regions' should work via custom searcher
-        let result: bool = runtime
-            .lua
-            .load(
-                r#"
-                local regions = require 'ui.regions'
-                return type(regions) == 'table'
-            "#,
-            )
-            .eval()
-            .expect("require ui.regions should work");
-
-        assert!(result, "ui.regions should be a table");
     }
 
     #[test]

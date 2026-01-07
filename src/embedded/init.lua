@@ -8,9 +8,9 @@
 --   require("X")           -> DB: user script first, then embedded fallback
 --
 -- Module path resolution:
---   require("sshwarma.ui.regions") -> embedded/ui/regions.lua
---   require("screen")              -> user DB "screen" OR embedded/screen.lua
---   require("room.tools")          -> room DB "tools" (nil if not found)
+--   require("sshwarma.ui.input") -> embedded/ui/input.lua
+--   require("screen")            -> user DB "screen" OR embedded/screen.lua
+--   require("room.tools")        -> room DB "tools" (nil if not found)
 
 -- Custom searcher for sshwarma modules
 -- Inserted at position 2 (after preload, before standard path searchers)
