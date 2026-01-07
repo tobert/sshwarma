@@ -1,28 +1,18 @@
--- sshwarma screen renderer
---
--- Full-screen layout with testable components.
--- Uses ui.regions for flexible layout and z-ordering.
---
--- Module structure:
---   M.wrap_text(text, width) -> {lines}
---   M.build_display_lines(messages, width, my_name) -> {display_lines}
---   M.render_chat(ctx, lines, scroll, height) -> nil
---   M.render_status(ctx, y, data) -> nil
---   M.render_input(ctx, y, data) -> nil
+-- screen.lua - Full-screen renderer using bar system
 --
 -- Entry points (called by Rust):
 --   on_tick(dirty_tags, tick, ctx)
 --   background(tick)
 
+local bars = require 'ui.bars'
+local pages = require 'ui.pages'
+local scroll = require 'ui.scroll'
+local mode = require 'ui.mode'
+local input = require 'ui.input'
+
 local M = {}
 
--- Load regions module (available globally after Rust loads it)
-local regions = regions or require('ui.regions')
-
---------------------------------------------------------------------------------
 -- Colors
---------------------------------------------------------------------------------
-
 M.colors = {
     fg       = "#c0caf5",
     dim      = "#565f89",
@@ -34,76 +24,153 @@ M.colors = {
     status   = "#1a1b26",
     statusfg = "#a9b1d6",
     cursor   = "#ff9e64",
+    normal   = "#565f89",
+    insert   = "#9ece6a",
 }
 
---------------------------------------------------------------------------------
--- Region Definitions
---------------------------------------------------------------------------------
+-- ==========================================================================
+-- Bar Definitions
+-- ==========================================================================
 
--- Define base layout regions (z=0)
-regions.define('chat', {
-    top = 0,
-    bottom = -2,  -- Leave 2 lines for status and input
-    z = 0,
-})
-
-regions.define('status', {
-    bottom = -1,  -- 1 line above bottom
+bars.define("status", {
+    position = "bottom",
+    priority = 50,  -- above input but at bottom
     height = 1,
-    z = 0,
+    items = {"room_name", "spacer", "participants", "duration", "mode_indicator"},
+    style = {bg = M.colors.status},
 })
 
-regions.define('input', {
-    bottom = 0,
+bars.define("input", {
+    position = "bottom",
+    priority = 100,  -- closest to bottom edge
     height = 1,
-    z = 0,
+    items = {"prompt", "input_text"},
 })
 
--- Overlay region (hidden by default, z=10 renders on top)
-regions.define('overlay', {
-    top = 0,
-    bottom = -2,  -- Same area as chat
-    z = 10,
-    visible = false,
-})
+-- ==========================================================================
+-- Bar Items
+-- ==========================================================================
 
---------------------------------------------------------------------------------
--- Pure Functions (testable without mocks)
---------------------------------------------------------------------------------
+bars.item("room_name", function(state, _width)
+    local room = state.room or {}
+    return {
+        {text = "[", style = {fg = M.colors.dim, bg = M.colors.status}},
+        {text = room.name or "lobby", style = {fg = M.colors.system, bg = M.colors.status}},
+        {text = "] ", style = {fg = M.colors.dim, bg = M.colors.status}},
+    }
+end)
 
---- Get display width of a string (delegates to Rust unicode-width)
---- @param str string
---- @return number
+bars.item("participants", function(state, _width)
+    local participants = state.participants or {}
+    local segs = {}
+
+    local users = 0
+    local models = 0
+    local active_model = nil
+
+    for _, p in ipairs(participants) do
+        if p.kind == "model" then
+            models = models + 1
+            if p.status ~= "idle" then
+                active_model = p.name
+            end
+        else
+            users = users + 1
+        end
+    end
+
+    table.insert(segs, {text = string.format("%d/%d ", users, models), style = {fg = M.colors.statusfg, bg = M.colors.status}})
+
+    if active_model then
+        table.insert(segs, {text = "◈ ", style = {fg = M.colors.model, bg = M.colors.status}})
+        table.insert(segs, {text = active_model .. " ", style = {fg = M.colors.model, bg = M.colors.status}})
+    end
+
+    return segs
+end)
+
+bars.item("duration", function(state, _width)
+    local session = state.session or {}
+    local dur = session.duration or "0:00"
+    return {{text = dur .. " ", style = {fg = M.colors.dim, bg = M.colors.status}}}
+end)
+
+bars.item("mode_indicator", function(_state, _width)
+    local m = mode.indicator()
+    local color = mode.is_normal() and M.colors.normal or M.colors.insert
+    return {{text = " " .. m .. " ", style = {fg = color, bg = M.colors.status, bold = true}}}
+end)
+
+bars.item("prompt", function(state, _width)
+    local room = state.room or {}
+    local room_name = room.name or "lobby"
+
+    if mode.is_normal() then
+        return {{text = room_name .. "│", style = {fg = M.colors.dim}}}
+    else
+        return {{text = room_name .. "> ", style = {fg = M.colors.system}}}
+    end
+end)
+
+bars.item("input_text", function(_state, _width)
+    local inp = input.get_state()
+    local text = inp.text or ""
+    local cursor = inp.cursor or 0
+    local segs = {}
+
+    if #text == 0 then
+        if mode.is_insert() then
+            table.insert(segs, {text = "▌", style = {fg = M.colors.cursor}})
+        end
+    else
+        local before = text:sub(1, cursor)
+        local after = text:sub(cursor + 1)
+
+        if #before > 0 then
+            table.insert(segs, {text = before})
+        end
+
+        if #after > 0 then
+            local char_end = utf8.offset(after, 2) or (#after + 1)
+            local cursor_char = after:sub(1, char_end - 1)
+            table.insert(segs, {text = cursor_char, style = {fg = M.colors.status, bg = M.colors.cursor}})
+            if char_end <= #after then
+                table.insert(segs, {text = after:sub(char_end)})
+            end
+        elseif mode.is_insert() then
+            table.insert(segs, {text = "▌", style = {fg = M.colors.cursor}})
+        end
+    end
+
+    return segs
+end)
+
+-- ==========================================================================
+-- Text Utilities
+-- ==========================================================================
+
 function M.display_width(str)
     if not str or str == "" then return 0 end
-    -- Use Rust's unicode-width via tools, fallback to utf8.len
     if tools and tools.display_width then
         return tools.display_width(str)
     end
     return utf8.len(str) or #str
 end
 
---- Wrap text to fit within width, returning array of lines
---- @param text string
---- @param width number
---- @return string[]
 function M.wrap_text(text, width)
     if width <= 0 then return {""} end
     if not text or text == "" then return {""} end
 
     local lines = {}
 
-    -- Split by existing newlines first
     for segment in (text .. "\n"):gmatch("([^\n]*)\n") do
         if #segment == 0 then
             table.insert(lines, "")
         elseif M.display_width(segment) <= width then
             table.insert(lines, segment)
         else
-            -- Word wrap this segment
             local pos = 1
             while pos <= #segment do
-                -- Find how many bytes fit in width
                 local end_pos = pos
                 local current_width = 0
 
@@ -112,28 +179,23 @@ function M.wrap_text(text, width)
                     local char = segment:sub(end_pos, next_pos - 1)
                     local char_width = M.display_width(char)
 
-                    if current_width + char_width > width then
-                        break
-                    end
+                    if current_width + char_width > width then break end
 
                     current_width = current_width + char_width
                     end_pos = next_pos
                 end
 
                 if end_pos == pos then
-                    -- Single char wider than width, force include it
                     end_pos = utf8.offset(segment, 2, pos) or (#segment + 1)
                 end
 
                 local chunk = segment:sub(pos, end_pos - 1)
 
-                -- Try to break at word boundary if not at end
                 if end_pos <= #segment then
                     local last_space = chunk:match(".*()%s")
                     if last_space and last_space > #chunk / 2 then
                         chunk = chunk:sub(1, last_space - 1)
                         end_pos = pos + last_space
-                        -- Skip whitespace
                         while end_pos <= #segment and segment:sub(end_pos, end_pos):match("%s") do
                             end_pos = end_pos + 1
                         end
@@ -149,23 +211,20 @@ function M.wrap_text(text, width)
     return #lines > 0 and lines or {""}
 end
 
---- Build display lines from message history
---- @param messages table[] Array of {author, content, is_model, is_streaming}
---- @param width number Terminal width
---- @param my_name string Current user's name (for highlighting)
---- @return table[] Array of display line entries
+-- ==========================================================================
+-- Chat Rendering
+-- ==========================================================================
+
 function M.build_display_lines(messages, width, my_name)
     local display_lines = {}
     local prefix_width = 0
     local C = M.colors
 
-    -- Calculate max nick width for alignment
     for _, msg in ipairs(messages) do
         local author = msg.author or "???"
-        prefix_width = math.max(prefix_width, M.display_width(author) + 3) -- "<nick> "
+        prefix_width = math.max(prefix_width, M.display_width(author) + 3)
     end
 
-    -- Ensure reasonable content width
     local content_width = width - prefix_width
     if content_width < 10 then
         prefix_width = 0
@@ -178,7 +237,6 @@ function M.build_display_lines(messages, width, my_name)
         local is_model = msg.is_model
         local is_streaming = msg.is_streaming
 
-        -- Choose nick color
         local nick_color = C.nick
         if author == my_name then
             nick_color = C.self
@@ -188,66 +246,45 @@ function M.build_display_lines(messages, width, my_name)
             nick_color = C.system
         end
 
-        -- Wrap the content
         local wrapped = M.wrap_text(content, content_width)
 
         for i, line_text in ipairs(wrapped) do
-            local entry = {
+            table.insert(display_lines, {
                 text = line_text,
                 nick_color = nick_color,
                 is_first_line = (i == 1),
                 is_last_line = (i == #wrapped),
                 is_streaming = is_streaming,
                 prefix_width = prefix_width,
-                -- Only first line gets author
                 author = (i == 1) and author or nil,
-            }
-            table.insert(display_lines, entry)
+            })
         end
     end
 
     return display_lines
 end
 
---------------------------------------------------------------------------------
--- Rendering Functions (take ctx and prepared data)
---------------------------------------------------------------------------------
-
---- Render chat buffer
---- @param ctx table Draw context with print(), w, h
---- @param display_lines table[] From build_display_lines
---- @param scroll table Scroll state with visible_range(), at_bottom, percent
---- @param chat_height number Height of chat region
-function M.render_chat(ctx, display_lines, scroll, chat_height)
+function M.render_chat(ctx, display_lines, page_name, height)
     local C = M.colors
     local total_lines = #display_lines
 
-    -- Update scroll state
-    scroll:set_content_height(total_lines)
-    scroll:set_viewport_height(chat_height)
+    scroll.set_content_height(page_name, total_lines)
+    scroll.set_viewport_height(page_name, height)
 
-    -- Get visible range (0-indexed from Rust)
-    local start_line, end_line = scroll:visible_range()
+    local start_line, end_line = scroll.visible_range(page_name)
 
-    -- Clamp to content bounds
-    if end_line > total_lines then
-        end_line = total_lines
-    end
-    if start_line < 0 then
-        start_line = 0
-    end
+    if end_line > total_lines then end_line = total_lines end
+    if start_line < 0 then start_line = 0 end
 
-    -- Draw visible lines
     for i = start_line, end_line - 1 do
-        local line_idx = i + 1  -- Convert to 1-indexed for Lua
+        local line_idx = i + 1
         local line = display_lines[line_idx]
 
         if line then
-            local y = i - start_line  -- Screen row (0-indexed)
+            local y = i - start_line
             local x = 0
 
             if line.is_first_line and line.author then
-                -- Draw prefix: <nick>
                 ctx:print(x, y, "<", {fg = C.dim})
                 x = x + 1
                 ctx:print(x, y, line.author, {fg = line.nick_color})
@@ -255,11 +292,9 @@ function M.render_chat(ctx, display_lines, scroll, chat_height)
                 ctx:print(x, y, "> ", {fg = C.dim})
                 x = x + 2
             else
-                -- Continuation line - indent to align
                 x = line.prefix_width or 0
             end
 
-            -- Draw content
             local text = line.text
             if line.is_streaming and line.is_last_line then
                 text = text .. " ◌"
@@ -268,325 +303,156 @@ function M.render_chat(ctx, display_lines, scroll, chat_height)
         end
     end
 
-    -- Scroll indicator
-    if not scroll.at_bottom and total_lines > chat_height then
-        local pct = math.floor(scroll.percent * 100)
+    if not scroll.is_following(page_name) and total_lines > height then
+        local pct = math.floor(scroll.percent(page_name) * 100)
         local indicator = string.format("── %d%% ──", pct)
         local ix = ctx.w - M.display_width(indicator)
-        ctx:print(ix, chat_height - 1, indicator, {fg = C.dim})
+        ctx:print(ix, height - 1, indicator, {fg = C.dim})
     end
 end
 
---- Render status bar
---- @param ctx table Draw context
---- @param y number Row to render at
---- @param data table {room_name, user_count, model_count, active_model, mcp_connections, duration}
-function M.render_status(ctx, y, data)
+-- ==========================================================================
+-- Help Page Rendering
+-- ==========================================================================
+
+M.help_content = [[
+sshwarma - collaborative rooms for humans and models
+
+Navigation (Normal Mode):
+  j/k or ↑/↓    Scroll content
+  h/l or ←/→    Switch pages
+  g             Jump to bottom (follow)
+  G             Jump to top
+  q             Close page
+  ?             Open help
+  i             Enter insert mode
+  / @           Enter insert with prefix
+
+Editing (Insert Mode):
+  ↑/↓           History prev/next
+  ←/→           Cursor movement
+  Ctrl+A/E      Beginning/end of line
+  Ctrl+W/U/K    Delete word/to-start/to-end
+  Tab           Completion
+  Enter         Send message
+  Escape        Return to normal mode
+  Ctrl+C        Clear and return to normal
+
+Commands:
+  /rooms        List available rooms
+  /join <room>  Enter a room
+  /leave        Return to lobby
+  /look         Room summary
+  /who          Who's in the room
+  /history [n]  Recent messages
+
+Press q to close this help.
+]]
+
+function M.render_help(ctx, height)
     local C = M.colors
-
-    -- Fill background
-    for x = 0, ctx.w - 1 do
-        ctx:print(x, y, " ", {bg = C.status})
+    local lines = {}
+    for line in M.help_content:gmatch("[^\n]*") do
+        table.insert(lines, line)
     end
 
-    local left_x = 1
+    scroll.set_content_height("help", #lines)
+    scroll.set_viewport_height("help", height)
 
-    -- Room name
-    local room_name = data.room_name or "lobby"
-    ctx:print(left_x, y, "[", {fg = C.dim, bg = C.status})
-    left_x = left_x + 1
-    ctx:print(left_x, y, room_name, {fg = C.system, bg = C.status})
-    left_x = left_x + M.display_width(room_name)
-    ctx:print(left_x, y, "]", {fg = C.dim, bg = C.status})
-    left_x = left_x + 2
+    local start_line, end_line = scroll.visible_range("help")
+    if end_line > #lines then end_line = #lines end
 
-    -- Show error if any (in red, truncated to fit)
-    if data._error then
-        local err_text = "ERR:" .. string.sub(tostring(data._error), 1, 30)
-        ctx:print(left_x, y, err_text, {fg = C.error, bg = C.status})
-        left_x = left_x + M.display_width(err_text) + 1
+    for i = start_line, end_line - 1 do
+        local line = lines[i + 1] or ""
+        local y = i - start_line
+        ctx:print(0, y, line, {fg = C.fg})
     end
 
-    -- User/model counts
-    local counts = string.format("%d/%d", data.user_count or 0, data.model_count or 0)
-    ctx:print(left_x, y, counts, {fg = C.statusfg, bg = C.status})
-    left_x = left_x + #counts + 1
-
-    -- Active model indicator
-    if data.active_model then
-        ctx:print(left_x, y, "◈", {fg = C.model, bg = C.status})
-        left_x = left_x + 2
-        ctx:print(left_x, y, data.active_model, {fg = C.model, bg = C.status})
-        left_x = left_x + M.display_width(data.active_model) + 1
-    end
-
-    -- Right side: MCP status and duration
-    local duration = data.duration or "0:00"
-    local dur_width = #duration
-
-    -- Build MCP string
-    local mcp_parts = {}
-    for _, conn in ipairs(data.mcp_connections or {}) do
-        local indicator = conn.connected and "●" or "○"
-        table.insert(mcp_parts, indicator .. conn.name)
-    end
-    local mcp_str = table.concat(mcp_parts, " ")
-    local mcp_width = M.display_width(mcp_str)
-
-    -- Position from right edge
-    local right_margin = 1
-    local dur_x = ctx.w - dur_width - right_margin
-    local mcp_x = dur_x - mcp_width - 2
-
-    if dur_x > left_x then
-        ctx:print(dur_x, y, duration, {fg = C.dim, bg = C.status})
-    end
-
-    if mcp_width > 0 and mcp_x > left_x then
-        ctx:print(mcp_x, y, mcp_str, {fg = C.dim, bg = C.status})
+    if not scroll.is_following("help") and #lines > height then
+        local pct = math.floor(scroll.percent("help") * 100)
+        local indicator = string.format("── %d%% ──", pct)
+        local ix = ctx.w - M.display_width(indicator)
+        ctx:print(ix, height - 1, indicator, {fg = C.dim})
     end
 end
 
---- Render overlay (modal help/command output)
---- @param ctx table Draw context
---- @param overlay table {title, lines, scroll_offset, total_lines}
---- @param height number Available height for overlay
-function M.render_overlay(ctx, overlay, height)
-    local C = M.colors
-    local w = ctx.w
+-- ==========================================================================
+-- Data Fetching
+-- ==========================================================================
 
-    -- Calculate visible area (leave 1 line for title, 1 for footer)
-    local content_height = height - 2
-    local start_line = overlay.scroll_offset + 1  -- Convert to 1-indexed
-    local end_line = math.min(start_line + content_height - 1, overlay.total_lines)
-
-    -- Fill background with dim color
-    for y = 0, height - 1 do
-        for x = 0, w - 1 do
-            ctx:print(x, y, " ", {bg = "#1a1b26"})
-        end
-    end
-
-    -- Title bar
-    local title = "─── " .. overlay.title .. " ───"
-    local hint = "[ESC to close, PgUp/PgDn to scroll]"
-    ctx:print(0, 0, title, {fg = C.system, bg = "#1a1b26"})
-    if M.display_width(title) + M.display_width(hint) + 2 < w then
-        ctx:print(w - M.display_width(hint), 0, hint, {fg = C.dim, bg = "#1a1b26"})
-    end
-
-    -- Content
-    local y = 1
-    for i = start_line, end_line do
-        local line = overlay.lines[i] or ""
-        -- Truncate if too long
-        if M.display_width(line) > w then
-            line = line:sub(1, w - 1) .. "…"
-        end
-        ctx:print(0, y, line, {fg = C.fg, bg = "#1a1b26"})
-        y = y + 1
-    end
-
-    -- Footer with scroll indicator
-    local footer_y = height - 1
-    if overlay.total_lines > content_height then
-        local percent = math.floor((overlay.scroll_offset / (overlay.total_lines - content_height)) * 100)
-        local indicator = string.format("─── %d%% (%d/%d) ───",
-            percent, end_line, overlay.total_lines)
-        ctx:print(0, footer_y, indicator, {fg = C.dim, bg = "#1a1b26"})
-    else
-        ctx:print(0, footer_y, "───────────────", {fg = C.dim, bg = "#1a1b26"})
-    end
-end
-
---- Render input line
----
---- NOTE: We render a visual cursor (orange "▌" or inverted char) AND the terminal
---- positions its hardware cursor at the same spot. This creates a layered effect
---- where the blinking hardware cursor overlays our static visual cursor - a happy
---- accident that provides both precise position feedback and attention-grabbing blink.
---- To disable: hide hardware cursor in screen.rs with \x1b[?25l
----
---- @param ctx table Draw context
---- @param y number Row to render at
---- @param data table {prompt, text, cursor}
-function M.render_input(ctx, y, data)
-    local C = M.colors
-    local prompt = data.prompt or "> "
-    local text = data.text or ""
-    local cursor = data.cursor or 0
-
-    local x = 0
-
-    -- Prompt
-    ctx:print(x, y, prompt, {fg = C.system})
-    x = x + M.display_width(prompt)
-
-    if #text == 0 then
-        ctx:print(x, y, "▌", {fg = C.cursor})
-    else
-        -- Split at cursor (byte offset)
-        local before = text:sub(1, cursor)
-        local after = text:sub(cursor + 1)
-
-        ctx:print(x, y, before)
-        x = x + M.display_width(before)
-
-        if #after > 0 then
-            -- Get first UTF-8 char
-            local char_end = utf8.offset(after, 2) or (#after + 1)
-            local cursor_char = after:sub(1, char_end - 1)
-            ctx:print(x, y, cursor_char, {fg = C.status, bg = C.cursor})
-            x = x + M.display_width(cursor_char)
-            ctx:print(x, y, after:sub(char_end))
-        else
-            ctx:print(x, y, "▌", {fg = C.cursor})
-        end
-    end
-end
-
---------------------------------------------------------------------------------
--- Data Fetching (isolate global access)
---------------------------------------------------------------------------------
-
---- Fetch all data needed for rendering
---- @return table {history, status, input, scroll, mcp}
-function M.fetch_render_data()
-    local data = {
+function M.fetch_state()
+    local state = {
+        room = {},
+        participants = {},
+        session = {},
         history = {},
-        status = {},
-        input = {},
-        scroll = nil,
-        mcp = {},
     }
 
-    -- History
-    data.history = (tools and tools.history and tools.history(100)) or {}
-
-    -- Status
     local ok, status = pcall(function()
         return sshwarma and sshwarma.call and sshwarma.call("status", {})
     end)
-    if not ok then
-        -- Store error for debugging - will show in status bar
-        data._error = tostring(status)
-    end
-    data.status = (ok and status) or {}
 
-    -- Input
-    data.input = (tools and tools.input and tools.input()) or {}
-
-    -- Scroll
-    data.scroll = tools and tools.scroll and tools.scroll()
-
-    -- MCP
-    data.mcp = (tools and tools.mcp_connections and tools.mcp_connections()) or {}
-
-    return data
-end
-
---- Extract status bar data from raw status
---- @param status table Raw status from sshwarma.call("status")
---- @param mcp table[] MCP connections
---- @return table Prepared status bar data
-function M.prepare_status_data(status, mcp)
-    local room = status.room or {}
-    local participants = status.participants or {}
-    local session = status.session or {}
-
-    local user_count = 0
-    local model_count = 0
-    local active_model = nil
-
-    for _, p in ipairs(participants) do
-        if p.kind == "model" then
-            model_count = model_count + 1
-            if p.active then
-                active_model = p.name
-            end
-        else
-            user_count = user_count + 1
-        end
+    if ok and status then
+        state.room = status.room or {}
+        state.participants = status.participants or {}
+        state.session = status.session or {}
     end
 
-    return {
-        room_name = room.name,
-        user_count = user_count,
-        model_count = model_count,
-        active_model = active_model,
-        duration = session.duration,
-        mcp_connections = mcp,
-    }
+    state.history = (tools and tools.history and tools.history(100)) or {}
+
+    return state
 end
 
---------------------------------------------------------------------------------
--- Entry Points
---------------------------------------------------------------------------------
+-- ==========================================================================
+-- Main Render
+-- ==========================================================================
 
---- Main render entry point (called by Rust)
---- @param dirty_tags table Set of dirty region tags
---- @param tick number Current tick count
---- @param ctx table Draw context with w, h, print(), clear()
 function on_tick(dirty_tags, tick, ctx)
     ctx:clear()
 
-    local h = ctx.h
-    local w = ctx.w
+    local state = M.fetch_state()
+    local bar_layout = bars.compute_layout(ctx.w, ctx.h, state)
 
-    -- Resolve all regions for current terminal size
-    regions.resolve(w, h)
-
-    -- Fetch render data
-    local data = M.fetch_render_data()
-    local session = data.status.session or {}
-    local my_name = session.username or ""
-
-    -- Check if overlay has content (from Rust) and sync visibility
-    local overlay_content = tools.region_content and tools.region_content("overlay")
-    if overlay_content then
-        regions.show("overlay")
-    else
-        regions.hide("overlay")
+    -- Render bars
+    for name, info in pairs(bar_layout) do
+        if name ~= "content" then
+            local bar_def = bars.get(name)
+            if bar_def then
+                local bar_ctx = ctx:sub(0, info.row, ctx.w, info.height)
+                bars.render(bar_ctx, bar_def, state)
+            end
+        end
     end
 
-    -- Get visible regions sorted by z-order (lower z first = background)
-    local visible = regions.visible_ordered()
+    -- Render content area
+    local content = bar_layout.content
+    if content and content.height > 0 then
+        local content_ctx = ctx:sub(0, content.row, ctx.w, content.height)
+        local current_page = pages.current_name()
 
-    -- Render each visible region
-    for _, r in ipairs(visible) do
-        local area = r.area
-        if area and area.h > 0 then
-            if r.name == "chat" then
-                -- Only render chat if overlay is not visible and scroll state exists
-                if not regions.is_visible("overlay") and data.scroll then
-                    local display_lines = M.build_display_lines(data.history, area.w, my_name)
-                    -- Create sub-context clipped to chat region bounds
-                    local chat_ctx = ctx:sub(area.x, area.y, area.w, area.h)
-                    M.render_chat(chat_ctx, display_lines, data.scroll, area.h)
-                end
-            elseif r.name == "overlay" and overlay_content then
-                -- Render overlay content
-                M.render_overlay(ctx, overlay_content, area.h)
-            elseif r.name == "status" then
-                local status_data = M.prepare_status_data(data.status, data.mcp)
-                status_data._error = data._error  -- Pass through any errors
-                M.render_status(ctx, area.y, status_data)
-            elseif r.name == "input" then
-                M.render_input(ctx, area.y, data.input)
+        if current_page == "chat" then
+            local my_name = (state.session or {}).username or ""
+            local display_lines = M.build_display_lines(state.history, content_ctx.w, my_name)
+            M.render_chat(content_ctx, display_lines, "chat", content.height)
+        elseif current_page == "help" then
+            M.render_help(content_ctx, content.height)
+        else
+            -- Generic page rendering
+            local page = pages.current()
+            if type(page) == "table" and page.content then
+                content_ctx:print(0, 0, tostring(page.content))
             end
         end
     end
 end
 
---- Background tick (called every 500ms)
---- @param tick number Background tick count
 function background(tick)
-    -- Refresh status every 2 seconds for duration counter
     if tick % 4 == 0 then
-        tools.mark_dirty("status")
+        if tools and tools.mark_dirty then
+            tools.mark_dirty("status")
+        end
     end
 end
 
--- Export module globally for testing and extensibility
 screen = M
 return M
