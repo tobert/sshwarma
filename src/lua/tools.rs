@@ -699,6 +699,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         let state = state.clone();
         lua.create_function(move |lua, name: String| {
             if let Some(content) = state.region_content(&name) {
+                tracing::debug!(
+                    region = %name,
+                    title = %content.title,
+                    lines = content.lines.len(),
+                    "region_content: returning content"
+                );
                 let result = lua.create_table()?;
                 result.set("title", content.title)?;
 
@@ -712,6 +718,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
                 Ok(Value::Table(result))
             } else {
+                tracing::debug!(region = %name, "region_content: no content");
                 Ok(Value::Nil)
             }
         })?

@@ -182,10 +182,10 @@ impl SshHandler {
         tracing::info!("dispatch_command: calling lua.call_dispatch_command");
         match lua.call_dispatch_command(name, args) {
             Ok(Some(cmd_result)) => {
-                tracing::info!(
-                    "dispatch_command: got result mode={} text_len={}",
-                    cmd_result.mode,
-                    cmd_result.text.len()
+                tracing::debug!(
+                    mode = %cmd_result.mode,
+                    text_len = cmd_result.text.len(),
+                    "dispatch_command: result"
                 );
                 if !cmd_result.text.is_empty() {
                     if cmd_result.mode == "overlay" {

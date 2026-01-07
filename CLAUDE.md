@@ -545,6 +545,18 @@ Uses SSH agent automatically (falls back to `~/.ssh/id_ed25519`). Useful for smo
 
 ### Lua Gotchas
 
+**Luau module loading**: We use Luau (not standard Lua), which has no `package.searchers` fallback. For `require('foo')` to work, modules must be explicitly preloaded into `package.loaded` in `LuaRuntime::new()`. Registering in `EmbeddedModules` only makes them available via `sshwarma.get_embedded_module()` — not `require()`.
+
+```rust
+// In LuaRuntime::new() - BOTH steps required:
+// 1. Include the source (for get_embedded_module)
+modules.insert("foo".to_string(), FOO_MODULE);
+
+// 2. Preload into package.loaded (for require)
+let foo_chunk = lua.load(FOO_MODULE).set_name("embedded:lib/foo.lua").eval::<Table>()?;
+loaded.set("foo", foo_chunk)?;
+```
+
 **Multiple return values**: Many Lua functions return multiple values. When passing directly to another function, all values are passed as arguments:
 
 ```lua

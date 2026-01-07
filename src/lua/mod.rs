@@ -93,6 +93,21 @@ const REGIONS_MODULE: &str = include_str!("../embedded/ui/regions.lua");
 /// Embedded input module for raw byte handling and escape sequence parsing
 const INPUT_MODULE: &str = include_str!("../embedded/ui/input.lua");
 
+/// Embedded layout module for constraint solving
+const LAYOUT_MODULE: &str = include_str!("../embedded/ui/layout.lua");
+
+/// Embedded bars module for edge chrome
+const BARS_MODULE: &str = include_str!("../embedded/ui/bars.lua");
+
+/// Embedded pages module for page stack management
+const PAGES_MODULE: &str = include_str!("../embedded/ui/pages.lua");
+
+/// Embedded scroll module for scroll state
+const SCROLL_MODULE: &str = include_str!("../embedded/ui/scroll.lua");
+
+/// Embedded mode module for vim-style modes
+const MODE_MODULE: &str = include_str!("../embedded/ui/mode.lua");
+
 /// Embedded bootstrap script for custom require system
 const BOOTSTRAP_SCRIPT: &str = include_str!("../embedded/init.lua");
 
@@ -194,6 +209,11 @@ impl EmbeddedModules {
         // UI modules
         modules.insert("ui.regions".to_string(), REGIONS_MODULE);
         modules.insert("ui.input".to_string(), INPUT_MODULE);
+        modules.insert("ui.layout".to_string(), LAYOUT_MODULE);
+        modules.insert("ui.bars".to_string(), BARS_MODULE);
+        modules.insert("ui.pages".to_string(), PAGES_MODULE);
+        modules.insert("ui.scroll".to_string(), SCROLL_MODULE);
+        modules.insert("ui.mode".to_string(), MODE_MODULE);
 
         // Command modules
         modules.insert("commands".to_string(), COMMANDS_MODULE);
@@ -368,7 +388,6 @@ impl LuaRuntime {
         lua.globals().set("regions", regions_chunk)?;
 
         // Load the input module (provides escape sequence parsing, input buffer)
-        // Use exec() to run in global context so on_input() is available globally
         lua.load(INPUT_MODULE)
             .set_name("embedded:ui/input.lua")
             .exec()
@@ -390,6 +409,68 @@ impl LuaRuntime {
 
         loaded.set("inspect", inspect_chunk.clone())?;
         lua.globals().set("inspect", inspect_chunk)?;
+
+        // Load utility library modules (required by help and commands)
+        // fun.lua - functional programming library
+        let fun_chunk = lua
+            .load(FUN_MODULE)
+            .set_name("embedded:lib/fun.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load fun module: {}", e))?;
+        loaded.set("fun", fun_chunk)?;
+
+        // str.lua - string utilities (required by help.lua)
+        let str_chunk = lua
+            .load(STR_MODULE)
+            .set_name("embedded:lib/str.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load str module: {}", e))?;
+        loaded.set("str", str_chunk)?;
+
+        // Load new UI modules (require fun to be loaded first)
+        let layout_chunk = lua
+            .load(LAYOUT_MODULE)
+            .set_name("embedded:ui/layout.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded layout module: {}", e))?;
+        loaded.set("ui.layout", layout_chunk)?;
+
+        let bars_chunk = lua
+            .load(BARS_MODULE)
+            .set_name("embedded:ui/bars.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded bars module: {}", e))?;
+        loaded.set("ui.bars", bars_chunk)?;
+
+        let pages_chunk = lua
+            .load(PAGES_MODULE)
+            .set_name("embedded:ui/pages.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded pages module: {}", e))?;
+        loaded.set("ui.pages", pages_chunk)?;
+
+        let scroll_chunk = lua
+            .load(SCROLL_MODULE)
+            .set_name("embedded:ui/scroll.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded scroll module: {}", e))?;
+        loaded.set("ui.scroll", scroll_chunk)?;
+
+        // Load mode module - defines on_input() globally
+        let mode_chunk = lua
+            .load(MODE_MODULE)
+            .set_name("embedded:ui/mode.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded mode module: {}", e))?;
+        loaded.set("ui.mode", mode_chunk)?;
+
+        // help.lua - help system (required by commands/init.lua)
+        let help_chunk = lua
+            .load(HELP_MODULE)
+            .set_name("embedded:lib/help.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load help module: {}", e))?;
+        loaded.set("help", help_chunk)?;
 
         // Pre-load all command modules into package.loaded
         // This avoids needing load() which isn't available in Luau sandbox
@@ -1238,10 +1319,10 @@ impl LuaRuntime {
                 let action = match action_type.as_str() {
                     "none" => InputAction::None,
                     "redraw" => InputAction::Redraw,
-                    "execute" => {
+                    "execute" | "send" => {
                         let text: String = t
                             .get("text")
-                            .map_err(|e| anyhow::anyhow!("execute action missing 'text': {}", e))?;
+                            .map_err(|e| anyhow::anyhow!("execute/send action missing 'text': {}", e))?;
                         InputAction::Execute(text)
                     }
                     "tab" => InputAction::Tab,
@@ -1731,6 +1812,45 @@ mod tests {
             .expect("require ui.regions should work");
 
         assert!(result, "ui.regions should be a table");
+    }
+
+    #[test]
+    fn test_require_help_module() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // require 'help' should work and return a table with help() function
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local help = require('help')
+                return type(help) == 'table' and type(help.help) == 'function'
+            "#,
+            )
+            .eval()
+            .expect("require('help') should work");
+
+        assert!(result, "help module should be a table with help() function");
+    }
+
+    #[test]
+    fn test_help_module_returns_content() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // help.help('fun') should return markdown content
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local help = require('help')
+                local content = help.help('fun')
+                return type(content) == 'string' and content:find('Lua Fun') ~= nil
+            "#,
+            )
+            .eval()
+            .expect("help.help('fun') should return content");
+
+        assert!(result, "help('fun') should return Lua Fun documentation");
     }
 
     #[test]
@@ -2555,42 +2675,37 @@ mod debug_tests {
     fn test_chat_region_visible() {
         let runtime = LuaRuntime::new().expect("should create runtime");
 
-        // Check what regions are visible after resolving
+        // Check that bars system is working
         let result: String = runtime
             .lua
             .load(
                 r#"
             local output = {}
+            local bars = require 'ui.bars'
 
-            -- Check regions module
-            table.insert(output, "regions type: " .. type(regions))
+            -- Check bars module
+            table.insert(output, "bars type: " .. type(bars))
 
-            if regions then
-                -- List defined regions
-                local defined = regions.list()
-                table.insert(output, "defined regions: " .. table.concat(defined, ", "))
-
-                -- Resolve for 80x24 terminal
-                regions.resolve(80, 24)
-
-                -- Get visible ordered
-                local visible = regions.visible_ordered()
-                table.insert(output, "visible regions (" .. #visible .. "):")
-                for _, r in ipairs(visible) do
-                    if r.area then
-                        table.insert(output, string.format("  %s: x=%d y=%d w=%d h=%d z=%d",
-                            r.name, r.area.x, r.area.y, r.area.w, r.area.h, r.z))
-                    else
-                        table.insert(output, string.format("  %s: area=nil z=%d", r.name, r.z))
-                    end
-                end
+            -- Get defined bars
+            local all_bars = bars.all()
+            table.insert(output, "defined bars (" .. #all_bars .. "):")
+            for _, b in ipairs(all_bars) do
+                table.insert(output, "  " .. b.name .. ": position=" .. b.position .. " priority=" .. b.priority)
             end
 
-            -- Check scroll
-            if tools and tools.scroll then
-                local scroll = tools.scroll()
-                table.insert(output, "scroll type: " .. type(scroll))
-                table.insert(output, "scroll truthy: " .. tostring(scroll and true or false))
+            -- Compute layout for 80x24 terminal
+            local layout = bars.compute_layout(80, 24, {})
+            table.insert(output, "layout content: row=" .. (layout.content and layout.content.row or "nil") ..
+                " height=" .. (layout.content and layout.content.height or "nil"))
+
+            -- Check status bar
+            if layout.status then
+                table.insert(output, "status: row=" .. layout.status.row)
+            end
+
+            -- Check input bar
+            if layout.input then
+                table.insert(output, "input: row=" .. layout.input.row)
             end
 
             return table.concat(output, "\n")
@@ -2601,20 +2716,20 @@ mod debug_tests {
 
         println!("{}", result);
 
-        // Should have chat, status, input regions visible
-        assert!(
-            result.contains("chat:"),
-            "chat region should be visible: {}",
-            result
-        );
+        // Should have bars defined
         assert!(
             result.contains("status:"),
-            "status region should be visible: {}",
+            "status bar should be in layout: {}",
             result
         );
         assert!(
             result.contains("input:"),
-            "input region should be visible: {}",
+            "input bar should be in layout: {}",
+            result
+        );
+        assert!(
+            result.contains("layout content:"),
+            "content area should be computed: {}",
             result
         );
     }

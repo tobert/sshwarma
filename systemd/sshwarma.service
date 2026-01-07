@@ -13,7 +13,7 @@ TimeoutStopSec=30
 #   Data:   ~/.local/share/sshwarma/ (db, host_key)
 #   Config: ~/.config/sshwarma/ (models.toml, lua scripts)
 # Override with: SSHWARMA_DB, SSHWARMA_HOST_KEY, SSHWARMA_MODELS_CONFIG
-Environment=RUST_LOG=info
+Environment=RUST_LOG=sshwarma=info
 
 # OpenTelemetry OTLP export (uncomment to enable)
 # Traces and metrics are exported to the configured endpoint
