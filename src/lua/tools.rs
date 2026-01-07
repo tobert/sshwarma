@@ -11,7 +11,7 @@ use crate::lua::tool_middleware::ToolMiddleware;
 use crate::model::ModelHandle;
 use crate::state::SharedState;
 use crate::status::{Status, StatusTracker};
-use crate::ui::{LuaArea, LuaDrawContext, Rect, RenderBuffer};
+use crate::ui::{LuaDrawContext, RenderBuffer};
 use crate::world::JournalKind;
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::Arc;
@@ -78,8 +78,6 @@ pub struct LuaToolState {
     /// Tag-based dirty tracking for partial screen updates
     /// Lua defines regions; Rust provides primitives
     dirty: Arc<DirtyState>,
-    /// Chat scroll state (persists across renders)
-    chat_scroll: crate::ui::scroll::LuaScrollState,
     /// Region contents (keyed by region name like "overlay", "help", etc.)
     /// Content is stored here, visibility is managed via Lua regions module
     region_contents: Arc<std::sync::RwLock<std::collections::HashMap<String, RegionContent>>>,
@@ -97,14 +95,8 @@ impl LuaToolState {
             middleware: ToolMiddleware::new(),
             input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
             dirty: Arc::new(DirtyState::new()),
-            chat_scroll: crate::ui::scroll::LuaScrollState::new(),
             region_contents: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
-    }
-
-    /// Get the chat scroll state (for Lua HUD)
-    pub fn chat_scroll(&self) -> crate::ui::scroll::LuaScrollState {
-        self.chat_scroll.clone()
     }
 
     /// Get the dirty state for screen refresh task
@@ -661,14 +653,6 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         )?
     };
     tools.set("set_input", set_input_fn)?;
-
-    // tools.scroll() -> persistent LuaScrollState
-    // Returns the same scroll state across renders so position is maintained
-    let scroll_fn = {
-        let state = state.clone();
-        lua.create_function(move |_lua, ()| Ok(state.chat_scroll()))?
-    };
-    tools.set("scroll", scroll_fn)?;
 
     // tools.mark_dirty(tag) -> nil
     // Mark a region tag dirty for partial screen updates
@@ -3878,16 +3862,6 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // UI Primitives (return UserData, not JSON)
     // =========================================
 
-    // sshwarma.screen(width, height) -> LuaArea
-    // Creates an area representing the full terminal
-    let screen_fn = lua.create_function(|_lua, (width, height): (u16, u16)| {
-        Ok(LuaArea {
-            rect: Rect::full(width, height),
-            name: "screen".to_string(),
-        })
-    })?;
-    sshwarma.set("screen", screen_fn)?;
-
     // sshwarma.buffer(width, height) -> LuaDrawContext
     // Creates a new render buffer and returns a draw context for the full area
     let buffer_fn = lua.create_function(|_lua, (width, height): (u16, u16)| {
@@ -3895,16 +3869,6 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         Ok(LuaDrawContext::new(buffer, 0, 0, width, height))
     })?;
     sshwarma.set("buffer", buffer_fn)?;
-
-    // sshwarma.area(x, y, width, height) -> LuaArea
-    // Creates an area with explicit bounds
-    let area_fn = lua.create_function(|_lua, (x, y, w, h): (u16, u16, u16, u16)| {
-        Ok(LuaArea {
-            rect: Rect::new(x, y, w, h),
-            name: "area".to_string(),
-        })
-    })?;
-    sshwarma.set("area", area_fn)?;
 
     lua.globals().set("sshwarma", sshwarma)?;
 

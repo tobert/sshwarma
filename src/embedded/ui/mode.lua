@@ -126,6 +126,24 @@ normal_keys["j"] = normal_keys.down
 normal_keys["h"] = normal_keys.left
 normal_keys["l"] = normal_keys.right
 
+-- Vim cursor movement in input buffer (stays in normal mode)
+normal_keys["^"] = function()
+    input.home()
+    return { type = "redraw" }
+end
+normal_keys["$"] = function()
+    input.end_of_line()
+    return { type = "redraw" }
+end
+normal_keys["w"] = function()
+    input.word_forward()
+    return { type = "redraw" }
+end
+normal_keys["b"] = function()
+    input.word_back()
+    return { type = "redraw" }
+end
+
 -- ==========================================================================
 -- Insert Mode Key Map
 -- ==========================================================================
@@ -170,7 +188,7 @@ local insert_keys = {
         local text = input.submit()
         M.current = "normal"
         if text and #text > 0 then
-            return { type = "send", text = text }
+            return { type = "execute", text = text }
         end
         return { type = "redraw" }
     end,

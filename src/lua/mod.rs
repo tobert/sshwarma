@@ -24,14 +24,11 @@ pub use tool_middleware::{ToolContext, ToolMiddleware};
 pub use tools::{register_mcp_tools, InputState, LuaToolState, SessionContext};
 pub use wrap::{WrapResult, WrapState};
 
-use crate::ui::register_layout_functions;
-
 // Re-export startup script path for main.rs
 pub use self::startup_script_path as get_startup_script_path;
 
 use crate::lua::tools::register_tools;
 use crate::paths;
-use crate::ui::scroll::register_scroll_functions;
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
 use opentelemetry::KeyValue;
@@ -358,14 +355,6 @@ impl LuaRuntime {
 
         // Run bootstrap to install custom searcher in package.searchers
         run_bootstrap(&lua).map_err(|e| anyhow::anyhow!("failed to run Lua bootstrap: {}", e))?;
-
-        // Register scroll/view functions
-        register_scroll_functions(&lua)
-            .map_err(|e| anyhow::anyhow!("failed to register scroll functions: {}", e))?;
-
-        // Register layout functions (sshwarma.layout for region resolution)
-        register_layout_functions(&lua)
-            .map_err(|e| anyhow::anyhow!("failed to register layout functions: {}", e))?;
 
         // Load the wrap script first (provides wrap() and default_wrap())
         lua.load(DEFAULT_WRAP_SCRIPT)
@@ -1854,68 +1843,6 @@ mod tests {
     }
 
     #[test]
-    fn test_regions_show_invalidates_cache() {
-        let runtime = LuaRuntime::new().expect("should create runtime");
-
-        // This test verifies that regions.show() invalidates the cache
-        // so that visible_ordered() includes newly-shown regions.
-        // Bug: If cache isn't invalidated, overlay won't appear in visible_ordered()
-        // after being shown, because resolve() only includes visible regions.
-        let result: bool = runtime
-            .lua
-            .load(
-                r#"
-                local regions = require 'ui.regions'
-                regions.clear()  -- start fresh
-
-                -- Define overlay as hidden
-                regions.define('overlay', {
-                    top = 0,
-                    bottom = -2,
-                    z = 10,
-                    visible = false,
-                })
-
-                -- Define chat as visible
-                regions.define('chat', {
-                    top = 0,
-                    bottom = -2,
-                    z = 0,
-                })
-
-                -- Resolve with overlay hidden
-                regions.resolve(80, 24)
-
-                -- visible_ordered should NOT include overlay
-                local before = regions.visible_ordered()
-                local overlay_before = false
-                for _, r in ipairs(before) do
-                    if r.name == "overlay" then overlay_before = true end
-                end
-                assert(not overlay_before, "overlay should not be visible before show()")
-
-                -- Now show overlay
-                regions.show('overlay')
-
-                -- Resolve again (cache should have been invalidated by show())
-                regions.resolve(80, 24)
-
-                -- visible_ordered should NOW include overlay
-                local after = regions.visible_ordered()
-                local overlay_after = false
-                for _, r in ipairs(after) do
-                    if r.name == "overlay" then overlay_after = true end
-                end
-                return overlay_after
-            "#,
-            )
-            .eval()
-            .expect("regions show cache test should run");
-
-        assert!(result, "overlay should be visible after show() - cache must be invalidated");
-    }
-
-    #[test]
     fn test_input_cursor_movement() {
         let runtime = LuaRuntime::new().expect("should create runtime");
 
@@ -2858,5 +2785,145 @@ mod debug_tests {
             "input line (y=23) should not have debug output: '{}'",
             input.trim()
         );
+    }
+
+    #[test]
+    fn test_layout_tiny_terminal_1x1() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test that layout doesn't panic or produce negative values for 1x1 terminal
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local layout = require 'ui.layout'
+
+                -- Create tiny 1x1 rect
+                local r = layout.rect(0, 0, 1, 1)
+                assert(r.x == 0, "x should be 0")
+                assert(r.y == 0, "y should be 0")
+                assert(r.w == 1, "w should be 1")
+                assert(r.h == 1, "h should be 1")
+
+                -- Shrink should clamp to 0, not go negative
+                local shrunk = layout.shrink(r, 1, 1, 1, 1)
+                assert(shrunk.w >= 0, "shrunk width should not be negative")
+                assert(shrunk.h >= 0, "shrunk height should not be negative")
+
+                -- Sub rect should also clamp
+                local sub = layout.sub(r, 0, 0, 10, 10)
+                assert(sub.w <= r.w, "sub width should be clamped to parent")
+                assert(sub.h <= r.h, "sub height should be clamped to parent")
+
+                return true
+            "#,
+            )
+            .eval()
+            .expect("tiny terminal test should not panic");
+
+        assert!(result, "1x1 terminal layout should handle gracefully");
+    }
+
+    #[test]
+    fn test_layout_tiny_terminal_2x2() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test 2x2 terminal with bar system
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local layout = require 'ui.layout'
+                local bars = require 'ui.bars'
+
+                -- Clear any existing bars
+                bars.clear()
+
+                -- Define minimal bars
+                bars.define("status", {
+                    position = "bottom",
+                    priority = 50,
+                    height = 1,
+                    items = {},
+                })
+                bars.define("input", {
+                    position = "bottom",
+                    priority = 100,
+                    height = 1,
+                    items = {},
+                })
+
+                -- Compute layout for 2x2
+                local result = bars.compute_layout(2, 2, {})
+
+                -- Both bars want bottom space, total 2 lines
+                -- On 2x2 terminal, content gets 0 height (which is valid)
+                assert(result.content ~= nil, "content area should exist")
+                assert(result.content.height >= 0, "content height should not be negative")
+
+                -- Status and input should be present
+                assert(result.status ~= nil or result.input ~= nil, "at least one bar should fit")
+
+                return true
+            "#,
+            )
+            .eval()
+            .expect("2x2 terminal test should not panic");
+
+        assert!(result, "2x2 terminal layout should handle gracefully");
+    }
+
+    #[test]
+    fn test_bar_priority_stacking() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        // Test that bars with higher priority stack closer to the edge
+        let result: bool = runtime
+            .lua
+            .load(
+                r#"
+                local bars = require 'ui.bars'
+
+                -- Clear any existing bars
+                bars.clear()
+
+                -- Define bars with different priorities
+                -- Higher priority = closer to edge
+                bars.define("input", {
+                    position = "bottom",
+                    priority = 100,  -- highest, should be at very bottom
+                    height = 1,
+                    items = {},
+                })
+                bars.define("status", {
+                    position = "bottom",
+                    priority = 50,  -- lower, should be above input
+                    height = 1,
+                    items = {},
+                })
+
+                -- Compute layout for 80x24
+                local result = bars.compute_layout(80, 24, {})
+
+                -- Input (priority 100) should be at row 23 (last row)
+                assert(result.input ~= nil, "input bar should exist")
+                assert(result.input.row == 23, "input (priority 100) should be at row 23, got " .. tostring(result.input.row))
+
+                -- Status (priority 50) should be at row 22 (above input)
+                assert(result.status ~= nil, "status bar should exist")
+                assert(result.status.row == 22, "status (priority 50) should be at row 22, got " .. tostring(result.status.row))
+
+                -- Content should get remaining space (rows 0-21)
+                assert(result.content ~= nil, "content should exist")
+                assert(result.content.row == 0, "content should start at row 0")
+                assert(result.content.height == 22, "content should have height 22, got " .. tostring(result.content.height))
+
+                return true
+            "#,
+            )
+            .eval()
+            .expect("bar priority test should run");
+
+        assert!(result, "bars should stack by priority (higher = closer to edge)");
     }
 }

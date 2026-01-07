@@ -901,7 +901,7 @@ impl SshHandler {
             }
 
             EditorAction::Tab => {
-                self.handle_tab_completion(channel, session).await;
+                // Tab completion disabled (TODO: rewrite in Lua)
             }
 
             EditorAction::ClearScreen => {
@@ -926,18 +926,11 @@ impl SshHandler {
             EditorAction::PageUp => {
                 if let Some(ref lua_runtime) = self.lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    // If overlay is open, scroll overlay instead of chat
+                    // If overlay is open, scroll overlay
+                    // Chat scrolling is handled by Lua mode.lua
                     if lua.tool_state().has_overlay() {
                         let page_size = (self.term_size.1 as usize).saturating_sub(4);
                         lua.tool_state().overlay_scroll_up(page_size);
-                    } else {
-                        // Scroll chat up one page
-                        let scroll = lua.tool_state().chat_scroll();
-                        let inner = scroll.inner();
-                        let mut state = inner.lock().unwrap();
-                        state.page_up();
-                        drop(state); // Release lock before marking dirty
-                        lua.tool_state().mark_dirty("chat");
                     }
                 }
             }
@@ -945,18 +938,11 @@ impl SshHandler {
             EditorAction::PageDown => {
                 if let Some(ref lua_runtime) = self.lua_runtime {
                     let lua = lua_runtime.lock().await;
-                    // If overlay is open, scroll overlay instead of chat
+                    // If overlay is open, scroll overlay
+                    // Chat scrolling is handled by Lua mode.lua
                     if lua.tool_state().has_overlay() {
                         let page_size = (self.term_size.1 as usize).saturating_sub(4);
                         lua.tool_state().overlay_scroll_down(page_size, page_size);
-                    } else {
-                        // Scroll chat down one page
-                        let scroll = lua.tool_state().chat_scroll();
-                        let inner = scroll.inner();
-                        let mut state = inner.lock().unwrap();
-                        state.page_down();
-                        drop(state); // Release lock before marking dirty
-                        lua.tool_state().mark_dirty("chat");
                     }
                 }
             }
@@ -996,7 +982,7 @@ impl SshHandler {
             }
 
             EditorAction::Tab => {
-                self.handle_lua_tab_completion(channel, session).await;
+                // Tab completion disabled (TODO: rewrite in Lua)
             }
 
             EditorAction::ClearScreen => {
@@ -1016,38 +1002,24 @@ impl SshHandler {
             }
 
             EditorAction::PageUp => {
+                // If overlay is open, scroll overlay
+                // Chat scrolling is handled by Lua mode.lua
                 if self.has_overlay().await {
                     let page_size = (self.term_size.1 as usize).saturating_sub(4);
                     self.with_lua(|lua| lua.tool_state().overlay_scroll_up(page_size))
                         .await;
-                } else {
-                    self.with_lua(|lua| {
-                        let scroll = lua.tool_state().chat_scroll();
-                        let inner = scroll.inner();
-                        let mut state = inner.lock().unwrap();
-                        state.page_up();
-                    })
-                    .await;
-                    self.mark_dirty("chat").await;
                 }
             }
 
             EditorAction::PageDown => {
+                // If overlay is open, scroll overlay
+                // Chat scrolling is handled by Lua mode.lua
                 if self.has_overlay().await {
                     let page_size = (self.term_size.1 as usize).saturating_sub(4);
                     self.with_lua(|lua| {
                         lua.tool_state().overlay_scroll_down(page_size, page_size)
                     })
                     .await;
-                } else {
-                    self.with_lua(|lua| {
-                        let scroll = lua.tool_state().chat_scroll();
-                        let inner = scroll.inner();
-                        let mut state = inner.lock().unwrap();
-                        state.page_down();
-                    })
-                    .await;
-                    self.mark_dirty("chat").await;
                 }
             }
         }

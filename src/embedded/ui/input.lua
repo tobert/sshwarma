@@ -355,6 +355,44 @@ function M.end_of_line()
     sync_state()
 end
 
+--- Move cursor forward one word
+function M.word_forward()
+    local text = state.text
+    local pos = state.cursor
+
+    -- Skip current word (non-whitespace)
+    while pos < #text and text:sub(pos + 1, pos + 1) ~= " " do
+        pos = pos + 1
+    end
+
+    -- Skip whitespace
+    while pos < #text and text:sub(pos + 1, pos + 1) == " " do
+        pos = pos + 1
+    end
+
+    state.cursor = pos
+    sync_state()
+end
+
+--- Move cursor backward one word
+function M.word_back()
+    local text = state.text
+    local pos = state.cursor
+
+    -- Skip whitespace backward
+    while pos > 0 and text:sub(pos, pos) == " " do
+        pos = pos - 1
+    end
+
+    -- Skip word backward (non-whitespace)
+    while pos > 0 and text:sub(pos, pos) ~= " " do
+        pos = pos - 1
+    end
+
+    state.cursor = pos
+    sync_state()
+end
+
 --- Clear input line
 function M.clear()
     state.text = ""
