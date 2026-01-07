@@ -105,6 +105,27 @@ const FUN_MODULE: &str = include_str!("../embedded/lib/fun.lua");
 /// Embedded str.lua string utilities (MIT license)
 const STR_MODULE: &str = include_str!("../embedded/lib/str.lua");
 
+/// Help documentation - luafun quick reference
+const HELP_FUN: &str = include_str!("../embedded/help/fun.md");
+
+/// Help documentation - str.lua quick reference
+const HELP_STR: &str = include_str!("../embedded/help/str.md");
+
+/// Help documentation - inspect.lua quick reference
+const HELP_INSPECT: &str = include_str!("../embedded/help/inspect.md");
+
+/// Help documentation - MCP tools quick reference
+const HELP_TOOLS: &str = include_str!("../embedded/help/tools.md");
+
+/// Help documentation - Room navigation and vibes
+const HELP_ROOM: &str = include_str!("../embedded/help/room.md");
+
+/// Help documentation - Journal entries and decisions
+const HELP_JOURNAL: &str = include_str!("../embedded/help/journal.md");
+
+/// Help system module
+const HELP_MODULE: &str = include_str!("../embedded/lib/help.lua");
+
 /// Embedded commands dispatcher
 const COMMANDS_MODULE: &str = include_str!("../embedded/commands/init.lua");
 
@@ -155,6 +176,17 @@ impl EmbeddedModules {
         modules.insert("inspect".to_string(), INSPECT_MODULE);
         modules.insert("fun".to_string(), FUN_MODULE);
         modules.insert("str".to_string(), STR_MODULE);
+
+        // Help documentation modules
+        modules.insert("help.fun".to_string(), HELP_FUN);
+        modules.insert("help.str".to_string(), HELP_STR);
+        modules.insert("help.inspect".to_string(), HELP_INSPECT);
+        modules.insert("help.tools".to_string(), HELP_TOOLS);
+        modules.insert("help.room".to_string(), HELP_ROOM);
+        modules.insert("help.journal".to_string(), HELP_JOURNAL);
+
+        // Help system module
+        modules.insert("help".to_string(), HELP_MODULE);
 
         // Core modules
         modules.insert("screen".to_string(), DEFAULT_SCREEN_SCRIPT);

@@ -263,4 +263,20 @@ function str.title(s)
     end))
 end
 
+--- Extract lines from text by range.
+--- Useful for pulling sections from source code.
+--- @param text string Source text
+--- @param start_line number First line (1-indexed)
+--- @param end_line number Last line (inclusive)
+--- @return string Extracted lines joined with newlines
+function str.extract_lines(text, start_line, end_line)
+    local all_lines = str.lines(text)
+    local result = {}
+    local last = math.min(end_line, #all_lines)
+    for i = start_line, last do
+        result[#result + 1] = all_lines[i]
+    end
+    return str.join(result, "\n")
+end
+
 return str

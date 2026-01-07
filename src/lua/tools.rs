@@ -3564,6 +3564,28 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("bootstrap_world", bootstrap_world_fn)?;
 
+    // =========================================================================
+    // Help system
+    // =========================================================================
+
+    // tools.help(topic?) -> string or nil, err
+    // Get help for a topic, or list all topics if no argument
+    let help_fn = lua.create_function(|lua, topic: Option<String>| {
+        let help_mod: mlua::Table = lua.load("return require('help')").eval()?;
+        let help_fn: mlua::Function = help_mod.get("help")?;
+        help_fn.call::<mlua::MultiValue>(topic)
+    })?;
+    tools.set("help", help_fn)?;
+
+    // tools.help_list() -> array of {name, description}
+    // List available help topics
+    let help_list_fn = lua.create_function(|lua, ()| {
+        let help_mod: mlua::Table = lua.load("return require('help')").eval()?;
+        let list_fn: mlua::Function = help_mod.get("list")?;
+        list_fn.call::<mlua::Table>(())
+    })?;
+    tools.set("help_list", help_list_fn)?;
+
     // Register tool middleware functions
     crate::lua::tool_middleware::register_middleware_tools(lua, &tools, state.middleware.clone())?;
 

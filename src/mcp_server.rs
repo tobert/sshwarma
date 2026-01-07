@@ -83,6 +83,13 @@ pub struct AskModelParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListModelsParams {}
 
+/// Parameters for help
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct HelpParams {
+    #[schemars(description = "Topic (fun, str, inspect, tools, room, journal). Omit for list.")]
+    pub topic: Option<String>,
+}
+
 /// Parameters for create_room
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateRoomParams {
@@ -525,6 +532,58 @@ impl SshwarmaMcpServer {
             ));
         }
         output
+    }
+
+    #[tool(description = "Get help docs. No topic = list available.")]
+    async fn help(&self, Parameters(params): Parameters<HelpParams>) -> String {
+        use crate::lua::EmbeddedModules;
+
+        let embedded = EmbeddedModules::new();
+
+        match params.topic {
+            Some(topic) => {
+                // Look up specific topic
+                let doc_name = format!("help.{}", topic);
+                match embedded.get(&doc_name) {
+                    Some(content) => content.to_string(),
+                    None => {
+                        // List available topics as fallback
+                        let topics: Vec<&str> = embedded
+                            .list()
+                            .into_iter()
+                            .filter(|name| name.starts_with("help."))
+                            .map(|name| name.strip_prefix("help.").unwrap_or(name))
+                            .collect();
+                        format!(
+                            "Unknown topic: '{}'. Available: {}",
+                            topic,
+                            topics.join(", ")
+                        )
+                    }
+                }
+            }
+            None => {
+                // List all topics
+                let mut lines = vec!["Available help topics:".to_string(), String::new()];
+
+                let topics = [
+                    ("fun", "Functional programming, lazy iterators"),
+                    ("str", "String utilities (split, strip, join)"),
+                    ("inspect", "Pretty-print tables for debugging"),
+                    ("tools", "MCP tool reference and patterns"),
+                    ("room", "Room navigation, vibes, exits"),
+                    ("journal", "Notes, decisions, milestones, ideas"),
+                ];
+
+                for (name, desc) in topics {
+                    lines.push(format!("  {:<10}  {}", name, desc));
+                }
+
+                lines.push(String::new());
+                lines.push("Usage: help(topic: '<name>')".to_string());
+                lines.join("\n")
+            }
+        }
     }
 
     #[tool(description = "Create a new room")]

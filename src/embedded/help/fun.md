@@ -169,6 +169,30 @@ end, {})
 3. **Side effects** — use `:each()` not `:map()` for side effects
 4. **Multiple returns** — some iterators yield multiple values (k, v)
 
+## Source Reference
+
+For deep dives, extract sections from `sshwarma.get_embedded_module("fun")`:
+
+| Section | Lines | Description |
+|---------|-------|-------------|
+| Tools | 15-72 | Internal utilities, iterator protocol |
+| Basic Functions | 73-183 | iter, each, wrap/unwrap |
+| Generators | 184-293 | range, duplicate, tabulate, zeros, ones, rands |
+| Slicing | 294-473 | nth, head, tail, take, drop, take_while, drop_while |
+| Indexing | 474-522 | index, indexes, index_of |
+| Filtering | 523-591 | filter, grep, partition |
+| Reducing | 592-819 | foldl, length, sum, min, max, totable, tomap |
+| Transformations | 820-877 | map, enumerate, intersperse |
+| Compositions | 878-998 | zip, cycle, chain |
+| Operators | 999-1051 | comparison, arithmetic, logical (fun.op.*) |
+
+Example:
+```lua
+local str = require 'str'
+local src = sshwarma.get_embedded_module("fun")
+local operators = str.extract_lines(src, 999, 1051)
+```
+
 ## See Also
 
 - Full source: `require 'fun'` (~1075 lines, well-commented)

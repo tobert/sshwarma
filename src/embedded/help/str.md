@@ -81,6 +81,17 @@ str.wrap("the quick brown fox jumps over the lazy dog", 20)
 -- "the quick brown fox\njumps over the lazy\ndog"
 ```
 
+## Line Extraction
+
+```lua
+-- Extract lines from source code (1-indexed, inclusive)
+local src = sshwarma.get_embedded_module("fun")
+local operators = str.extract_lines(src, 1003, 1050)
+
+-- Get first 10 lines of a file
+str.extract_lines(content, 1, 10)
+```
+
 ## Integration with Luafun
 
 ```lua

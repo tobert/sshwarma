@@ -52,6 +52,27 @@ local reload = require("commands.reload")
 -- ============================================================================
 
 local function cmd_help(args)
+    -- Check if a topic was provided
+    local topic = args and args:match("%S+")
+
+    if topic then
+        -- Topic help: delegate to help module
+        local help_lib = require('help')
+        local content, err = help_lib.help(topic)
+        if err then
+            return {
+                text = err,
+                mode = "notification"
+            }
+        end
+        return {
+            text = content,
+            mode = "overlay",
+            title = "Help: " .. topic
+        }
+    end
+
+    -- General command help
     local help_text = [[
 Navigation:
   /rooms              List rooms
@@ -107,6 +128,14 @@ UI:
   /reload             Reload UI from database
   /reload default     Reset to embedded default UI
   /reload <module>    Reload specific module
+
+Help Topics:
+  /help fun           Luafun functional programming
+  /help str           String utilities
+  /help inspect       Table pretty-printing
+  /help tools         MCP tool reference
+  /help room          Room navigation, vibes
+  /help journal       Notes, decisions, milestones
 
 /quit to disconnect
 ]]
