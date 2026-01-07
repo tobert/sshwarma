@@ -498,17 +498,23 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{rooms::Room, scripts::LuaScript};
+    use crate::db::rooms::Room;
+    use crate::db::scripts::ScriptScope;
 
     fn setup() -> Result<(Database, String, String)> {
         let db = Database::in_memory()?;
         let room = Room::new("test");
         db.insert_room(&room)?;
 
-        let script = LuaScript::new("test_script", "handler", "return true");
-        db.insert_script(&script)?;
+        let script_id = db.create_script(
+            ScriptScope::Room,
+            Some("test"),
+            "test_script",
+            "return true",
+            "test",
+        )?;
 
-        Ok((db, room.id, script.id))
+        Ok((db, room.id, script_id))
     }
 
     #[test]

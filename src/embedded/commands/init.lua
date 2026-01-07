@@ -44,6 +44,9 @@ local prompt = require("commands.prompt")
 -- Rules commands (rules list/add/del/enable/disable/scripts)
 local rules = require("commands.rules")
 
+-- Reload commands (reload, reload default)
+local reload = require("commands.reload")
+
 -- ============================================================================
 -- System commands (inline implementations)
 -- ============================================================================
@@ -99,6 +102,11 @@ MCP:
   /mcp connect <name> <url>  Connect to MCP server
   /mcp disconnect <name>     Disconnect from server
   /mcp refresh <name>        Refresh tool list
+
+UI:
+  /reload             Reload UI from database
+  /reload default     Reset to embedded default UI
+  /reload <module>    Reload specific module
 
 /quit to disconnect
 ]]
@@ -181,6 +189,9 @@ local handlers = {
 
     -- Rules (from commands.rules)
     ["rules"] = rules.rules,
+
+    -- Reload (from commands.reload)
+    ["reload"] = reload.reload,
 
     -- System (inline)
     ["help"]  = cmd_help,

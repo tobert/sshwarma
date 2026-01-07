@@ -4,7 +4,7 @@
 //! Uses UUIDv7 for primary keys (time-sortable) and fractional REAL for ordering.
 
 /// Schema version for migrations
-pub const SCHEMA_VERSION: i32 = 101; // 101: Add things, equipped, exits tables
+pub const SCHEMA_VERSION: i32 = 102; // 102: Lua scripts with CoW versioning, user UI config
 
 /// Complete schema SQL
 pub const SCHEMA: &str = r#"
@@ -231,20 +231,38 @@ CREATE TABLE IF NOT EXISTS buffer_scroll (
 
 --------------------------------------------------------------------------------
 -- LUA SCRIPTS
--- Reusable Lua code blocks
+-- User/room Lua modules with copy-on-write versioning
 --------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS lua_scripts (
     id TEXT PRIMARY KEY,                    -- UUIDv7
-    name TEXT UNIQUE,                       -- 'default_hud', etc. NULL for anonymous
-    script_kind TEXT NOT NULL,              -- 'handler', 'renderer', 'transformer'
+    scope TEXT NOT NULL,                    -- 'system', 'user', 'room'
+    scope_id TEXT,                          -- username or room_name, NULL for system
+    module_path TEXT NOT NULL,              -- 'screen', 'ui.status', etc.
     code TEXT NOT NULL,                     -- Lua source
+    parent_id TEXT,                         -- previous version (CoW)
     description TEXT,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    created_by TEXT                         -- who made this version
 );
 
-CREATE INDEX IF NOT EXISTS idx_lua_scripts_kind ON lua_scripts(script_kind);
+-- Primary lookup: current version of a module in a scope
+CREATE INDEX IF NOT EXISTS idx_scripts_lookup
+    ON lua_scripts(scope, scope_id, module_path, created_at DESC);
+
+-- Find all versions of a script (for history/rollback)
+CREATE INDEX IF NOT EXISTS idx_scripts_parent ON lua_scripts(parent_id);
+
+--------------------------------------------------------------------------------
+-- USER UI CONFIG
+-- Per-user UI entrypoint configuration
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS user_ui_config (
+    username TEXT PRIMARY KEY,
+    entrypoint_module TEXT,                 -- NULL = use embedded default
+    updated_at INTEGER NOT NULL
+);
 
 --------------------------------------------------------------------------------
 -- ROOM RULES

@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::db::rules::{ActionSlot, RoomRule, TriggerKind};
-use crate::db::scripts::{LuaScript, ScriptKind};
+// ScriptScope is imported locally where needed
 use crate::db::Database;
 use crate::llm::LlmClient;
 use crate::lua::{LuaRuntime, WrapState};
@@ -265,6 +265,36 @@ pub struct CreateScriptParams {
     pub code: String,
     #[schemars(description = "Optional description of what the script does")]
     pub description: Option<String>,
+}
+
+/// Parameters for read_script (user UI scripts)
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadScriptParams {
+    #[schemars(description = "Module path of the script to read (e.g., 'screen', 'ui.status')")]
+    pub module_path: String,
+}
+
+/// Parameters for update_script (user UI scripts)
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateScriptParams {
+    #[schemars(description = "Module path of the script to update")]
+    pub module_path: String,
+    #[schemars(description = "New Lua source code")]
+    pub code: String,
+}
+
+/// Parameters for delete_script (user UI scripts)
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteScriptParams {
+    #[schemars(description = "Module path of the script to delete")]
+    pub module_path: String,
+}
+
+/// Parameters for set_entrypoint
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetEntrypointParams {
+    #[schemars(description = "Module path to use as main UI entrypoint, or null/empty for default")]
+    pub module_path: Option<String>,
 }
 
 /// Parameters for inventory_list
@@ -990,10 +1020,11 @@ impl SshwarmaMcpServer {
             }
         }
 
-        // Look up script by name
-        let script = match self.state.db.get_script_by_name(&params.script_name) {
+        // Look up script by module_path in room scope
+        use crate::db::scripts::ScriptScope;
+        let script = match self.state.db.get_current_script(ScriptScope::Room, Some(&params.room), &params.script_name) {
             Ok(Some(s)) => s,
-            Ok(None) => return format!("Script '{}' not found.", params.script_name),
+            Ok(None) => return format!("Script '{}' not found in room '{}'.", params.script_name, params.room),
             Err(e) => return format!("Error looking up script: {}", e),
         };
 
@@ -1101,17 +1132,19 @@ impl SshwarmaMcpServer {
 
     #[tool(description = "List available Lua scripts")]
     async fn list_scripts(&self, Parameters(_params): Parameters<ListScriptsParams>) -> String {
-        match self.state.db.list_scripts(None) {
+        use crate::db::scripts::ScriptScope;
+
+        // List system scripts for now (room scripts require a room context)
+        match self.state.db.list_scripts(ScriptScope::System, None) {
             Ok(scripts) => {
                 if scripts.is_empty() {
-                    return "No scripts found.".to_string();
+                    return "No system scripts found.".to_string();
                 }
 
                 let mut output = "## Available Scripts\n\n".to_string();
                 for script in scripts {
-                    let name = script.name.as_deref().unwrap_or("(anonymous)");
                     let desc = script.description.as_deref().unwrap_or("No description");
-                    output.push_str(&format!("- **{}** ({:?}): {}\n", name, script.kind, desc));
+                    output.push_str(&format!("- **{}** ({}): {}\n", script.module_path, script.scope.as_str(), desc));
                 }
                 output
             }
@@ -1121,11 +1154,12 @@ impl SshwarmaMcpServer {
 
     #[tool(description = "Create a new Lua script")]
     async fn create_script(&self, Parameters(params): Parameters<CreateScriptParams>) -> String {
-        // Parse script kind
-        let kind = match params.kind.as_str() {
-            "handler" => ScriptKind::Handler,
-            "renderer" => ScriptKind::Renderer,
-            "transformer" => ScriptKind::Transformer,
+        use crate::db::scripts::ScriptScope;
+
+        // Parse kind to determine scope (for backwards compatibility)
+        // handler/renderer/transformer all become system scope scripts with the module_path as name
+        let scope = match params.kind.as_str() {
+            "handler" | "renderer" | "transformer" => ScriptScope::System,
             _ => {
                 return format!(
                     "Invalid kind '{}'. Use: handler, renderer, transformer",
@@ -1134,19 +1168,118 @@ impl SshwarmaMcpServer {
             }
         };
 
-        let script = LuaScript {
-            id: uuid::Uuid::now_v7().to_string(),
-            name: Some(params.name.clone()),
-            kind,
-            code: params.code,
-            description: params.description,
-            created_at: chrono::Utc::now().timestamp(),
-            updated_at: chrono::Utc::now().timestamp(),
+        match self.state.db.create_script(
+            scope,
+            None,  // scope_id - None for system scope
+            &params.name,  // module_path
+            &params.code,
+            "mcp",  // created_by
+        ) {
+            Ok(id) => format!("Created script '{}' with id {}.", params.name, &id[..8]),
+            Err(e) => format!("Error creating script: {}", e),
+        }
+    }
+
+    // =========================================================================
+    // User UI Script Management
+    // These tools operate on user-scoped scripts for UI customization
+    // =========================================================================
+
+    #[tool(description = "Read a user's Lua UI script by module path")]
+    async fn read_script(&self, Parameters(params): Parameters<ReadScriptParams>) -> String {
+        use crate::db::scripts::ScriptScope;
+
+        // For now, read scripts from the "claude" user scope
+        // In a real implementation, this would use the authenticated user
+        let username = "claude";
+
+        match self.state.db.get_current_script(ScriptScope::User, Some(username), &params.module_path) {
+            Ok(Some(script)) => {
+                format!(
+                    "## Script: {}\n\nModule: `{}`\nScope: user:{}\nVersion: {}\n\n```lua\n{}\n```",
+                    params.module_path,
+                    script.module_path,
+                    username,
+                    &script.id[..8],
+                    script.code
+                )
+            }
+            Ok(None) => format!("No script found at module path '{}'.", params.module_path),
+            Err(e) => format!("Error reading script: {}", e),
+        }
+    }
+
+    #[tool(description = "Update a user's Lua UI script (creates new version via copy-on-write)")]
+    async fn update_script(&self, Parameters(params): Parameters<UpdateScriptParams>) -> String {
+        use crate::db::scripts::ScriptScope;
+
+        let username = "claude";
+
+        // Check if script exists
+        let existing = match self.state.db.get_current_script(ScriptScope::User, Some(username), &params.module_path) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                // Script doesn't exist, create it
+                match self.state.db.create_script(
+                    ScriptScope::User,
+                    Some(username),
+                    &params.module_path,
+                    &params.code,
+                    "claude",
+                ) {
+                    Ok(id) => return format!("Created new script '{}' (id: {}).", params.module_path, &id[..8]),
+                    Err(e) => return format!("Error creating script: {}", e),
+                }
+            }
+            Err(e) => return format!("Error checking for existing script: {}", e),
         };
 
-        match self.state.db.insert_script(&script) {
-            Ok(_) => format!("Created script '{}'.", params.name),
-            Err(e) => format!("Error creating script: {}", e),
+        // Update existing script (CoW)
+        match self.state.db.update_script(&existing.id, &params.code, "claude") {
+            Ok(new_id) => format!(
+                "Updated script '{}' (new version: {}, previous: {}).",
+                params.module_path,
+                &new_id[..8],
+                &existing.id[..8]
+            ),
+            Err(e) => format!("Error updating script: {}", e),
+        }
+    }
+
+    #[tool(description = "Delete a user's Lua UI script (removes all versions)")]
+    async fn delete_script(&self, Parameters(params): Parameters<DeleteScriptParams>) -> String {
+        use crate::db::scripts::ScriptScope;
+
+        let username = "claude";
+
+        match self.state.db.delete_script(ScriptScope::User, Some(username), &params.module_path) {
+            Ok(count) if count > 0 => format!(
+                "Deleted script '{}' ({} version{}).",
+                params.module_path,
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            Ok(_) => format!("No script found at module path '{}'.", params.module_path),
+            Err(e) => format!("Error deleting script: {}", e),
+        }
+    }
+
+    #[tool(description = "Set the main UI script entrypoint for a user")]
+    async fn set_entrypoint(&self, Parameters(params): Parameters<SetEntrypointParams>) -> String {
+        let username = "claude";
+
+        // Empty string treated as None (reset to default)
+        let entrypoint = params.module_path.as_deref().filter(|s| !s.is_empty());
+
+        match self.state.db.set_user_entrypoint(username, entrypoint) {
+            Ok(()) => {
+                if let Some(ep) = entrypoint {
+                    format!("Set UI entrypoint to '{}'. Use /reload to apply.", ep)
+                } else {
+                    format!("Reset to default UI. Use /reload to apply.")
+                }
+            }
+            Err(e) => format!("Error setting entrypoint: {}", e),
         }
     }
 

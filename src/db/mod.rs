@@ -533,18 +533,16 @@ impl Database {
         Ok(())
     }
 
-    /// List prompts for a room (stored as scripts with room:name naming)
+    /// List prompts for a room (stored as room-scoped scripts with "prompt." prefix)
     pub fn list_prompts(&self, room: &str) -> Result<Vec<RoomPrompt>> {
-        use scripts::ScriptKind;
+        use scripts::ScriptScope;
 
-        let prefix = format!("{}:", room);
-        let scripts = self.list_scripts(Some(ScriptKind::Handler))?;
+        let scripts = self.list_scripts(ScriptScope::Room, Some(room))?;
 
         let prompts = scripts
             .into_iter()
             .filter_map(|s| {
-                let name = s.name.as_ref()?;
-                let short_name = name.strip_prefix(&prefix)?;
+                let short_name = s.module_path.strip_prefix("prompt.")?;
                 Some(RoomPrompt {
                     id: 0,
                     room: room.to_string(),
@@ -562,18 +560,19 @@ impl Database {
 
     /// Add a prompt to a room
     pub fn add_prompt(&self, room: &str, name: &str, prompt: &str) -> Result<()> {
-        use scripts::LuaScript;
+        use scripts::ScriptScope;
 
-        let script_name = format!("{}:{}", room, name);
-        let script = LuaScript::new(script_name, "handler", prompt);
-        self.insert_script(&script)?;
+        let module_path = format!("prompt.{}", name);
+        self.create_script(ScriptScope::Room, Some(room), &module_path, prompt, "system")?;
         Ok(())
     }
 
     /// Get a prompt from a room
     pub fn get_prompt(&self, room: &str, name: &str) -> Result<Option<RoomPrompt>> {
-        let script_name = format!("{}:{}", room, name);
-        if let Some(script) = self.get_script_by_name(&script_name)? {
+        use scripts::ScriptScope;
+
+        let module_path = format!("prompt.{}", name);
+        if let Some(script) = self.get_current_script(ScriptScope::Room, Some(room), &module_path)? {
             Ok(Some(RoomPrompt {
                 id: 0,
                 room: room.to_string(),
@@ -590,13 +589,11 @@ impl Database {
 
     /// Delete a prompt from a room
     pub fn delete_prompt(&self, room: &str, name: &str) -> Result<bool> {
-        let script_name = format!("{}:{}", room, name);
-        if let Some(script) = self.get_script_by_name(&script_name)? {
-            self.delete_script(&script.id)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        use scripts::ScriptScope;
+
+        let module_path = format!("prompt.{}", name);
+        let deleted = self.delete_script(ScriptScope::Room, Some(room), &module_path)?;
+        Ok(deleted > 0)
     }
 
     /// List all targets that have prompt slots in a room
@@ -657,20 +654,19 @@ impl Database {
         room: &str,
         name: &str,
         content: &str,
-        _created_by: &str,
+        created_by: &str,
     ) -> Result<()> {
-        use scripts::LuaScript;
+        use scripts::ScriptScope;
 
-        let script_name = format!("{}:{}", room, name);
+        let module_path = format!("prompt.{}", name);
 
         // Check if script exists
-        if let Some(existing) = self.get_script_by_name(&script_name)? {
-            // Update existing script
-            self.update_script_code(&existing.id, content)?;
+        if let Some(existing) = self.get_current_script(ScriptScope::Room, Some(room), &module_path)? {
+            // Update existing script (CoW)
+            self.update_script(&existing.id, content, created_by)?;
         } else {
             // Create new script
-            let script = LuaScript::new(&script_name, "handler", content);
-            self.insert_script(&script)?;
+            self.create_script(ScriptScope::Room, Some(room), &module_path, content, created_by)?;
         }
         Ok(())
     }
@@ -684,16 +680,17 @@ impl Database {
         prompt_name: &str,
     ) -> Result<()> {
         use rules::{ActionSlot, RoomRule, TriggerKind};
+        use scripts::ScriptScope;
 
         // Get room to find room_id
         let room_obj = self
             .get_room_by_name(room)?
             .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room))?;
 
-        // Find the prompt script (format: room:prompt_name)
-        let script_name = format!("{}:{}", room, prompt_name);
+        // Find the prompt script
+        let module_path = format!("prompt.{}", prompt_name);
         let script = self
-            .get_script_by_name(&script_name)?
+            .get_current_script(ScriptScope::Room, Some(room), &module_path)?
             .ok_or_else(|| anyhow::anyhow!("Prompt not found: {}", prompt_name))?;
 
         // Get max priority for target
@@ -752,16 +749,17 @@ impl Database {
         prompt_name: &str,
     ) -> Result<()> {
         use rules::{ActionSlot, RoomRule, TriggerKind};
+        use scripts::ScriptScope;
 
         // Get room to find room_id
         let room_obj = self
             .get_room_by_name(room)?
             .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room))?;
 
-        // Find the prompt script (format: room:prompt_name)
-        let script_name = format!("{}:{}", room, prompt_name);
+        // Find the prompt script
+        let module_path = format!("prompt.{}", prompt_name);
         let script = self
-            .get_script_by_name(&script_name)?
+            .get_current_script(ScriptScope::Room, Some(room), &module_path)?
             .ok_or_else(|| anyhow::anyhow!("Prompt not found: {}", prompt_name))?;
 
         // Shift existing rules at or above this index up by 1

@@ -208,6 +208,12 @@ impl SshHandler {
             .tool_state()
             .set_shared_state(Some(self.state.clone()));
 
+        // Try to load user's UI entrypoint from database
+        // This uses the new virtual require system to load user DB scripts
+        if let Err(e) = runtime.try_load_db_entrypoint(&self.state.db, username) {
+            tracing::warn!("Failed to load DB entrypoint for '{}': {}", username, e);
+        }
+
         let runtime = Arc::new(Mutex::new(runtime));
         self.lua_runtime = Some(runtime.clone());
 

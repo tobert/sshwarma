@@ -129,6 +129,9 @@ const COMMANDS_PROMPT_MODULE: &str = include_str!("../embedded/commands/prompt.l
 /// Embedded rules commands
 const COMMANDS_RULES_MODULE: &str = include_str!("../embedded/commands/rules.lua");
 
+/// Embedded reload commands
+const COMMANDS_RELOAD_MODULE: &str = include_str!("../embedded/commands/reload.lua");
+
 /// Registry of embedded Lua modules
 ///
 /// Provides module lookup for the custom require system.
@@ -145,6 +148,9 @@ impl EmbeddedModules {
         // Library modules
         modules.insert("inspect".to_string(), INSPECT_MODULE);
 
+        // Core modules
+        modules.insert("screen".to_string(), DEFAULT_SCREEN_SCRIPT);
+
         // UI modules
         modules.insert("ui.regions".to_string(), REGIONS_MODULE);
         modules.insert("ui.input".to_string(), INPUT_MODULE);
@@ -160,6 +166,7 @@ impl EmbeddedModules {
         modules.insert("commands.debug".to_string(), COMMANDS_DEBUG_MODULE);
         modules.insert("commands.prompt".to_string(), COMMANDS_PROMPT_MODULE);
         modules.insert("commands.rules".to_string(), COMMANDS_RULES_MODULE);
+        modules.insert("commands.reload".to_string(), COMMANDS_RELOAD_MODULE);
 
         Self { modules }
     }
@@ -392,6 +399,11 @@ impl LuaRuntime {
                 COMMANDS_RULES_MODULE,
                 "embedded:commands/rules.lua",
             ),
+            (
+                "commands.reload",
+                COMMANDS_RELOAD_MODULE,
+                "embedded:commands/reload.lua",
+            ),
         ];
 
         for (name, code, chunk_name) in cmd_modules {
@@ -621,6 +633,144 @@ impl LuaRuntime {
         self.loaded_script_path = None;
         self.loaded_script_mtime = None;
 
+        Ok(())
+    }
+
+    /// Try to load user's UI entrypoint from database
+    ///
+    /// If the user has a configured entrypoint module, loads it via require()
+    /// and sets its on_tick as the global on_tick function.
+    ///
+    /// Returns Ok(true) if entrypoint was loaded, Ok(false) if no entrypoint configured.
+    pub fn try_load_db_entrypoint(
+        &self,
+        db: &crate::db::Database,
+        username: &str,
+    ) -> Result<bool> {
+        // Check if user has an entrypoint configured
+        let entrypoint = match db.get_user_entrypoint(username)? {
+            Some(ep) => ep,
+            None => return Ok(false),
+        };
+
+        info!(
+            "Loading user UI entrypoint '{}' for '{}'",
+            entrypoint, username
+        );
+
+        // Load the module via require and extract on_tick
+        // The searcher in init.lua will check user DB first, then embedded
+        let load_code = format!(
+            r#"
+            local ok, m = pcall(require, '{}')
+            if ok and type(m) == 'table' and type(m.on_tick) == 'function' then
+                on_tick = m.on_tick
+                return true
+            elseif ok and type(m) == 'table' then
+                -- Module loaded but no on_tick
+                return false, 'module does not export on_tick function'
+            else
+                -- require failed
+                return false, tostring(m)
+            end
+            "#,
+            entrypoint
+        );
+
+        let result: (bool, Option<String>) = self
+            .lua
+            .load(&load_code)
+            .set_name("@entrypoint_loader")
+            .eval()
+            .map_err(|e| anyhow::anyhow!("failed to load entrypoint '{}': {}", entrypoint, e))?;
+
+        match result {
+            (true, _) => {
+                info!("Successfully loaded UI entrypoint '{}'", entrypoint);
+                Ok(true)
+            }
+            (false, Some(err)) => {
+                warn!("Failed to load UI entrypoint '{}': {}", entrypoint, err);
+                Err(anyhow::anyhow!(
+                    "failed to load entrypoint '{}': {}",
+                    entrypoint,
+                    err
+                ))
+            }
+            (false, None) => {
+                warn!(
+                    "UI entrypoint '{}' does not export on_tick function",
+                    entrypoint
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Reload UI from database or embedded default
+    ///
+    /// Clears package.loaded cache and reloads the user's entrypoint from DB,
+    /// or falls back to embedded default if no entrypoint is configured.
+    pub fn reload_ui(&mut self, db: &crate::db::Database, username: &str) -> Result<()> {
+        // Clear cached modules to force reload
+        let clear_cache = r#"
+            if package and package.loaded then
+                -- Clear user/room modules but keep system modules
+                for k in pairs(package.loaded) do
+                    if not k:match('^sshwarma%.') and
+                       not k:match('^commands%.') and
+                       not k:match('^ui%.') and
+                       k ~= 'inspect' then
+                        package.loaded[k] = nil
+                    end
+                end
+            end
+        "#;
+
+        self.lua
+            .load(clear_cache)
+            .exec()
+            .map_err(|e| anyhow::anyhow!("failed to clear module cache: {}", e))?;
+
+        // Try to load user entrypoint from DB
+        match self.try_load_db_entrypoint(db, username) {
+            Ok(true) => {
+                info!("Reloaded UI from database entrypoint");
+                self.loaded_script_path = None; // Mark as DB-loaded, not file-loaded
+            }
+            Ok(false) | Err(_) => {
+                // Fall back to embedded default
+                info!("Reloading embedded default UI");
+                self.reload_embedded()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reset to embedded default UI (clear user entrypoint)
+    pub fn reset_to_default(&mut self) -> Result<()> {
+        // Clear cached modules
+        let clear_cache = r#"
+            if package and package.loaded then
+                for k in pairs(package.loaded) do
+                    if not k:match('^sshwarma%.') and
+                       not k:match('^commands%.') and
+                       not k:match('^ui%.') and
+                       k ~= 'inspect' then
+                        package.loaded[k] = nil
+                    end
+                end
+            end
+        "#;
+
+        self.lua
+            .load(clear_cache)
+            .exec()
+            .map_err(|e| anyhow::anyhow!("failed to clear module cache: {}", e))?;
+
+        self.reload_embedded()?;
+        info!("Reset to embedded default UI");
         Ok(())
     }
 

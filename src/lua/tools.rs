@@ -3393,8 +3393,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                     }
                 };
 
-                // Get script by name
-                let script = match shared.db.get_script_by_name(&script_name) {
+                // Get script by module_path in room scope
+                use crate::db::scripts::ScriptScope;
+                let script = match shared.db.get_current_script(ScriptScope::Room, Some(&room_name), &script_name) {
                     Ok(Some(s)) => s,
                     _ => {
                         result.set("success", false)?;
@@ -3518,22 +3519,27 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("rules_enable", rules_enable_fn)?;
 
-    // tools.scripts() -> {scripts = [{id, name, kind, description}, ...]}
+    // tools.scripts() -> {scripts = [{id, module_path, scope, description}, ...]}
+    // Lists scripts in the current room scope
     let scripts_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
+            use crate::db::scripts::ScriptScope;
+
             let result = lua.create_table()?;
             let scripts_table = lua.create_table()?;
 
-            if let Some(shared) = state.shared_state() {
-                if let Ok(scripts_list) = shared.db.list_scripts(None) {
-                    for (i, script) in scripts_list.iter().enumerate() {
-                        let s = lua.create_table()?;
-                        s.set("id", script.id.clone())?;
-                        s.set("name", script.name.clone())?;
-                        s.set("kind", script.kind.as_str())?;
-                        s.set("description", script.description.clone())?;
-                        scripts_table.set(i + 1, s)?;
+            if let (Some(shared), Some(session)) = (state.shared_state(), state.session_context()) {
+                if let Some(ref room_name) = session.room_name {
+                    if let Ok(scripts_list) = shared.db.list_scripts(ScriptScope::Room, Some(room_name)) {
+                        for (i, script) in scripts_list.iter().enumerate() {
+                            let s = lua.create_table()?;
+                            s.set("id", script.id.clone())?;
+                            s.set("module_path", script.module_path.clone())?;
+                            s.set("scope", script.scope.as_str())?;
+                            s.set("description", script.description.clone())?;
+                            scripts_table.set(i + 1, s)?;
+                        }
                     }
                 }
             }
@@ -3787,6 +3793,57 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     sshwarma.set("list", list_fn)?;
+
+    // =========================================
+    // Script Loading (for virtual require system)
+    // =========================================
+
+    // sshwarma.load_user_script(module_path) -> code, error
+    // Loads a user script from the database
+    let load_user_script_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, module_path: String| {
+            use crate::db::scripts::ScriptScope;
+
+            let (shared, session) = match (state.shared_state(), state.session_context()) {
+                (Some(s), Some(sess)) => (s, sess),
+                _ => return Ok((None::<String>, Some("no session context".to_string()))),
+            };
+
+            match shared.db.get_current_script(ScriptScope::User, Some(&session.username), &module_path) {
+                Ok(Some(script)) => Ok((Some(script.code), None::<String>)),
+                Ok(None) => Ok((None::<String>, None::<String>)),
+                Err(e) => Ok((None::<String>, Some(e.to_string()))),
+            }
+        })?
+    };
+    sshwarma.set("load_user_script", load_user_script_fn)?;
+
+    // sshwarma.load_room_script(module_path) -> code, error
+    // Loads a room script from the database
+    let load_room_script_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, module_path: String| {
+            use crate::db::scripts::ScriptScope;
+
+            let (shared, session) = match (state.shared_state(), state.session_context()) {
+                (Some(s), Some(sess)) => (s, sess),
+                _ => return Ok((None::<String>, Some("no session context".to_string()))),
+            };
+
+            let room_name = match session.room_name {
+                Some(ref r) => r,
+                None => return Ok((None::<String>, None::<String>)), // Not in a room, graceful nil
+            };
+
+            match shared.db.get_current_script(ScriptScope::Room, Some(room_name), &module_path) {
+                Ok(Some(script)) => Ok((Some(script.code), None::<String>)),
+                Ok(None) => Ok((None::<String>, None::<String>)),
+                Err(e) => Ok((None::<String>, Some(e.to_string()))),
+            }
+        })?
+    };
+    sshwarma.set("load_room_script", load_room_script_fn)?;
 
     // =========================================
     // UI Primitives (return UserData, not JSON)
@@ -4392,5 +4449,110 @@ mod tests {
         )
         .exec()
         .expect("rooms with shared state should work");
+    }
+
+    #[test]
+    fn test_load_user_script_callback() {
+        use crate::db::scripts::ScriptScope;
+
+        // Create instance with in-memory database
+        let instance = TestInstance::new().expect("should create instance");
+
+        // Add a user script to the database
+        instance
+            .db
+            .create_script(
+                ScriptScope::User,
+                Some("testuser"),
+                "my_module",
+                "return { value = 42 }",
+                "test",
+            )
+            .expect("should create script");
+
+        // Create Lua runtime with tools
+        let lua = Lua::new();
+        let state = instance.lua_tool_state("lobby");
+        register_tools(&lua, state.clone()).expect("should register tools");
+
+        // Register sshwarma.call which includes load_user_script
+        super::register_sshwarma_call(&lua, state).expect("should register sshwarma");
+
+        // Test that load_user_script returns the script code
+        lua.load(
+            r#"
+            local code, err = sshwarma.load_user_script("my_module")
+            assert(code ~= nil, "should find user script")
+            assert(code:find("value = 42"), "should contain expected code")
+        "#,
+        )
+        .exec()
+        .expect("load_user_script should find DB script");
+
+        // Test that missing script returns nil
+        lua.load(
+            r#"
+            local code, err = sshwarma.load_user_script("nonexistent")
+            assert(code == nil, "should not find nonexistent script")
+        "#,
+        )
+        .exec()
+        .expect("load_user_script should return nil for missing script");
+    }
+
+    #[test]
+    fn test_load_room_script_callback() {
+        use crate::db::scripts::ScriptScope;
+
+        // Create instance with in-memory database
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let instance = TestInstance::new().expect("should create instance");
+
+        // Create a room first
+        rt.block_on(async {
+            instance.create_room("testroom", None).await;
+        });
+
+        // Add a room script to the database
+        instance
+            .db
+            .create_script(
+                ScriptScope::Room,
+                Some("testroom"),
+                "room_tools",
+                "return { special = true }",
+                "test",
+            )
+            .expect("should create room script");
+
+        // Create Lua runtime with tools
+        let lua = Lua::new();
+        let state = instance.lua_tool_state("testroom");  // Use the room we created
+        register_tools(&lua, state.clone()).expect("should register tools");
+
+        // Register sshwarma.call which includes load_room_script
+        super::register_sshwarma_call(&lua, state).expect("should register sshwarma");
+
+        // Test that load_room_script returns the script code
+        lua.load(
+            r#"
+            local code, err = sshwarma.load_room_script("room_tools")
+            assert(code ~= nil, "should find room script")
+            assert(code:find("special = true"), "should contain expected code")
+        "#,
+        )
+        .exec()
+        .expect("load_room_script should find DB script");
+
+        // Test that missing room script returns nil (graceful)
+        lua.load(
+            r#"
+            local code, err = sshwarma.load_room_script("nonexistent")
+            assert(code == nil, "should not find nonexistent room script")
+            -- No error - graceful nil for missing room modules
+        "#,
+        )
+        .exec()
+        .expect("load_room_script should return nil gracefully");
     }
 }

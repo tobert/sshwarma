@@ -282,7 +282,7 @@ async fn execute_rule_script(
     };
 
     let lua = lua_runtime.lock().await;
-    let script_name = script.name.as_deref().unwrap_or(script_id);
+    let script_name = &script.module_path;
     if let Err(e) = lua.execute_rule_script(&script.code, script_name, tick) {
         tracing::debug!("rule script '{}' error: {}", script_name, e);
     }
