@@ -1,7 +1,6 @@
 //! SSH connection handler
 
 use crate::ansi::EscapeParser;
-use crate::completion::{Completion, CompletionContext, CompletionEngine};
 use crate::db::rows::Row;
 use crate::internal_tools::{InternalToolConfig, ToolContext};
 use crate::line_editor::{EditorAction, LineEditor};
@@ -28,9 +27,6 @@ pub struct SshHandler {
     pub editor: LineEditor,
     pub esc_parser: EscapeParser,
     pub term_size: (u16, u16),
-    pub completer: CompletionEngine,
-    pub completions: Vec<Completion>,
-    pub completion_index: usize,
     /// Session state for buffer rendering
     pub session_state: Arc<Mutex<SessionState>>,
     /// Sender for row updates from background tasks
@@ -53,9 +49,6 @@ impl SshHandler {
             editor: LineEditor::new(),
             esc_parser: EscapeParser::new(),
             term_size: (80, 24),
-            completer: CompletionEngine::new(state),
-            completions: Vec::new(),
-            completion_index: 0,
             session_state: Arc::new(Mutex::new(SessionState::new())),
             update_tx,
             update_rx: Some(update_rx),
@@ -873,8 +866,6 @@ impl SshHandler {
             EditorAction::None => {}
 
             EditorAction::Redraw => {
-                // Clear completions when user types
-                self.clear_completions();
                 // Update input state - Lua renders it
                 self.update_input_state().await;
             }
@@ -963,7 +954,6 @@ impl SshHandler {
             EditorAction::None => {}
 
             EditorAction::Redraw => {
-                self.clear_completions();
                 self.mark_dirty("input").await;
             }
 
@@ -1025,85 +1015,6 @@ impl SshHandler {
         }
     }
 
-    /// Handle tab completion when Lua manages input
-    ///
-    /// Gets the current input state from Lua and performs completion.
-    /// TODO: Move tab completion to Lua in a future task.
-    async fn handle_lua_tab_completion(&mut self, channel: ChannelId, session: &mut Session) {
-        // Get input state from Lua
-        let (line, cursor) = if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            let input_state = lua.tool_state().input_state();
-            (input_state.text, input_state.cursor)
-        } else {
-            return;
-        };
-
-        let room: Option<String> = self.player.as_ref().and_then(|p| p.current_room.clone());
-
-        // If we already have completions and user pressed tab again, cycle
-        if !self.completions.is_empty() {
-            self.completion_index = (self.completion_index + 1) % self.completions.len();
-            self.apply_lua_completion(&line, cursor).await;
-            return;
-        }
-
-        // Get fresh completions
-        {
-            let ctx = CompletionContext {
-                line: &line,
-                cursor,
-                room: room.as_deref(),
-            };
-            self.completions = self.completer.complete(&ctx).await;
-        }
-        self.completion_index = 0;
-
-        if self.completions.is_empty() {
-            // No completions, beep
-            let _ = session.data(channel, CryptoVec::from(b"\x07".as_slice()));
-        } else if self.completions.len() == 1 {
-            // Single completion, apply it
-            self.apply_lua_completion(&line, cursor).await;
-            self.completions.clear();
-        } else {
-            // Multiple completions, apply first
-            self.apply_lua_completion(&line, cursor).await;
-        }
-    }
-
-    /// Apply completion to Lua-managed input buffer
-    async fn apply_lua_completion(&mut self, line: &str, cursor: usize) {
-        if let Some(completion) = self.completions.get(self.completion_index) {
-            let ctx = CompletionContext {
-                line,
-                cursor,
-                room: self.player.as_ref().and_then(|p| p.current_room.as_deref()),
-            };
-            let (start, _end) = self.completer.replacement_range(&ctx);
-
-            // Build new input text
-            let prefix = &line[..start];
-            let suffix = &line[cursor..];
-            let mut new_text = format!("{}{}", prefix, completion.text);
-
-            // Add space after completion if it's a command or mention
-            if completion.text.starts_with('/') || completion.text.starts_with('@') {
-                new_text.push(' ');
-            }
-
-            new_text.push_str(suffix);
-            let new_cursor = new_text.len() - suffix.len();
-
-            // Update Lua input state
-            if let Some(ref lua_runtime) = self.lua_runtime {
-                let lua = lua_runtime.lock().await;
-                lua.tool_state()
-                    .set_input(&new_text, new_cursor, &self.get_prompt());
-            }
-        }
-    }
-
     /// Get the current prompt string
     fn get_prompt(&self) -> String {
         if let Some(ref player) = self.player {
@@ -1132,81 +1043,5 @@ impl SshHandler {
     async fn show_prompt(&self, _channel: ChannelId, _session: &mut Session) {
         // Input is now rendered by Lua - just update state
         self.update_input_state().await;
-    }
-
-    async fn handle_tab_completion(&mut self, channel: ChannelId, session: &mut Session) {
-        let line = self.editor.value().to_string();
-        let cursor = self.editor.cursor();
-        let room: Option<String> = self.player.as_ref().and_then(|p| p.current_room.clone());
-
-        // If we already have completions and user pressed tab again, cycle
-        if !self.completions.is_empty() {
-            self.completion_index = (self.completion_index + 1) % self.completions.len();
-            let ctx = CompletionContext {
-                line: &line,
-                cursor,
-                room: room.as_deref(),
-            };
-            self.apply_completion(channel, session, &ctx).await;
-            return;
-        }
-
-        // Get fresh completions
-        {
-            let ctx = CompletionContext {
-                line: &line,
-                cursor,
-                room: room.as_deref(),
-            };
-            self.completions = self.completer.complete(&ctx).await;
-        }
-        self.completion_index = 0;
-
-        if self.completions.is_empty() {
-            // No completions, beep
-            let _ = session.data(channel, CryptoVec::from(b"\x07".as_slice()));
-        } else if self.completions.len() == 1 {
-            // Single completion, apply it
-            let ctx = CompletionContext {
-                line: &line,
-                cursor,
-                room: room.as_deref(),
-            };
-            self.apply_completion(channel, session, &ctx).await;
-            self.completions.clear();
-        } else {
-            // Multiple completions, apply first
-            let ctx = CompletionContext {
-                line: &line,
-                cursor,
-                room: room.as_deref(),
-            };
-            self.apply_completion(channel, session, &ctx).await;
-        }
-    }
-
-    async fn apply_completion(
-        &mut self,
-        _channel: ChannelId,
-        _session: &mut Session,
-        ctx: &CompletionContext<'_>,
-    ) {
-        if let Some(completion) = self.completions.get(self.completion_index) {
-            let (start, _end) = self.completer.replacement_range(ctx);
-            self.editor.replace_with_completion(start, &completion.text);
-
-            // Add space after completion if it's a command or mention
-            if completion.text.starts_with('/') || completion.text.starts_with('@') {
-                self.editor.insert_completion(" ");
-            }
-
-            // Update input state - Lua renders it
-            self.update_input_state().await;
-        }
-    }
-
-    fn clear_completions(&mut self) {
-        self.completions.clear();
-        self.completion_index = 0;
     }
 }
