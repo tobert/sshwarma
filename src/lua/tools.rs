@@ -40,6 +40,10 @@ pub struct InputState {
     pub cursor: usize,
     /// Prompt string (e.g., "lobby> ")
     pub prompt: String,
+    /// Hardware cursor row (1-indexed, set by Lua after rendering)
+    pub cursor_row: usize,
+    /// Hardware cursor column (1-indexed, set by Lua after rendering)
+    pub cursor_col: usize,
 }
 
 /// Shared state holder for Lua callbacks
@@ -113,6 +117,16 @@ impl LuaToolState {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    /// Set the hardware cursor position (called by Lua after rendering input)
+    ///
+    /// Row and column are 1-indexed ANSI positions.
+    pub fn set_cursor_pos(&self, row: usize, col: usize) {
+        if let Ok(mut guard) = self.input_state.write() {
+            guard.cursor_row = row;
+            guard.cursor_col = col;
+        }
     }
 
     /// Get a reference to the tool middleware
@@ -540,6 +554,18 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         )?
     };
     tools.set("set_input", set_input_fn)?;
+
+    // tools.set_cursor_pos(row, col) -> nil
+    // Set hardware cursor position (called by Lua after rendering input bar)
+    // Row and col are 1-indexed ANSI positions
+    let set_cursor_pos_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, (row, col): (usize, usize)| {
+            state.set_cursor_pos(row, col);
+            Ok(())
+        })?
+    };
+    tools.set("set_cursor_pos", set_cursor_pos_fn)?;
 
     // tools.mark_dirty(tag) -> nil
     // Mark a region tag dirty for partial screen updates

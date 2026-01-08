@@ -452,6 +452,27 @@ function on_tick(dirty_tags, tick, ctx)
             end
         end
     end
+
+    -- Report hardware cursor position for layered blink effect
+    -- Layout is 0-indexed, ANSI is 1-indexed
+    if bar_layout["input"] and tools and tools.set_cursor_pos then
+        local inp = input.get_state()
+        local room = (state.room or {}).name or "lobby"
+
+        -- Calculate prompt width (must match bars.item("prompt") output)
+        local prompt_text = mode.is_normal() and (room .. "│") or (room .. "> ")
+        local prompt_width = M.display_width(prompt_text)
+
+        -- Calculate text before cursor width
+        local text_before = (inp.text or ""):sub(1, inp.cursor or 0)
+        local text_width = M.display_width(text_before)
+
+        -- ANSI positions are 1-indexed
+        local cursor_row = bar_layout["input"].row + 1
+        local cursor_col = prompt_width + text_width + 1
+
+        tools.set_cursor_pos(cursor_row, cursor_col)
+    end
 end
 
 function background(tick)

@@ -14,7 +14,6 @@ use russh::{ChannelId, CryptoVec};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
-use unicode_width::UnicodeWidthStr;
 
 /// Spawn the screen refresh task
 pub fn spawn_screen_refresh(
@@ -219,20 +218,11 @@ async fn render_screen_with_tags(
         *last_buffer = buf.clone();
     }
 
-    // Calculate cursor position from input state
-    let cursor_col = {
+    // Get cursor position reported by Lua (set via tools.set_cursor_pos)
+    let (cursor_row, cursor_col) = {
         let lua = lua_runtime.lock().await;
         let input = lua.tool_state().input_state();
-        // ANSI cursor positions are 1-indexed
-        // Column = 1 + width(prompt) + width(text before cursor)
-        let prompt_width = input.prompt.width();
-        let text_before_cursor = if input.cursor <= input.text.len() {
-            &input.text[..input.cursor]
-        } else {
-            &input.text
-        };
-        let text_width = text_before_cursor.width();
-        1 + prompt_width + text_width
+        (input.cursor_row, input.cursor_col)
     };
 
     // Only send if there are changes
@@ -241,14 +231,18 @@ async fn render_screen_with_tags(
         diff_output.len()
     );
     if !diff_output.is_empty() {
-        // Wrap in synchronized output to prevent tearing
-        // Position hardware cursor at input line - this overlays the visual cursor
-        // rendered by Lua (screen.lua), creating a layered blink effect.
-        // Use \x1b[?25l instead of \x1b[?25h to hide hardware cursor if unwanted.
-        let final_output = format!(
-            "\x1b[?2026h{}\x1b[{};{}H\x1b[?25h\x1b[?2026l",
-            diff_output, term_height, cursor_col
-        );
+        // Wrap in synchronized output to prevent tearing.
+        // Position hardware cursor at Lua-reported position for layered blink effect.
+        // Lua renders a visual cursor (styled background), hardware cursor overlays it.
+        let final_output = if cursor_row > 0 && cursor_col > 0 {
+            format!(
+                "\x1b[?2026h{}\x1b[{};{}H\x1b[?25h\x1b[?2026l",
+                diff_output, cursor_row, cursor_col
+            )
+        } else {
+            // No cursor position reported yet - hide hardware cursor
+            format!("\x1b[?2026h{}\x1b[?25l\x1b[?2026l", diff_output)
+        };
 
         if handle
             .data(channel, CryptoVec::from(final_output.as_bytes()))
