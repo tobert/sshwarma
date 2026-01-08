@@ -114,6 +114,9 @@ const FUN_MODULE: &str = include_str!("../embedded/lib/fun.lua");
 /// Embedded str.lua string utilities (MIT license)
 const STR_MODULE: &str = include_str!("../embedded/lib/str.lua");
 
+/// Page helper for commands - opens pages directly
+const PAGE_MODULE: &str = include_str!("../embedded/lib/page.lua");
+
 /// Help documentation - luafun quick reference
 const HELP_FUN: &str = include_str!("../embedded/help/fun.md");
 
@@ -185,6 +188,7 @@ impl EmbeddedModules {
         modules.insert("inspect".to_string(), INSPECT_MODULE);
         modules.insert("fun".to_string(), FUN_MODULE);
         modules.insert("str".to_string(), STR_MODULE);
+        modules.insert("page".to_string(), PAGE_MODULE);
 
         // Help documentation modules
         modules.insert("help.fun".to_string(), HELP_FUN);
@@ -438,6 +442,14 @@ impl LuaRuntime {
             .eval::<Table>()
             .map_err(|e| anyhow::anyhow!("failed to load embedded mode module: {}", e))?;
         loaded.set("ui.mode", mode_chunk)?;
+
+        // page.lua - helper for commands to open pages (requires ui.pages)
+        let page_chunk = lua
+            .load(PAGE_MODULE)
+            .set_name("embedded:lib/page.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load page module: {}", e))?;
+        loaded.set("page", page_chunk)?;
 
         // help.lua - help system (required by commands/init.lua)
         let help_chunk = lua

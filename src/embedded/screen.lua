@@ -350,16 +350,24 @@ Press q to close this help.
 ]]
 
 function M.render_help(ctx, height)
+    M.render_page_content(ctx, "help", M.help_content, height)
+end
+
+-- ==========================================================================
+-- Generic Page Content Rendering
+-- ==========================================================================
+
+function M.render_page_content(ctx, page_name, content, height)
     local C = M.colors
     local lines = {}
-    for line in M.help_content:gmatch("[^\n]*") do
+    for line in content:gmatch("[^\n]*") do
         table.insert(lines, line)
     end
 
-    scroll.set_content_height("help", #lines)
-    scroll.set_viewport_height("help", height)
+    scroll.set_content_height(page_name, #lines)
+    scroll.set_viewport_height(page_name, height)
 
-    local start_line, end_line = scroll.visible_range("help")
+    local start_line, end_line = scroll.visible_range(page_name)
     if end_line > #lines then end_line = #lines end
 
     for i = start_line, end_line - 1 do
@@ -368,8 +376,8 @@ function M.render_help(ctx, height)
         ctx:print(0, y, line, {fg = C.fg})
     end
 
-    if not scroll.is_following("help") and #lines > height then
-        local pct = math.floor(scroll.percent("help") * 100)
+    if not scroll.is_following(page_name) and #lines > height then
+        local pct = math.floor(scroll.percent(page_name) * 100)
         local indicator = string.format("── %d%% ──", pct)
         local ix = ctx.w - M.display_width(indicator)
         ctx:print(ix, height - 1, indicator, {fg = C.dim})
@@ -437,10 +445,10 @@ function on_tick(dirty_tags, tick, ctx)
         elseif current_page == "help" then
             M.render_help(content_ctx, content.height)
         else
-            -- Generic page rendering
+            -- Generic page with scroll support
             local page = pages.current()
-            if type(page) == "table" and page.content then
-                content_ctx:print(0, 0, tostring(page.content))
+            if page and page.content then
+                M.render_page_content(content_ctx, page.name, page.content, content.height)
             end
         end
     end

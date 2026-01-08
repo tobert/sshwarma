@@ -8,8 +8,8 @@
 --   - commands.journal:   Journal entries (journal, note, decide, idea, milestone, inspire)
 --   - commands.mcp:       MCP tools (mcp, tools, run)
 --
--- Each handler returns an action table:
---   {text = "...", mode = "notification"|"overlay", title = "..."}
+-- Commands that display content use page.show() directly. Commands returning
+-- quick feedback use: {text = "...", mode = "notification"}
 
 local M = {}
 
@@ -52,6 +52,8 @@ local reload = require("commands.reload")
 -- ============================================================================
 
 local function cmd_help(args)
+    local page = require('page')
+
     -- Check if a topic was provided
     local topic = args and args:match("%S+")
 
@@ -65,11 +67,8 @@ local function cmd_help(args)
                 mode = "notification"
             }
         end
-        return {
-            text = content,
-            mode = "overlay",
-            title = "Help: " .. topic
-        }
+        page.show("Help: " .. topic, content)
+        return {}
     end
 
     -- General command help
@@ -140,19 +139,14 @@ Help Topics:
 /quit to disconnect
 ]]
 
-    return {
-        text = help_text,
-        mode = "overlay",
-        title = "Help"
-    }
+    page.show("Help", help_text)
+    return {}
 end
 
 local function cmd_quit(args)
-    return {
-        text = "Goodbye!",
-        mode = "overlay",
-        title = "Quit"
-    }
+    local page = require('page')
+    page.show("Quit", "Goodbye!")
+    return {}
 end
 
 local function cmd_clear(args)

@@ -8,9 +8,9 @@
 --   milestone - Mark a milestone
 --   inspire  - Add or view inspirations
 --
--- Each handler receives args string and returns:
---   {text = "output", mode = "overlay"|"notification", title = "Title"}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 --------------------------------------------------------------------------------
@@ -102,11 +102,8 @@ function M.journal(args)
         table.insert(lines, line)
     end
 
-    return {
-        text = table.concat(lines, "\n"),
-        mode = "overlay",
-        title = "Journal"
-    }
+    page.show("Journal", table.concat(lines, "\n"))
+    return {}
 end
 
 --------------------------------------------------------------------------------
@@ -279,11 +276,8 @@ function M.inspire(args)
             table.insert(lines, string.format(". %s", content))
         end
 
-        return {
-            text = table.concat(lines, "\n"),
-            mode = "overlay",
-            title = "Inspirations"
-        }
+        page.show("Inspirations", table.concat(lines, "\n"))
+        return {}
     else
         -- Add inspiration
         local content = args:match("^%s*(.-)%s*$")  -- trim

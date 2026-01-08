@@ -8,9 +8,9 @@
 --   drop         - Unbind asset from room
 --   examine      - Inspect a bound asset
 --
--- Each handler receives args string and returns:
---   {text = "output", mode = "overlay"|"notification", title = "Title"}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 --------------------------------------------------------------------------------
@@ -84,11 +84,8 @@ function M.inventory(args)
         end
     end
 
-    return {
-        text = table.concat(lines, "\n"),
-        mode = "overlay",
-        title = "Inventory"
-    }
+    page.show("Inventory", table.concat(lines, "\n"))
+    return {}
 end
 
 -- Alias
@@ -100,13 +97,10 @@ M.inv = M.inventory
 
 function M.equip(args)
     if not args or args:match("^%s*$") then
-        return {
-            text = "Usage: /equip <qualified_name>\n" ..
+        page.show("Equip", "Usage: /equip <qualified_name>\n" ..
                    "Example: /equip holler:sample\n" ..
-                   "Use /inv all to see available tools.",
-            mode = "overlay",
-            title = "Equip"
-        }
+                   "Use /inv all to see available tools.")
+        return {}
     end
 
     local name = args:match("^%s*(%S+)")
@@ -131,11 +125,8 @@ function M.equip(args)
             end
         end
 
-        return {
-            text = table.concat(lines, "\n"),
-            mode = "overlay",
-            title = "Equip"
-        }
+        page.show("Equip", table.concat(lines, "\n"))
+        return {}
     else
         return {
             text = string.format("Error: %s", result.error or "unknown error"),
@@ -150,13 +141,10 @@ end
 
 function M.unequip(args)
     if not args or args:match("^%s*$") then
-        return {
-            text = "Usage: /unequip <qualified_name>\n" ..
+        page.show("Unequip", "Usage: /unequip <qualified_name>\n" ..
                    "Example: /unequip holler:sample\n" ..
-                   "Use /inv to see equipped tools.",
-            mode = "overlay",
-            title = "Unequip"
-        }
+                   "Use /inv to see equipped tools.")
+        return {}
     end
 
     local name = args:match("^%s*(%S+)")
@@ -184,11 +172,8 @@ function M.unequip(args)
             table.insert(lines, "No tools equipped.")
         end
 
-        return {
-            text = table.concat(lines, "\n"),
-            mode = "overlay",
-            title = "Unequip"
-        }
+        page.show("Unequip", table.concat(lines, "\n"))
+        return {}
     else
         return {
             text = string.format("Error: %s", result.error or "unknown error"),
@@ -203,24 +188,18 @@ end
 
 function M.bring(args)
     if not args or args:match("^%s*$") then
-        return {
-            text = "Usage: /bring <artifact_id> as <role>\n" ..
-                   "Example: /bring abc123 as reference",
-            mode = "overlay",
-            title = "Bring"
-        }
+        page.show("Bring", "Usage: /bring <artifact_id> as <role>\n" ..
+                   "Example: /bring abc123 as reference")
+        return {}
     end
 
     -- Parse: <artifact_id> as <role>
     local artifact_id, role = args:match("^%s*(%S+)%s+as%s+(.+)%s*$")
 
     if not artifact_id or not role then
-        return {
-            text = "Usage: /bring <artifact_id> as <role>\n" ..
-                   "Example: /bring abc123 as reference",
-            mode = "overlay",
-            title = "Bring"
-        }
+        page.show("Bring", "Usage: /bring <artifact_id> as <role>\n" ..
+                   "Example: /bring abc123 as reference")
+        return {}
     end
 
     role = role:match("^%s*(.-)%s*$")  -- trim
@@ -253,12 +232,9 @@ end
 
 function M.drop(args)
     if not args or args:match("^%s*$") then
-        return {
-            text = "Usage: /drop <role>\n" ..
-                   "Example: /drop reference",
-            mode = "overlay",
-            title = "Drop"
-        }
+        page.show("Drop", "Usage: /drop <role>\n" ..
+                   "Example: /drop reference")
+        return {}
     end
 
     local role = args:match("^%s*(.-)%s*$")  -- trim
@@ -291,12 +267,9 @@ end
 
 function M.examine(args)
     if not args or args:match("^%s*$") then
-        return {
-            text = "Usage: /examine <role>\n" ..
-                   "Example: /examine reference",
-            mode = "overlay",
-            title = "Examine"
-        }
+        page.show("Examine", "Usage: /examine <role>\n" ..
+                   "Example: /examine reference")
+        return {}
     end
 
     local role = args:match("^%s*(.-)%s*$")  -- trim
@@ -338,11 +311,8 @@ function M.examine(args)
         asset.bound_by or "unknown",
         asset.bound_at or "unknown"))
 
-    return {
-        text = table.concat(lines, "\n"),
-        mode = "overlay",
-        title = asset.role
-    }
+    page.show(asset.role, table.concat(lines, "\n"))
+    return {}
 end
 
 return M

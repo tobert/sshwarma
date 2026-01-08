@@ -1,8 +1,9 @@
 -- History command handlers for sshwarma
 --
 -- Commands for viewing chat history, tool calls, and usage statistics.
--- Each handler receives args (string) and returns {text, mode, title?}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 -- Format timestamp as relative time
@@ -56,11 +57,8 @@ function M.history(args)
     local messages = tools.history(limit)
 
     if #messages == 0 then
-        return {
-            text = "No messages in history.\r\n\r\nStart chatting or @mention a model!",
-            mode = "overlay",
-            title = "History"
-        }
+        page.show("History", "No messages in history.\r\n\r\nStart chatting or @mention a model!")
+        return {}
     end
 
     local lines = {}
@@ -86,11 +84,8 @@ function M.history(args)
         table.insert(lines, string.format("%s%s (%s): %s\r\n", icon, author, time_str, preview))
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "History"
-    }
+    page.show("History", table.concat(lines))
+    return {}
 end
 
 -- /history --tools - View recent tool calls
@@ -104,11 +99,8 @@ function M.history_tools(args)
     local calls = tools.history_tools(limit)
 
     if #calls == 0 then
-        return {
-            text = "No tool calls in history.\r\n\r\nTool calls will appear here when models use MCP tools.",
-            mode = "overlay",
-            title = "Tool History"
-        }
+        page.show("Tool History", "No tool calls in history.\r\n\r\nTool calls will appear here when models use MCP tools.")
+        return {}
     end
 
     local lines = {}
@@ -137,11 +129,8 @@ function M.history_tools(args)
         table.insert(lines, "\r\n")
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Tool History"
-    }
+    page.show("Tool History", table.concat(lines))
+    return {}
 end
 
 -- /history --stats - View tool usage statistics
@@ -149,11 +138,8 @@ function M.history_stats(args)
     local stats = tools.history_stats()
 
     if stats.total == 0 then
-        return {
-            text = "No tool usage yet.\r\n\r\nTool statistics will appear here after models use MCP tools.",
-            mode = "overlay",
-            title = "Tool Stats"
-        }
+        page.show("Tool Stats", "No tool usage yet.\r\n\r\nTool statistics will appear here after models use MCP tools.")
+        return {}
     end
 
     local lines = {}
@@ -180,11 +166,8 @@ function M.history_stats(args)
         end
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Tool Stats"
-    }
+    page.show("Tool Stats", table.concat(lines))
+    return {}
 end
 
 return M

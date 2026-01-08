@@ -1,8 +1,9 @@
 -- Rules command handlers for sshwarma
 --
 -- Commands for managing room rules (triggers and scripts).
--- Each handler receives args (string) and returns {text, mode, title?}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 -- Format trigger kind for display
@@ -111,11 +112,8 @@ function M.rules_list(args)
     table.insert(lines, "  /rules scripts                 List scripts\r\n")
     table.insert(lines, "\r\nTriggers: tick:N, interval:Nms, row:pattern, tag:name\r\n")
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Rules"
-    }
+    page.show("Rules", table.concat(lines))
+    return {}
 end
 
 -- /rules add <trigger> <script> - Add a new rule
@@ -248,11 +246,8 @@ function M.rules_scripts(args)
         end
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Scripts"
-    }
+    page.show("Scripts", table.concat(lines))
+    return {}
 end
 
 return M

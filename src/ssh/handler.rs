@@ -121,26 +121,6 @@ impl SshHandler {
         .await;
     }
 
-    /// Check if an overlay is currently visible.
-    pub async fn has_overlay(&self) -> bool {
-        self.with_lua(|lua| lua.tool_state().has_overlay())
-            .await
-            .unwrap_or(false)
-    }
-
-    /// Close any open overlay.
-    pub async fn close_overlay(&self) {
-        self.with_lua(|lua| lua.tool_state().close_overlay()).await;
-    }
-
-    /// Show an overlay with title and content.
-    pub async fn show_overlay(&self, title: &str, content: &str) {
-        let title = title.to_string();
-        let content = content.to_string();
-        self.with_lua(|lua| lua.tool_state().show_overlay(&title, &content))
-            .await;
-    }
-
     // =========================================================================
     // Other Methods
     // =========================================================================
@@ -905,37 +885,15 @@ impl SshHandler {
             }
 
             EditorAction::Escape => {
-                // Close overlay if one is open
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    if lua.tool_state().has_overlay() {
-                        lua.tool_state().close_overlay();
-                    }
-                }
+                // Page navigation handled by Lua mode.lua
             }
 
             EditorAction::PageUp => {
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    // If overlay is open, scroll overlay
-                    // Chat scrolling is handled by Lua mode.lua
-                    if lua.tool_state().has_overlay() {
-                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
-                        lua.tool_state().overlay_scroll_up(page_size);
-                    }
-                }
+                // Page scrolling handled by Lua mode.lua
             }
 
             EditorAction::PageDown => {
-                if let Some(ref lua_runtime) = self.lua_runtime {
-                    let lua = lua_runtime.lock().await;
-                    // If overlay is open, scroll overlay
-                    // Chat scrolling is handled by Lua mode.lua
-                    if lua.tool_state().has_overlay() {
-                        let page_size = (self.term_size.1 as usize).saturating_sub(4);
-                        lua.tool_state().overlay_scroll_down(page_size, page_size);
-                    }
-                }
+                // Page scrolling handled by Lua mode.lua
             }
         }
     }
@@ -986,31 +944,15 @@ impl SshHandler {
             }
 
             EditorAction::Escape => {
-                if self.has_overlay().await {
-                    self.close_overlay().await;
-                }
+                // Page navigation handled by Lua mode.lua
             }
 
             EditorAction::PageUp => {
-                // If overlay is open, scroll overlay
-                // Chat scrolling is handled by Lua mode.lua
-                if self.has_overlay().await {
-                    let page_size = (self.term_size.1 as usize).saturating_sub(4);
-                    self.with_lua(|lua| lua.tool_state().overlay_scroll_up(page_size))
-                        .await;
-                }
+                // Page scrolling handled by Lua mode.lua
             }
 
             EditorAction::PageDown => {
-                // If overlay is open, scroll overlay
-                // Chat scrolling is handled by Lua mode.lua
-                if self.has_overlay().await {
-                    let page_size = (self.term_size.1 as usize).saturating_sub(4);
-                    self.with_lua(|lua| {
-                        lua.tool_state().overlay_scroll_down(page_size, page_size)
-                    })
-                    .await;
-                }
+                // Page scrolling handled by Lua mode.lua
             }
         }
     }

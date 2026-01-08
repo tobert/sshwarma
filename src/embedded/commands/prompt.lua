@@ -1,8 +1,9 @@
 -- Prompt management command handlers for sshwarma
 --
 -- Commands for managing named prompts and target slots.
--- Each handler receives args (string) and returns {text, mode, title?}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 -- Valid targets for prompt slots
@@ -118,11 +119,8 @@ function M.prompt_list(args)
     table.insert(lines, "  /prompt rm <target> <slot>   Remove by index\r\n")
     table.insert(lines, "  /prompt delete <name>        Delete prompt\r\n")
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Prompts"
-    }
+    page.show("Prompts", table.concat(lines))
+    return {}
 end
 
 -- /prompt show <name|target> - Show prompt content or target slots
@@ -153,11 +151,8 @@ function M.prompt_show(args)
             end
         end
 
-        return {
-            text = table.concat(lines),
-            mode = "overlay",
-            title = name_or_target
-        }
+        page.show(name_or_target, table.concat(lines))
+        return {}
     else
         -- Try to get named prompt
         local prompt = tools.get_prompt(name_or_target)
@@ -165,11 +160,8 @@ function M.prompt_show(args)
             local content = prompt.content or "(empty)"
             content = content:gsub("\n", "\r\n")  -- Fix newlines for display
 
-            return {
-                text = string.format("=== %s ===\r\n\r\n%s", prompt.name, content),
-                mode = "overlay",
-                title = prompt.name
-            }
+            page.show(prompt.name, string.format("=== %s ===\r\n\r\n%s", prompt.name, content))
+            return {}
         else
             return {
                 text = string.format("Prompt '%s' not found", name_or_target),

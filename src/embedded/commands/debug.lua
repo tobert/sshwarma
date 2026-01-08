@@ -1,8 +1,9 @@
 -- Debug command handlers for sshwarma
 --
 -- Commands for debugging and introspection.
--- Each handler receives args (string) and returns {text, mode, title?}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 -- Estimate token count (rough approximation: ~4 chars per token)
@@ -25,12 +26,9 @@ function M.wrap(args)
     end)
 
     if not ok then
-        return {
-            text = "Error: Could not initialize wrap builder.\r\n" ..
-                   "Make sure you are in a room with a model.",
-            mode = "overlay",
-            title = "Wrap Error"
-        }
+        page.show("Wrap Error", "Error: Could not initialize wrap builder.\r\n" ..
+                   "Make sure you are in a room with a model.")
+        return {}
     end
 
     -- Get the composed output
@@ -43,12 +41,9 @@ function M.wrap(args)
     end)
 
     if not system_ok or not context_ok then
-        return {
-            text = "Error: Could not compose context.\r\n" ..
-                   tostring(system_prompt) .. "\r\n" .. tostring(context),
-            mode = "overlay",
-            title = "Wrap Error"
-        }
+        page.show("Wrap Error", "Error: Could not compose context.\r\n" ..
+                   tostring(system_prompt) .. "\r\n" .. tostring(context))
+        return {}
     end
 
     -- Format output with token counts
@@ -93,11 +88,8 @@ function M.wrap(args)
     table.insert(lines, string.format("Total: ~%d tokens (%d chars)\r\n",
         total_tokens, #(system_prompt or "") + #(context or "")))
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Wrap Preview"
-    }
+    page.show("Wrap Preview", table.concat(lines))
+    return {}
 end
 
 return M

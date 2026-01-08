@@ -1,8 +1,9 @@
 -- Navigation command handlers for sshwarma
 --
 -- Commands for moving between rooms and viewing room state.
--- Each handler receives args (string) and returns {text, mode, title?}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 -- Direction arrow glyphs for exits display
@@ -41,11 +42,8 @@ function M.rooms(args)
             desc ~= "" and string.format(" (%s)", desc) or ""))
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Rooms"
-    }
+    page.show("Rooms", table.concat(lines))
+    return {}
 end
 
 -- /join <room> - Enter a room
@@ -160,11 +158,8 @@ function M.exits(args)
         table.insert(lines, string.format("  %s %s -> %s\r\n", glyph, dir, dest))
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Exits"
-    }
+    page.show("Exits", table.concat(lines))
+    return {}
 end
 
 -- /look [target] - Room summary
@@ -182,11 +177,8 @@ function M.look(args)
     local room = tools.look()
 
     if not room.room then
-        return {
-            text = "=== Lobby ===\r\n\r\nYou're in the lobby. Use /rooms to see rooms, /join <room> to enter one.",
-            mode = "overlay",
-            title = "Lobby"
-        }
+        page.show("Lobby", "=== Lobby ===\r\n\r\nYou're in the lobby. Use /rooms to see rooms, /join <room> to enter one.")
+        return {}
     end
 
     return format_look_output(room)
@@ -235,11 +227,8 @@ function M.who(args)
         end
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = "Who"
-    }
+    page.show("Who", table.concat(lines))
+    return {}
 end
 
 -- Helper: Format room data for /look output
@@ -274,11 +263,8 @@ function format_look_output(room)
         table.insert(lines, string.format("\r\nExits: %s\r\n", table.concat(exit_parts, ", ")))
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = room.room
-    }
+    page.show(room.room, table.concat(lines))
+    return {}
 end
 
 -- Helper: Format room entry message (after join/go)
@@ -308,11 +294,8 @@ function format_room_entry(room)
         table.insert(lines, string.format("Models: %s\r\n", table.concat(room.models, ", ")))
     end
 
-    return {
-        text = table.concat(lines),
-        mode = "overlay",
-        title = room.name
-    }
+    page.show(room.name, table.concat(lines))
+    return {}
 end
 
 return M

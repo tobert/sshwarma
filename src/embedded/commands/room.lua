@@ -1,8 +1,9 @@
 -- Room management command handlers for sshwarma
 --
 -- Commands for creating, modifying, and managing room properties.
--- Each handler receives args (string) and returns {text, mode, title?}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 -- Direction normalization (for /dig)
@@ -43,11 +44,8 @@ function M.create(args)
             end
         end
 
-        return {
-            text = table.concat(lines),
-            mode = "overlay",
-            title = room_name
-        }
+        page.show(room_name, table.concat(lines))
+        return {}
     else
         return {
             text = string.format("Error: %s", result.error or "unknown error"),
@@ -82,11 +80,8 @@ function M.fork(args)
             end
         end
 
-        return {
-            text = table.concat(lines),
-            mode = "overlay",
-            title = new_name
-        }
+        page.show(new_name, table.concat(lines))
+        return {}
     else
         local err = result.error or "unknown error"
         if err:find("not in a room") then
@@ -210,11 +205,8 @@ function M.nav(args)
     if setting == "" then
         -- Show current status
         -- For now, we don't have a direct tool for this, so provide guidance
-        return {
-            text = "Model navigation setting.\r\n\r\nUse /nav on or /nav off to control whether models can navigate between rooms.\r\n\r\nNote: Full nav control coming soon.",
-            mode = "overlay",
-            title = "Navigation"
-        }
+        page.show("Navigation", "Model navigation setting.\r\n\r\nUse /nav on or /nav off to control whether models can navigate between rooms.\r\n\r\nNote: Full nav control coming soon.")
+        return {}
     elseif setting == "on" then
         -- Enable nav
         return {

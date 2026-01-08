@@ -187,14 +187,11 @@ impl SshHandler {
                     text_len = cmd_result.text.len(),
                     "dispatch_command: result"
                 );
-                if !cmd_result.text.is_empty() {
-                    if cmd_result.mode == "overlay" {
-                        let title = cmd_result.title.unwrap_or_else(|| name.to_string());
-                        lua.tool_state().show_overlay(&title, &cmd_result.text);
-                    } else {
-                        lua.tool_state()
-                            .push_notification(cmd_result.text.clone(), 10000);
-                    }
+                // Commands that display content use page.show() directly in Lua.
+                // We only handle notification mode here.
+                if !cmd_result.text.is_empty() && cmd_result.mode == "notification" {
+                    lua.tool_state()
+                        .push_notification(cmd_result.text.clone(), 10000);
                 }
             }
             Ok(None) => {

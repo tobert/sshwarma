@@ -5,9 +5,9 @@
 --   tools - List available tools from connected servers
 --   run   - Invoke an MCP tool directly
 --
--- Each handler receives args string and returns:
---   {text = "output", mode = "overlay"|"notification", title = "Title"}
+-- Commands that display content use page.show() directly.
 
+local page = require('page')
 local M = {}
 
 --------------------------------------------------------------------------------
@@ -41,25 +41,19 @@ function M.mcp(args)
         local result = tools.mcp_servers()
 
         if not result or not result.servers then
-            return {
-                text = "No MCP servers connected.\n\n" ..
+            page.show("MCP", "No MCP servers connected.\n\n" ..
                        "Usage:\n" ..
                        "  /mcp connect <name> <url>\n" ..
-                       "  /mcp disconnect <name>",
-                mode = "overlay",
-                title = "MCP"
-            }
+                       "  /mcp disconnect <name>")
+            return {}
         end
 
         if #result.servers == 0 then
-            return {
-                text = "No MCP servers connected.\n\n" ..
+            page.show("MCP", "No MCP servers connected.\n\n" ..
                        "Usage:\n" ..
                        "  /mcp connect <name> <url>\n" ..
-                       "  /mcp disconnect <name>",
-                mode = "overlay",
-                title = "MCP"
-            }
+                       "  /mcp disconnect <name>")
+            return {}
         end
 
         local lines = {}
@@ -76,11 +70,8 @@ function M.mcp(args)
             end
         end
 
-        return {
-            text = table.concat(lines, "\n"),
-            mode = "overlay",
-            title = "MCP"
-        }
+        page.show("MCP", table.concat(lines, "\n"))
+        return {}
 
     elseif subcmd == "connect" or subcmd == "add" then
         -- Connect to server
@@ -153,16 +144,13 @@ function M.mcp(args)
         }
 
     else
-        return {
-            text = string.format("Unknown MCP command: %s\n\n" ..
+        page.show("MCP", string.format("Unknown MCP command: %s\n\n" ..
                    "Available commands:\n" ..
                    "  /mcp              List servers\n" ..
                    "  /mcp connect <name> <url>\n" ..
                    "  /mcp disconnect <name>\n" ..
-                   "  /mcp refresh <name>", subcmd),
-            mode = "overlay",
-            title = "MCP"
-        }
+                   "  /mcp refresh <name>", subcmd))
+        return {}
     end
 end
 
@@ -179,11 +167,8 @@ function M.tools(args)
     local result = tools.mcp_tools(server_filter)
 
     if not result or not result.tools then
-        return {
-            text = "No tools available. Use /mcp connect <name> <url> to add an MCP server.",
-            mode = "overlay",
-            title = "Tools"
-        }
+        page.show("Tools", "No tools available. Use /mcp connect <name> <url> to add an MCP server.")
+        return {}
     end
 
     if #result.tools == 0 then
@@ -191,11 +176,8 @@ function M.tools(args)
         if server_filter then
             msg = msg .. string.format(" from server '%s'", server_filter)
         end
-        return {
-            text = msg .. ".\n\nUse /mcp connect <name> <url> to add an MCP server.",
-            mode = "overlay",
-            title = "Tools"
-        }
+        page.show("Tools", msg .. ".\n\nUse /mcp connect <name> <url> to add an MCP server.")
+        return {}
     end
 
     local lines = {}
@@ -216,11 +198,8 @@ function M.tools(args)
         end
     end
 
-    return {
-        text = table.concat(lines, "\n"),
-        mode = "overlay",
-        title = "Tools"
-    }
+    page.show("Tools", table.concat(lines, "\n"))
+    return {}
 end
 
 --------------------------------------------------------------------------------
@@ -229,12 +208,9 @@ end
 
 function M.run(args)
     if not args or args:match("^%s*$") then
-        return {
-            text = "Usage: /run <tool> [json args]\n" ..
-                   'Example: /run orpheus_generate {"temperature": 1.0}',
-            mode = "overlay",
-            title = "Run Tool"
-        }
+        page.show("Run Tool", "Usage: /run <tool> [json args]\n" ..
+                   'Example: /run orpheus_generate {"temperature": 1.0}')
+        return {}
     end
 
     -- Parse: <tool_name> [json_args]
@@ -281,12 +257,9 @@ function M.run(args)
 
     -- For now, return immediately with pending status
     -- Real implementation would poll for result
-    return {
-        text = string.format("Invoked %s (request: %s)\n\nResult will appear when complete.",
-            tool_name, tostring(request_id)),
-        mode = "overlay",
-        title = "Tool Output"
-    }
+    page.show("Tool Output", string.format("Invoked %s (request: %s)\n\nResult will appear when complete.",
+            tool_name, tostring(request_id)))
+    return {}
 end
 
 return M

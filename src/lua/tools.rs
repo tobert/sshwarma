@@ -42,19 +42,6 @@ pub struct InputState {
     pub prompt: String,
 }
 
-/// Region content for overlay regions (help, command output, etc.)
-///
-/// Stored per-region-name. Visibility is controlled via Lua regions module.
-#[derive(Clone, Default)]
-pub struct RegionContent {
-    /// Title shown at top of region (e.g., "Help")
-    pub title: String,
-    /// Content lines (pre-split for rendering)
-    pub lines: Vec<String>,
-    /// Current scroll offset (line index of first visible line)
-    pub scroll_offset: usize,
-}
-
 /// Shared state holder for Lua callbacks
 ///
 /// Uses Arc for thread-safe sharing across async handlers and
@@ -78,9 +65,6 @@ pub struct LuaToolState {
     /// Tag-based dirty tracking for partial screen updates
     /// Lua defines regions; Rust provides primitives
     dirty: Arc<DirtyState>,
-    /// Region contents (keyed by region name like "overlay", "help", etc.)
-    /// Content is stored here, visibility is managed via Lua regions module
-    region_contents: Arc<std::sync::RwLock<std::collections::HashMap<String, RegionContent>>>,
 }
 
 impl LuaToolState {
@@ -95,7 +79,6 @@ impl LuaToolState {
             middleware: ToolMiddleware::new(),
             input_state: Arc::new(std::sync::RwLock::new(InputState::default())),
             dirty: Arc::new(DirtyState::new()),
-            region_contents: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -130,102 +113,6 @@ impl LuaToolState {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default()
-    }
-
-    /// Show content in a named region (overlay, help, etc.)
-    ///
-    /// Content is split into lines for scrolling. Sets content and marks region visible.
-    /// Visibility is controlled via the Lua regions module.
-    pub fn show_region(&self, region: &str, title: &str, content: &str) {
-        tracing::info!(
-            region = %region,
-            title = %title,
-            content_len = content.len(),
-            content_preview = %content.chars().take(50).collect::<String>(),
-            "show_region called"
-        );
-        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        if let Ok(mut guard) = self.region_contents.write() {
-            guard.insert(
-                region.to_string(),
-                RegionContent {
-                    title: title.to_string(),
-                    lines,
-                    scroll_offset: 0,
-                },
-            );
-        }
-        self.mark_dirty(region);
-    }
-
-    /// Hide a region and clear its content
-    pub fn hide_region(&self, region: &str) {
-        if let Ok(mut guard) = self.region_contents.write() {
-            guard.remove(region);
-        }
-        self.mark_dirty(region);
-    }
-
-    /// Check if a region has content
-    pub fn has_region_content(&self, region: &str) -> bool {
-        self.region_contents
-            .read()
-            .map(|guard| guard.contains_key(region))
-            .unwrap_or(false)
-    }
-
-    /// Get a region's content
-    pub fn region_content(&self, region: &str) -> Option<RegionContent> {
-        self.region_contents
-            .read()
-            .ok()
-            .and_then(|guard| guard.get(region).cloned())
-    }
-
-    /// Scroll a region up by n lines
-    pub fn region_scroll_up(&self, region: &str, n: usize) {
-        if let Ok(mut guard) = self.region_contents.write() {
-            if let Some(ref mut content) = guard.get_mut(region) {
-                content.scroll_offset = content.scroll_offset.saturating_sub(n);
-            }
-        }
-        self.mark_dirty(region);
-    }
-
-    /// Scroll a region down by n lines
-    pub fn region_scroll_down(&self, region: &str, n: usize, viewport_height: usize) {
-        if let Ok(mut guard) = self.region_contents.write() {
-            if let Some(ref mut content) = guard.get_mut(region) {
-                let max_scroll = content.lines.len().saturating_sub(viewport_height);
-                content.scroll_offset = (content.scroll_offset + n).min(max_scroll);
-            }
-        }
-        self.mark_dirty(region);
-    }
-
-    /// Compatibility wrapper: show overlay (uses "overlay" region)
-    pub fn show_overlay(&self, title: &str, content: &str) {
-        self.show_region("overlay", title, content);
-    }
-
-    /// Compatibility wrapper: close overlay (hides "overlay" region)
-    pub fn close_overlay(&self) {
-        self.hide_region("overlay");
-    }
-
-    /// Compatibility wrapper: check if overlay has content
-    pub fn has_overlay(&self) -> bool {
-        self.has_region_content("overlay")
-    }
-
-    /// Compatibility wrapper: scroll overlay up
-    pub fn overlay_scroll_up(&self, n: usize) {
-        self.region_scroll_up("overlay", n);
-    }
-
-    /// Compatibility wrapper: scroll overlay down
-    pub fn overlay_scroll_down(&self, n: usize, viewport_height: usize) {
-        self.region_scroll_down("overlay", n, viewport_height);
     }
 
     /// Get a reference to the tool middleware
@@ -676,83 +563,6 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("mark_all_dirty", mark_all_dirty_fn)?;
-
-    // tools.region_content(name) -> {title, lines, scroll_offset, total_lines} or nil
-    // Get content for a named region
-    let region_content_fn = {
-        let state = state.clone();
-        lua.create_function(move |lua, name: String| {
-            if let Some(content) = state.region_content(&name) {
-                tracing::debug!(
-                    region = %name,
-                    title = %content.title,
-                    lines = content.lines.len(),
-                    "region_content: returning content"
-                );
-                let result = lua.create_table()?;
-                result.set("title", content.title)?;
-
-                let lines_table = lua.create_table()?;
-                for (i, line) in content.lines.iter().enumerate() {
-                    lines_table.set(i + 1, line.clone())?;
-                }
-                result.set("lines", lines_table)?;
-                result.set("scroll_offset", content.scroll_offset)?;
-                result.set("total_lines", content.lines.len())?;
-
-                Ok(Value::Table(result))
-            } else {
-                tracing::debug!(region = %name, "region_content: no content");
-                Ok(Value::Nil)
-            }
-        })?
-    };
-    tools.set("region_content", region_content_fn)?;
-
-    // tools.hide_region(name) -> nil
-    // Hide a region and clear its content
-    let hide_region_fn = {
-        let state = state.clone();
-        lua.create_function(move |_lua, name: String| {
-            state.hide_region(&name);
-            Ok(())
-        })?
-    };
-    tools.set("hide_region", hide_region_fn)?;
-
-    // Backwards compatibility: tools.overlay() uses "overlay" region
-    let overlay_fn = {
-        let state = state.clone();
-        lua.create_function(move |lua, ()| {
-            if let Some(content) = state.region_content("overlay") {
-                let result = lua.create_table()?;
-                result.set("title", content.title)?;
-
-                let lines_table = lua.create_table()?;
-                for (i, line) in content.lines.iter().enumerate() {
-                    lines_table.set(i + 1, line.clone())?;
-                }
-                result.set("lines", lines_table)?;
-                result.set("scroll_offset", content.scroll_offset)?;
-                result.set("total_lines", content.lines.len())?;
-
-                Ok(Value::Table(result))
-            } else {
-                Ok(Value::Nil)
-            }
-        })?
-    };
-    tools.set("overlay", overlay_fn)?;
-
-    // Backwards compatibility: tools.close_overlay() hides "overlay" region
-    let close_overlay_fn = {
-        let state = state.clone();
-        lua.create_function(move |_lua, ()| {
-            state.hide_region("overlay");
-            Ok(())
-        })?
-    };
-    tools.set("close_overlay", close_overlay_fn)?;
 
     // Extended data tools (require SharedState)
 
