@@ -193,6 +193,9 @@ end
 --- - bottom bars: higher priority = closer to bottom edge, stack upward
 --- - content gets the remaining space in the middle
 ---
+--- Returns 1-indexed row positions (matching Lua/ANSI conventions).
+--- Use `row - 1` when passing to 0-indexed APIs like ctx:sub().
+---
 ---@param cols number terminal width
 ---@param rows number terminal height
 ---@param bars table array of bar definitions {name, position, priority, height, condition}
@@ -222,9 +225,9 @@ function M.compute_bars(cols, rows, bars, state)
     table.sort(top_bars, function(a, b) return (a.priority or 0) > (b.priority or 0) end)
     table.sort(bottom_bars, function(a, b) return (a.priority or 0) > (b.priority or 0) end)
 
-    -- Assign rows from edges inward
+    -- Assign rows from edges inward (1-indexed)
     local result = {}
-    local top_cursor = 0
+    local top_cursor = 1  -- first row is 1
 
     for _, bar in ipairs(top_bars) do
         local height = bar.height or 1
@@ -232,7 +235,7 @@ function M.compute_bars(cols, rows, bars, state)
         top_cursor = top_cursor + height
     end
 
-    local bottom_cursor = rows - 1
+    local bottom_cursor = rows  -- last row is `rows`
 
     for _, bar in ipairs(bottom_bars) do
         local height = bar.height or 1

@@ -421,21 +421,21 @@ function on_tick(dirty_tags, tick, ctx)
     local state = M.fetch_state()
     local bar_layout = bars.compute_layout(ctx.w, ctx.h, state)
 
-    -- Render bars
+    -- Render bars (layout is 1-indexed, ctx:sub is 0-indexed)
     for name, info in pairs(bar_layout) do
         if name ~= "content" then
             local bar_def = bars.get(name)
             if bar_def then
-                local bar_ctx = ctx:sub(0, info.row, ctx.w, info.height)
+                local bar_ctx = ctx:sub(0, info.row - 1, ctx.w, info.height)
                 bars.render(bar_ctx, bar_def, state)
             end
         end
     end
 
-    -- Render content area
+    -- Render content area (layout is 1-indexed, ctx:sub is 0-indexed)
     local content = bar_layout.content
     if content and content.height > 0 then
-        local content_ctx = ctx:sub(0, content.row, ctx.w, content.height)
+        local content_ctx = ctx:sub(0, content.row - 1, ctx.w, content.height)
         local current_page = pages.current_name()
 
         if current_page == "chat" then
@@ -454,7 +454,7 @@ function on_tick(dirty_tags, tick, ctx)
     end
 
     -- Report hardware cursor position for layered blink effect
-    -- Layout is 0-indexed, ANSI is 1-indexed
+    -- Layout is 1-indexed (matches ANSI), columns are 1-indexed
     if bar_layout["input"] and tools and tools.set_cursor_pos then
         local inp = input.get_state()
         local room = (state.room or {}).name or "lobby"
@@ -467,8 +467,8 @@ function on_tick(dirty_tags, tick, ctx)
         local text_before = (inp.text or ""):sub(1, inp.cursor or 0)
         local text_width = M.display_width(text_before)
 
-        -- ANSI positions are 1-indexed
-        local cursor_row = bar_layout["input"].row + 1
+        -- Layout row is 1-indexed, column needs +1 for ANSI 1-indexing
+        local cursor_row = bar_layout["input"].row
         local cursor_col = prompt_width + text_width + 1
 
         tools.set_cursor_pos(cursor_row, cursor_col)

@@ -356,12 +356,6 @@ impl LuaRuntime {
         // Run bootstrap to install custom searcher in package.searchers
         run_bootstrap(&lua).map_err(|e| anyhow::anyhow!("failed to run Lua bootstrap: {}", e))?;
 
-        // Load the wrap script first (provides wrap() and default_wrap())
-        lua.load(DEFAULT_WRAP_SCRIPT)
-            .set_name("embedded:wrap.lua")
-            .exec()
-            .map_err(|e| anyhow::anyhow!("failed to load embedded wrap script: {}", e))?;
-
         // Get package.loaded for registering modules
         let package: Table = lua.globals().get("package")?;
         let loaded: Table = package.get("loaded")?;
@@ -389,14 +383,21 @@ impl LuaRuntime {
         loaded.set("inspect", inspect_chunk.clone())?;
         lua.globals().set("inspect", inspect_chunk)?;
 
-        // Load utility library modules (required by help and commands)
-        // fun.lua - functional programming library
+        // Load utility library modules (required by wrap and other modules)
+        // fun.lua - functional programming library (must be loaded before wrap.lua)
         let fun_chunk = lua
             .load(FUN_MODULE)
             .set_name("embedded:lib/fun.lua")
             .eval::<Table>()
             .map_err(|e| anyhow::anyhow!("failed to load fun module: {}", e))?;
         loaded.set("fun", fun_chunk)?;
+
+        // Load the wrap script (provides wrap() and default_wrap())
+        // Depends on: fun
+        lua.load(DEFAULT_WRAP_SCRIPT)
+            .set_name("embedded:wrap.lua")
+            .exec()
+            .map_err(|e| anyhow::anyhow!("failed to load embedded wrap script: {}", e))?;
 
         // str.lua - string utilities (required by help.lua)
         let str_chunk = lua
@@ -2878,17 +2879,18 @@ mod debug_tests {
                 -- Compute layout for 80x24
                 local result = bars.compute_layout(80, 24, {})
 
-                -- Input (priority 100) should be at row 23 (last row)
+                -- Layout is 1-indexed (rows 1-24)
+                -- Input (priority 100) should be at row 24 (last row)
                 assert(result.input ~= nil, "input bar should exist")
-                assert(result.input.row == 23, "input (priority 100) should be at row 23, got " .. tostring(result.input.row))
+                assert(result.input.row == 24, "input (priority 100) should be at row 24, got " .. tostring(result.input.row))
 
-                -- Status (priority 50) should be at row 22 (above input)
+                -- Status (priority 50) should be at row 23 (above input)
                 assert(result.status ~= nil, "status bar should exist")
-                assert(result.status.row == 22, "status (priority 50) should be at row 22, got " .. tostring(result.status.row))
+                assert(result.status.row == 23, "status (priority 50) should be at row 23, got " .. tostring(result.status.row))
 
-                -- Content should get remaining space (rows 0-21)
+                -- Content should get remaining space (rows 1-22)
                 assert(result.content ~= nil, "content should exist")
-                assert(result.content.row == 0, "content should start at row 0")
+                assert(result.content.row == 1, "content should start at row 1")
                 assert(result.content.height == 22, "content should have height 22, got " .. tostring(result.content.height))
 
                 return true

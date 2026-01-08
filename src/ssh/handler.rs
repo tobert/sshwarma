@@ -1,9 +1,7 @@
 //! SSH connection handler
 
-use crate::ansi::EscapeParser;
 use crate::db::rows::Row;
 use crate::internal_tools::{InternalToolConfig, ToolContext};
-use crate::line_editor::{EditorAction, LineEditor};
 use crate::llm::StreamChunk;
 use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge, WrapState};
 use crate::model::ModelHandle;
@@ -24,8 +22,6 @@ use tracing::{info, warn};
 pub struct SshHandler {
     pub state: Arc<SharedState>,
     pub player: Option<PlayerSession>,
-    pub editor: LineEditor,
-    pub esc_parser: EscapeParser,
     pub term_size: (u16, u16),
     /// Session state for buffer rendering
     pub session_state: Arc<Mutex<SessionState>>,
@@ -46,8 +42,6 @@ impl SshHandler {
         Self {
             state: state.clone(),
             player: None,
-            editor: LineEditor::new(),
-            esc_parser: EscapeParser::new(),
             term_size: (80, 24),
             session_state: Arc::new(Mutex::new(SessionState::new())),
             update_tx,
@@ -737,9 +731,6 @@ impl server::Handler for SshHandler {
             });
         }
 
-        // Show prompt
-        self.show_prompt(channel, session).await;
-
         Ok(())
     }
 
@@ -749,40 +740,31 @@ impl server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Forward raw bytes to Lua for parsing
-        if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            match lua.call_on_input(data) {
-                Ok(Some(lua_action)) => {
-                    // Convert Lua action to EditorAction
-                    let action = match lua_action {
-                        crate::lua::InputAction::None => EditorAction::None,
-                        crate::lua::InputAction::Redraw => EditorAction::Redraw,
-                        crate::lua::InputAction::Execute(text) => EditorAction::Execute(text),
-                        crate::lua::InputAction::Tab => EditorAction::Tab,
-                        crate::lua::InputAction::ClearScreen => EditorAction::ClearScreen,
-                        crate::lua::InputAction::Quit => EditorAction::Quit,
-                        crate::lua::InputAction::Escape => EditorAction::Escape,
-                        crate::lua::InputAction::PageUp => EditorAction::PageUp,
-                        crate::lua::InputAction::PageDown => EditorAction::PageDown,
-                    };
-                    drop(lua); // Release lock before handling action
-                    self.handle_lua_action(channel, session, action).await;
-                }
-                Ok(None) => {
-                    // No action needed, just mark input dirty for redraw
-                    lua.tool_state().mark_dirty("input");
-                }
-                Err(e) => {
-                    // Log error but don't crash - fall back to Rust parsing
-                    tracing::error!("Lua input handling failed: {}", e);
-                    drop(lua);
-                    self.handle_input_fallback(channel, session, data).await;
-                }
+        // Forward raw bytes to Lua for parsing - no fallback, fail visibly
+        let Some(ref lua_runtime) = self.lua_runtime else {
+            tracing::error!("No Lua runtime available for input handling");
+            return Ok(());
+        };
+
+        let lua = lua_runtime.lock().await;
+        match lua.call_on_input(data) {
+            Ok(Some(action)) => {
+                drop(lua); // Release lock before handling action
+                self.handle_input_action(channel, session, action).await;
             }
-        } else {
-            // No Lua runtime - use Rust fallback
-            self.handle_input_fallback(channel, session, data).await;
+            Ok(None) => {
+                // No action needed, just mark input dirty for redraw
+                lua.tool_state().mark_dirty("input");
+            }
+            Err(e) => {
+                // Log error visibly - no silent fallback
+                tracing::error!("Lua input handling failed: {}", e);
+                lua.tool_state().push_notification_with_level(
+                    format!("Input error: {}", e),
+                    5000,
+                    crate::lua::NotificationLevel::Error,
+                );
+            }
         }
         Ok(())
     }
@@ -815,107 +797,23 @@ impl server::Handler for SshHandler {
 }
 
 impl SshHandler {
-    /// Fallback input handling using Rust parser (for when Lua is unavailable)
-    async fn handle_input_fallback(
-        &mut self,
-        channel: ChannelId,
-        session: &mut Session,
-        data: &[u8],
-    ) {
-        // Flush any pending escape sequence from previous packet
-        if let Some(event) = self.esc_parser.flush() {
-            let action = self.editor.handle_event(event);
-            self.handle_editor_action(channel, session, action).await;
-        }
-
-        for &byte in data {
-            if let Some(event) = self.esc_parser.feed(byte) {
-                let action = self.editor.handle_event(event);
-                self.handle_editor_action(channel, session, action).await;
-            }
-        }
-    }
-
-    async fn handle_editor_action(
-        &mut self,
-        channel: ChannelId,
-        session: &mut Session,
-        action: EditorAction,
-    ) {
-        match action {
-            EditorAction::None => {}
-
-            EditorAction::Redraw => {
-                // Update input state - Lua renders it
-                self.update_input_state().await;
-            }
-
-            EditorAction::Execute(line) => {
-                // Handle /quit specially
-                if line.trim() == "/quit" {
-                    let _ = session.close(channel);
-                    return;
-                }
-
-                // Process the input - Lua renders results via tools.history()
-                if let Err(e) = self.process_input(channel, session, &line).await {
-                    // Push error as notification for Lua to display
-                    if let Some(ref lua_runtime) = self.lua_runtime {
-                        let lua = lua_runtime.lock().await;
-                        lua.tool_state()
-                            .push_notification(format!("Error: {}", e), 5000);
-                    }
-                }
-
-                // Clear input and update state
-                self.show_prompt(channel, session).await;
-            }
-
-            EditorAction::Tab => {
-                // Tab completion disabled (TODO: rewrite in Lua)
-            }
-
-            EditorAction::ClearScreen => {
-                // Lua handles screen rendering - just update input state
-                self.show_prompt(channel, session).await;
-            }
-
-            EditorAction::Quit => {
-                let _ = session.close(channel);
-            }
-
-            EditorAction::Escape => {
-                // Page navigation handled by Lua mode.lua
-            }
-
-            EditorAction::PageUp => {
-                // Page scrolling handled by Lua mode.lua
-            }
-
-            EditorAction::PageDown => {
-                // Page scrolling handled by Lua mode.lua
-            }
-        }
-    }
-
     /// Handle action from Lua input parser
-    ///
-    /// When Lua parses input, it returns an action that Rust needs to handle.
-    /// The input buffer is managed by Lua, so we don't update the Rust editor.
-    async fn handle_lua_action(
+    async fn handle_input_action(
         &mut self,
         channel: ChannelId,
         session: &mut Session,
-        action: EditorAction,
+        action: crate::lua::InputAction,
     ) {
-        match action {
-            EditorAction::None => {}
+        use crate::lua::InputAction;
 
-            EditorAction::Redraw => {
+        match action {
+            InputAction::None => {}
+
+            InputAction::Redraw => {
                 self.mark_dirty("input").await;
             }
 
-            EditorAction::Execute(line) => {
+            InputAction::Execute(line) => {
                 if line.trim() == "/quit" {
                     let _ = session.close(channel);
                     return;
@@ -929,61 +827,23 @@ impl SshHandler {
                 self.mark_dirty("chat").await;
             }
 
-            EditorAction::Tab => {
-                // Tab completion disabled (TODO: rewrite in Lua)
+            InputAction::Tab => {
+                // Tab completion TODO: rewrite in Lua
             }
 
-            EditorAction::ClearScreen => {
+            InputAction::ClearScreen => {
                 self.mark_dirty("chat").await;
                 self.mark_dirty("status").await;
                 self.mark_dirty("input").await;
             }
 
-            EditorAction::Quit => {
+            InputAction::Quit => {
                 let _ = session.close(channel);
             }
 
-            EditorAction::Escape => {
-                // Page navigation handled by Lua mode.lua
-            }
-
-            EditorAction::PageUp => {
-                // Page scrolling handled by Lua mode.lua
-            }
-
-            EditorAction::PageDown => {
-                // Page scrolling handled by Lua mode.lua
+            InputAction::Escape | InputAction::PageUp | InputAction::PageDown => {
+                // Navigation handled by Lua mode.lua
             }
         }
-    }
-
-    /// Get the current prompt string
-    fn get_prompt(&self) -> String {
-        if let Some(ref player) = self.player {
-            if let Some(ref room) = player.current_room {
-                format!("{}> ", room)
-            } else {
-                "lobby> ".to_string()
-            }
-        } else {
-            "> ".to_string()
-        }
-    }
-
-    /// Update input state for Lua rendering (no direct terminal output)
-    async fn update_input_state(&self) {
-        if let Some(ref lua_runtime) = self.lua_runtime {
-            let lua = lua_runtime.lock().await;
-            lua.tool_state().set_input(
-                self.editor.value(),
-                self.editor.cursor(),
-                &self.get_prompt(),
-            );
-        }
-    }
-
-    async fn show_prompt(&self, _channel: ChannelId, _session: &mut Session) {
-        // Input is now rendered by Lua - just update state
-        self.update_input_state().await;
     }
 }

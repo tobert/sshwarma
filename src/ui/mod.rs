@@ -2,13 +2,8 @@
 //!
 //! Provides Lua-driven rendering for sshwarma's terminal interface.
 //!
-//! # Modules
-//!
-//! - `render` - Drawing API, RenderBuffer, widgets
-//! - `input` - Input buffer, key events
+//! Input handling is done entirely in Lua (embedded/ui/input.lua, mode.lua).
 
-pub mod input;
 pub mod render;
 
-pub use input::{InputBuffer, KeyEvent};
 pub use render::{Cell, LuaDrawContext, RenderBuffer, Style};
