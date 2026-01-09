@@ -1,54 +1,32 @@
-# 🌯 sshwarma
+# sshwarma
 
-**MUD-inspired collaboration space for humans, models, and tools.**
-
-MUD meets IRC meets collaborative coding — a text adventure interface for multi-user, multi-model conversations with tool access.
+MUD-inspired collaboration space for humans, models, and tools.
 
 ```
-╭─────────────────────────────────────────────────────────────────────────────╮
-│                                sshwarma                                     │
-╰─────────────────────────────────────────────────────────────────────────────╯
-
-Welcome, alice.
-
-lobby> /join workshop
-
-───────────────────────────────────────────────────────────────────────────────
-workshop
-───────────────────────────────────────────────────────────────────────────────
-
-A cluttered workshop. Servers hum. Cables everywhere.
-
-Exits: north → studio, east → garden, down → archives
-Here: alice (you), bob, qwen-8b (idle), claude (thinking)
-
-alice> @qwen-8b what do you think of this space?
-qwen-8b> ⚙ look
-
-    Nice workshop. The cable chaos suggests rapid iteration.
-    I see claude is thinking about something — should we wait
-    for them or dive in?
+┌──────────────────────────────────────────────────────────────────┐
+│ bob: anyone tried the new sample tool?                           │
+│ alice: yeah, it's solid. @qwen-8b can you demo it?               │
+│                                                                  │
+│ alice → qwen-8b: can you demo it?                                │
+│                                                                  │
+│ qwen-8b: Sure, let me try generating something.                  │
+│ qwen-8b: ⚙ sample {"prompt": "ambient pad", "duration": 8}       │
+│ qwen-8b: Done — saved to artifacts/pad-001.wav                   │
+│                                                                  │
+├─ workshop ───────────────────────────── alice bob │ qwen-8b ◈ ───┤
+│ I │ workshop> @claude what do you think?▌                        │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Why sshwarma?
-
-- **Models are participants** — they lurk in rooms, respond to @mentions, and use tools
-- **Spatial metaphors** — rooms have vibes, journals, exits, and bound assets
-- **Everything streams** — responses arrive token-by-token, tool calls show in real-time
-- **Dual transport** — SSH for humans, MCP for agents (same world, same state)
-- **Local-first** — runs great with Ollama; cloud backends optional
-- **Composable** — HUD is Lua, not YAML; extend by writing code
+Text adventure meets IRC. Rooms with vibes, journals, and exits. Models respond to @mentions and use tools. Vim-style modes. SSH for humans, MCP for agents.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/atobey/sshwarma
-cd sshwarma
-
-# Configure models
+# Clone and configure
+git clone https://github.com/atobey/sshwarma && cd sshwarma
 mkdir -p ~/.config/sshwarma
 cp models.toml.example ~/.config/sshwarma/models.toml
-# Edit to match your LLM setup
 
 # Build and add yourself
 cargo build --release
@@ -58,70 +36,56 @@ cargo build --release
 ./target/release/sshwarma
 ```
 
-**Connect via SSH:**
+**Connect:**
 ```bash
 ssh yourname@localhost -p 2222
 ```
 
-**Connect from Claude Code** (add to MCP config):
+**Claude Code** (MCP config):
 ```json
 {"mcpServers": {"sshwarma": {"url": "http://localhost:2223/mcp"}}}
 ```
 
 ## Features
 
-**Rooms** — Navigate a MUD-style world with `/look`, `/go north`, `/join`, `/create`. Rooms have descriptions, vibes, exits to other rooms, and bound assets.
+**Rooms** — `/join workshop`, `/go north`, `/create studio`. Rooms have vibes, exits, and journals.
 
-**@mentions** — Address models directly: `@qwen-8b explain this error`. Responses stream token-by-token; models can call tools and navigate rooms.
+**@mentions** — `@qwen-8b explain this`. Responses stream; models see room context and can call tools.
 
-**Journals** — Capture decisions and ideas that outlast chat: `/note`, `/decide`, `/idea`, `/milestone`. Models see recent journal entries when they `/look`.
+**Vim modes** — `Escape` for normal, `i` for insert. Navigate with `j/k`, scroll with `Ctrl-u/d`.
 
-**Tools** — Connect MCP servers with `/mcp connect`. Both humans (`/run tool`) and models can invoke tools. Schema normalization for llama.cpp compatibility.
+**Tools** — `/mcp connect holler http://...`. Both humans (`/run sample`) and models can invoke tools.
 
-**HUD** — Lua-rendered status bar showing participants, model states, MCP connections, and room info. Customize via `~/.config/sshwarma/hud.lua`.
+**Journals** — `/note`, `/decide`, `/idea`. Persistent context that models see on `/look`.
+
+**Dual transport** — SSH (port 2222) for humans, MCP (port 2223) for agents. Same world.
 
 ## Configuration
 
-### Paths (XDG)
+**Paths:** `~/.config/sshwarma/` (config), `~/.local/share/sshwarma/` (data)
 
-| Directory | Default | Contents |
-|-----------|---------|----------|
-| Data | `~/.local/share/sshwarma/` | `sshwarma.db`, `host_key` |
-| Config | `~/.config/sshwarma/` | `models.toml`, Lua scripts |
-
-### Environment Variables
-
+**Environment:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSHWARMA_LISTEN_ADDR` | `0.0.0.0:2222` | SSH listen address |
-| `SSHWARMA_MCP_PORT` | `2223` | MCP server port |
-| `SSHWARMA_MCP_ENDPOINTS` | `http://localhost:8080/mcp` | MCP servers (comma-sep) |
-| `SSHWARMA_OPEN_REGISTRATION` | `true` | Allow any key when no users |
-| `SSHWARMA_DB` | (XDG data)/sshwarma.db | Database path |
-| `SSHWARMA_HOST_KEY` | (XDG data)/host_key | Host key path |
-| `SSHWARMA_MODELS_CONFIG` | (XDG config)/models.toml | Models config path |
+| `SSHWARMA_LISTEN_ADDR` | `0.0.0.0:2222` | SSH address |
+| `SSHWARMA_MCP_PORT` | `2223` | MCP port |
+| `SSHWARMA_MCP_ENDPOINTS` | — | MCP servers (comma-sep) |
 
 **API keys:** `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
 
-### models.toml
-
-See `models.toml.example`. Supported backends: `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini`, `mock`
+**Backends:** `ollama`, `llamacpp`, `openai`, `anthropic`, `gemini` — see `models.toml.example`
 
 ## Contributing
 
-PRs welcome from humans and agents. See [CLAUDE.md](CLAUDE.md) for architecture details and development guidelines.
-
-When contributing as an agent: identify yourself, include reasoning, flag uncertainty.
-
-## Third-Party Libraries
-
-sshwarma embeds the following Lua libraries (all MIT licensed):
-
-| Library | Source | Description |
-|---------|--------|-------------|
-| [Lua Fun](https://github.com/luafun/luafun) | `src/embedded/lib/fun.lua` | High-performance functional programming |
-| [inspect.lua](https://github.com/kikito/inspect.lua) | `src/embedded/lib/inspect.lua` | Human-readable table serialization |
+PRs welcome. See [CLAUDE.md](CLAUDE.md) for development guidelines.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details and third-party attributions.
+MIT — see [LICENSE](LICENSE).
+
+### Third-Party
+
+| Library | License | Description |
+|---------|---------|-------------|
+| [luafun](https://github.com/luafun/luafun) | MIT | Functional programming |
+| [inspect.lua](https://github.com/kikito/inspect.lua) | MIT | Table serialization |
