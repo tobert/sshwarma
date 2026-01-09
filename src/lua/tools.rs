@@ -2201,6 +2201,61 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("set_vibe", set_vibe_fn)?;
 
+    // tools.say(message) -> {success, error}
+    let say_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, message: String| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            let session = match state.session_context() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no session context")?;
+                    return Ok(result);
+                }
+            };
+
+            let room_name = match &session.room_name {
+                Some(r) => r.clone(),
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "not in a room")?;
+                    return Ok(result);
+                }
+            };
+
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::ops::say(
+                    &shared,
+                    &room_name,
+                    &session.username,
+                    &message,
+                ))
+            }) {
+                Ok(()) => {
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("say", say_fn)?;
+
     // tools.mcp_servers() -> {servers = [{name, connected, tool_count}, ...]}
     let mcp_servers_fn = {
         let state = state.clone();

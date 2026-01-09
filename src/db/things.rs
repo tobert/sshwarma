@@ -528,36 +528,106 @@ impl Database {
         lobby_room.id = "lobby".to_string();
         self.insert_room(&lobby_room)?;
 
-        // Register internal tools
-        let internal_tools = [
-            // Core
-            ("look", "sshwarma:look", "Describe current room"),
-            ("who", "sshwarma:who", "List participants in room"),
-            ("say", "sshwarma:say", "Send message to room"),
-            ("history", "sshwarma:history", "View conversation history"),
-            ("vibe", "sshwarma:vibe", "Get or set room vibe"),
-            ("inventory", "sshwarma:inventory", "Query room inventory"),
-            // Journal
-            ("journal", "sshwarma:journal", "Read journal entries"),
-            ("note", "sshwarma:note", "Add a note to the journal"),
-            ("decide", "sshwarma:decide", "Record a decision"),
-            ("idea", "sshwarma:idea", "Capture an idea"),
-            ("milestone", "sshwarma:milestone", "Mark a milestone"),
-            // Navigation
-            ("rooms", "sshwarma:rooms", "List available rooms"),
-            ("exits", "sshwarma:exits", "List room exits"),
-            ("join", "sshwarma:join", "Join a room"),
-            ("leave", "sshwarma:leave", "Leave current room"),
-            ("go", "sshwarma:go", "Navigate through an exit"),
-            ("create", "sshwarma:create", "Create a new room"),
+        // Register internal tools with Lua code
+        // Format: (name, qualified_name, description, code, default_slot)
+        let internal_tools: Vec<(&str, &str, &str, &str, Option<&str>)> = vec![
+            // Core observation tools (no slot - always available to LLM)
+            (
+                "look",
+                "sshwarma:look",
+                "Describe current room",
+                include_str!("../embedded/tools/look.lua"),
+                None,
+            ),
+            (
+                "who",
+                "sshwarma:who",
+                "List participants in room",
+                include_str!("../embedded/tools/who.lua"),
+                None,
+            ),
+            (
+                "rooms",
+                "sshwarma:rooms",
+                "List available rooms",
+                include_str!("../embedded/tools/rooms.lua"),
+                None,
+            ),
+            (
+                "history",
+                "sshwarma:history",
+                "View conversation history",
+                include_str!("../embedded/tools/history.lua"),
+                None,
+            ),
+            (
+                "exits",
+                "sshwarma:exits",
+                "List room exits",
+                include_str!("../embedded/tools/exits.lua"),
+                None,
+            ),
+            // Write tools (no slot - available to LLM)
+            (
+                "say",
+                "sshwarma:say",
+                "Send message to room",
+                include_str!("../embedded/tools/say.lua"),
+                None,
+            ),
+            (
+                "vibe",
+                "sshwarma:vibe",
+                "Get or set room vibe",
+                include_str!("../embedded/tools/vibe.lua"),
+                None,
+            ),
+            // Navigation tools (no slot - available to LLM)
+            (
+                "join",
+                "sshwarma:join",
+                "Join a room",
+                include_str!("../embedded/tools/join.lua"),
+                None,
+            ),
+            (
+                "leave",
+                "sshwarma:leave",
+                "Leave current room",
+                include_str!("../embedded/tools/leave.lua"),
+                None,
+            ),
+            (
+                "go",
+                "sshwarma:go",
+                "Navigate through an exit",
+                include_str!("../embedded/tools/go.lua"),
+                None,
+            ),
+            (
+                "create",
+                "sshwarma:create",
+                "Create a new room",
+                include_str!("../embedded/tools/create.lua"),
+                None,
+            ),
+            (
+                "fork",
+                "sshwarma:fork",
+                "Fork current room with settings",
+                include_str!("../embedded/tools/fork.lua"),
+                None,
+            ),
         ];
 
         let mut tool_ids = Vec::new();
-        for (name, qualified, desc) in internal_tools {
+        for (name, qualified, desc, code, default_slot) in internal_tools {
             let mut tool = Thing::tool(name, qualified)
                 .with_parent("internal")
                 .with_description(desc);
             tool.id = format!("tool_{}", name);
+            tool.code = Some(code.to_string());
+            tool.default_slot = default_slot.map(|s| s.to_string());
             self.insert_thing(&tool)?;
             tool_ids.push(tool.id);
         }
@@ -704,11 +774,16 @@ mod tests {
 
         // Verify internal tools
         let tools = db.get_thing_children("internal")?;
-        assert!(tools.len() >= 17); // At least 17 internal tools
+        assert_eq!(tools.len(), 12); // 12 internal tools with Lua code
 
         // Verify lobby has equipped tools
         let equipped = db.get_room_equipment("lobby", None)?;
-        assert!(equipped.len() >= 17);
+        assert_eq!(equipped.len(), 12);
+
+        // Verify tools have Lua code
+        let look = db.get_thing_by_qualified_name("sshwarma:look")?.unwrap();
+        assert!(look.code.is_some());
+        assert!(look.code.unwrap().contains("tools.look()"));
 
         // Verify sshwarma:look is registered
         let look = db.get_thing_by_qualified_name("sshwarma:look")?;
