@@ -475,10 +475,66 @@ function on_tick(dirty_tags, tick, ctx)
     end
 end
 
+-- Track last-run tick for each UI background hook
+local hook_last_run = {}
+
 function background(tick)
+    -- Mark status dirty every 2 seconds (4 ticks at 500ms)
     if tick % 4 == 0 then
         if tools and tools.mark_dirty then
             tools.mark_dirty("status")
+        end
+    end
+
+    -- Run hook:background:ui things (session-tied, only when room is viewed)
+    local session = tools.session and tools.session()
+    if not session or not session.room_name then
+        return
+    end
+
+    local hooks = tools.get_room_equipment and tools.get_room_equipment(session.room_name, "hook:background:ui")
+    if not hooks or #hooks == 0 then
+        return
+    end
+
+    local tick_ms = 500  -- Each tick is 500ms
+    local current_time = tick * tick_ms
+
+    for _, hook in ipairs(hooks) do
+        -- Parse interval from config (default 500ms = every tick)
+        local interval_ms = 500
+        if hook.config then
+            local ok, config = pcall(function()
+                return require("cjson") and require("cjson").decode(hook.config)
+            end)
+            if not ok then
+                -- Try simpler JSON parsing
+                local ms = hook.config:match('"interval_ms"%s*:%s*(%d+)')
+                if ms then interval_ms = tonumber(ms) end
+            elseif config and config.interval_ms then
+                interval_ms = config.interval_ms
+            end
+        end
+
+        -- Check if this hook should run this tick
+        local last_run = hook_last_run[hook.thing_id] or 0
+        if current_time - last_run >= interval_ms then
+            hook_last_run[hook.thing_id] = current_time
+
+            -- Get and execute the thing's code
+            local thing = tools.thing_get_by_id and tools.thing_get_by_id(hook.thing_id)
+            if thing and thing.code then
+                local ok, result = pcall(function()
+                    return tools.execute_code(thing.code, {tick = tick})
+                end)
+                if not ok then
+                    tools.log_warn(string.format(
+                        "UI background hook %s failed: %s",
+                        hook.qualified_name or hook.thing_id,
+                        tostring(result)
+                    ))
+                end
+            end
         end
     end
 end
