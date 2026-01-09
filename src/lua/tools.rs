@@ -1377,20 +1377,24 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("things_by_kind", things_by_kind_fn)?;
 
-    // equipped_list(context_id) -> array of equipped thing tables
+    // equipped_list(room_id) -> array of equipped thing tables
     let equipped_list_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, context_id: String| {
+        lua.create_function(move |lua, room_id: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
                 None => return lua.create_table(),
             };
 
-            let equipped = shared.db.get_equipped(&context_id).unwrap_or_default();
+            let equipped = shared
+                .db
+                .get_room_equipment(&room_id, None)
+                .unwrap_or_default();
             let result = lua.create_table()?;
             for (i, eq) in equipped.iter().enumerate() {
                 let t = lua.create_table()?;
-                t.set("context_id", eq.context_id.clone())?;
+                t.set("room_id", eq.room_id.clone())?;
+                t.set("slot", eq.slot.clone())?;
                 t.set("priority", eq.priority)?;
                 t.set("id", eq.thing.id.clone())?;
                 t.set("kind", eq.thing.kind.as_str())?;
@@ -1404,10 +1408,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("equipped_list", equipped_list_fn)?;
 
-    // equipped_tools(context_id) -> array of equipped tool tables (only available tools)
+    // equipped_tools(room_id) -> array of equipped tool tables (only available tools)
     let equipped_tools_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, context_id: String| {
+        lua.create_function(move |lua, room_id: String| {
             let shared = match state.shared_state() {
                 Some(s) => s,
                 None => return lua.create_table(),
@@ -1415,7 +1419,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             let tools_list = shared
                 .db
-                .get_equipped_tools(&context_id)
+                .get_room_equipment_tools(&room_id)
                 .unwrap_or_default();
             let result = lua.create_table()?;
             for (i, eq) in tools_list.iter().enumerate() {
@@ -1443,7 +1447,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             let tools_list = shared
                 .db
-                .get_merged_equipped_tools(&room_id, &agent_id)
+                .get_merged_equipment(&room_id, &agent_id, Some(""))
                 .unwrap_or_default();
             let result = lua.create_table()?;
             for (i, eq) in tools_list.iter().enumerate() {
@@ -1452,7 +1456,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 t.set("name", eq.thing.name.clone())?;
                 t.set("qualified_name", eq.thing.qualified_name.clone())?;
                 t.set("description", eq.thing.description.clone())?;
-                t.set("context_id", eq.context_id.clone())?;
+                t.set("room_id", eq.room_id.clone())?;
                 t.set("priority", eq.priority)?;
                 result.set(i + 1, t)?;
             }
@@ -1461,11 +1465,17 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("equipped_merged_tools", equipped_merged_fn)?;
 
-    // equip(context_id, thing_id, priority) -> bool success
+    // room_equip(room_id, thing_id, slot, priority) -> bool success
     let equip_fn = {
         let state = state.clone();
         lua.create_function(
-            move |_lua, (context_id, thing_id, priority): (String, String, Option<f64>)| {
+            move |_lua,
+                  (room_id, thing_id, slot, priority): (
+                String,
+                String,
+                Option<String>,
+                Option<f64>,
+            )| {
                 let shared = match state.shared_state() {
                     Some(s) => s,
                     None => return Ok(false),
@@ -1473,33 +1483,41 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
                 shared
                     .db
-                    .equip(&context_id, &thing_id, priority.unwrap_or(0.0))
+                    .room_equip(
+                        &room_id,
+                        &thing_id,
+                        slot.as_deref(),
+                        None,
+                        priority.unwrap_or(0.0),
+                    )
                     .is_ok()
                     .then_some(true)
-                    .ok_or_else(|| mlua::Error::external("equip failed"))
+                    .ok_or_else(|| mlua::Error::external("room_equip failed"))
             },
         )?
     };
-    tools.set("equip", equip_fn)?;
+    tools.set("room_equip", equip_fn)?;
 
-    // unequip(context_id, thing_id) -> bool success
+    // room_unequip(room_id, thing_id, slot) -> bool success
     let unequip_fn = {
         let state = state.clone();
-        lua.create_function(move |_lua, (context_id, thing_id): (String, String)| {
-            let shared = match state.shared_state() {
-                Some(s) => s,
-                None => return Ok(false),
-            };
+        lua.create_function(
+            move |_lua, (room_id, thing_id, slot): (String, String, Option<String>)| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return Ok(false),
+                };
 
-            shared
-                .db
-                .unequip(&context_id, &thing_id)
-                .is_ok()
-                .then_some(true)
-                .ok_or_else(|| mlua::Error::external("unequip failed"))
-        })?
+                shared
+                    .db
+                    .room_unequip(&room_id, &thing_id, slot.as_deref())
+                    .is_ok()
+                    .then_some(true)
+                    .ok_or_else(|| mlua::Error::external("room_unequip failed"))
+            },
+        )?
     };
-    tools.set("unequip", unequip_fn)?;
+    tools.set("room_unequip", unequip_fn)?;
 
     // exits_list(room_thing_id) -> array of {direction, target_name, target_id}
     let exits_list_fn = {
@@ -1948,7 +1966,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Get equipped tools
             let equipped_table = lua.create_table()?;
-            if let Ok(equipped) = shared.db.get_equipped_tools(&context_id) {
+            if let Ok(equipped) = shared.db.get_room_equipment_tools(&context_id) {
                 for (i, eq) in equipped.iter().enumerate() {
                     let t = lua.create_table()?;
                     t.set("id", eq.thing.id.clone())?;
@@ -2026,17 +2044,17 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 }
             };
 
-            // Get max priority and equip
-            let priority = shared
+            // Get max priority from existing equipment
+            let max_priority = shared
                 .db
-                .max_equipped_priority(&context_id)
+                .get_room_equipment(&context_id, None)
                 .ok()
-                .flatten()
-                .map(|p| p + 1.0)
+                .and_then(|eq| eq.iter().map(|e| e.priority).max_by(|a, b| a.partial_cmp(b).unwrap()))
                 .unwrap_or(0.0);
+            let priority = max_priority + 1.0;
 
-            match shared.db.equip(&context_id, &thing.id, priority) {
-                Ok(()) => {
+            match shared.db.room_equip(&context_id, &thing.id, None, None, priority) {
+                Ok(_) => {
                     result.set("success", true)?;
                     let added_table = lua.create_table()?;
                     added_table.set(1, qualified_name)?;
@@ -2045,7 +2063,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
                     // Return updated equipped list
                     let equipped_table = lua.create_table()?;
-                    if let Ok(equipped) = shared.db.get_equipped_tools(&context_id) {
+                    if let Ok(equipped) = shared.db.get_room_equipment_tools(&context_id) {
                         for (i, eq) in equipped.iter().enumerate() {
                             equipped_table.set(i + 1, eq.thing.qualified_name.clone())?;
                         }
@@ -2104,7 +2122,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 }
             };
 
-            match shared.db.unequip(&context_id, &thing.id) {
+            match shared.db.room_unequip(&context_id, &thing.id, None) {
                 Ok(()) => {
                     result.set("success", true)?;
                     let removed_table = lua.create_table()?;
@@ -2113,7 +2131,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
                     // Return updated equipped list
                     let equipped_table = lua.create_table()?;
-                    if let Ok(equipped) = shared.db.get_equipped_tools(&context_id) {
+                    if let Ok(equipped) = shared.db.get_room_equipment_tools(&context_id) {
                         for (i, eq) in equipped.iter().enumerate() {
                             equipped_table.set(i + 1, eq.thing.qualified_name.clone())?;
                         }

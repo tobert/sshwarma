@@ -982,8 +982,9 @@ impl SshwarmaMcpServer {
                     if let Err(e) = self.state.db.insert_thing(&new_room) {
                         return format!("Error creating room thing: {}", e);
                     }
-                    if let Err(e) = self.state.db.copy_equipped("defaults", &new_room.id) {
-                        return format!("Error copying defaults: {}", e);
+                    // Copy equipment from lobby (which has internal tools)
+                    if let Err(e) = self.state.db.copy_room_equipment("lobby", &new_room.id) {
+                        return format!("Error copying equipment: {}", e);
                     }
                     new_room
                 } else {
@@ -993,7 +994,7 @@ impl SshwarmaMcpServer {
         };
 
         // Get equipped tools
-        let equipped = match self.state.db.get_equipped_tools(&room_thing.id) {
+        let equipped = match self.state.db.get_room_equipment_tools(&room_thing.id) {
             Ok(e) => e,
             Err(e) => return format!("Error: {}", e),
         };
@@ -1089,7 +1090,7 @@ impl SshwarmaMcpServer {
         let priority = params.priority.unwrap_or(0.0);
         let mut equipped_count = 0;
         for thing in &things {
-            if let Err(e) = self.state.db.equip(&room_thing.id, &thing.id, priority) {
+            if let Err(e) = self.state.db.room_equip(&room_thing.id, &thing.id, None, None, priority) {
                 return format!("Error equipping {}: {}", thing.name, e);
             }
             equipped_count += 1;
@@ -1156,7 +1157,7 @@ impl SshwarmaMcpServer {
         // Unequip each thing
         let mut unequipped_count = 0;
         for thing in &things {
-            if let Err(e) = self.state.db.unequip(&room_thing.id, &thing.id) {
+            if let Err(e) = self.state.db.room_unequip(&room_thing.id, &thing.id, None) {
                 return format!("Error unequipping {}: {}", thing.name, e);
             }
             unequipped_count += 1;

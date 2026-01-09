@@ -98,7 +98,8 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT e.direction,
                       t.id, t.parent_id, t.kind, t.name, t.qualified_name, t.description,
-                      t.content, t.uri, t.metadata, t.available, t.created_at, t.updated_at, t.deleted_at
+                      t.content, t.uri, t.metadata, t.code, t.default_slot, t.params,
+                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by
                FROM exits e
                JOIN things t ON e.to_thing_id = t.id
                WHERE e.from_thing_id = ?1
@@ -122,10 +123,14 @@ impl Database {
                     content: row.get(7)?,
                     uri: row.get(8)?,
                     metadata: row.get(9)?,
-                    available: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
-                    deleted_at: row.get(13)?,
+                    code: row.get(10)?,
+                    default_slot: row.get(11)?,
+                    params: row.get(12)?,
+                    available: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
+                    deleted_at: row.get(16)?,
+                    created_by: row.get(17)?,
                 },
             })
         })?;

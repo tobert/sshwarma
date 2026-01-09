@@ -4,7 +4,7 @@
 //! Uses UUIDv7 for primary keys (time-sortable) and fractional REAL for ordering.
 
 /// Schema version for migrations
-pub const SCHEMA_VERSION: i32 = 102; // 102: Lua scripts with CoW versioning, user UI config
+pub const SCHEMA_VERSION: i32 = 103; // 103: Equipment slots, mcp_tools catalog
 
 /// Complete schema SQL
 pub const SCHEMA: &str = r#"
@@ -265,43 +265,6 @@ CREATE TABLE IF NOT EXISTS user_ui_config (
 );
 
 --------------------------------------------------------------------------------
--- ROOM RULES
--- Match-action system for triggering Lua scripts
---------------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS room_rules (
-    id TEXT PRIMARY KEY,                    -- UUIDv7
-    room_id TEXT NOT NULL,
-    name TEXT,                              -- human-readable, optional
-    enabled INTEGER DEFAULT 1,
-    priority REAL DEFAULT 0.0,              -- execution order (lower = first)
-
-    -- Trigger kind
-    trigger_kind TEXT NOT NULL,             -- 'row', 'interval', 'tick'
-
-    -- Row trigger conditions (for trigger_kind = 'row')
-    match_content_method TEXT,              -- glob: 'message.*', 'tool.call'
-    match_source_agent TEXT,                -- glob: 'claude', 'human:*', '*'
-    match_tag TEXT,                         -- exact: '#decision'
-    match_buffer_type TEXT,                 -- exact: 'room_chat', 'thinking'
-
-    -- Time trigger conditions
-    interval_ms INTEGER,                    -- for 'interval': run every N ms
-    tick_divisor INTEGER,                   -- for 'tick': run every N ticks (tick = 500ms)
-
-    -- Action
-    script_id TEXT NOT NULL,
-    action_slot TEXT NOT NULL,              -- 'render', 'wrap', 'notify', 'transform', 'background'
-
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (script_id) REFERENCES lua_scripts(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_room_rules_room ON room_rules(room_id, enabled, priority);
-CREATE INDEX IF NOT EXISTS idx_room_rules_trigger ON room_rules(trigger_kind);
-
---------------------------------------------------------------------------------
 -- THINGS
 -- Tree of everything: rooms, agents, MCPs, tools, data, references
 --------------------------------------------------------------------------------
@@ -319,13 +282,19 @@ CREATE TABLE IF NOT EXISTS things (
     uri TEXT,                               -- For 'reference' kind: external URI
     metadata TEXT,                          -- JSON: vibe, config, schema, etc.
 
+    -- Lua code (for tools/things that can be executed)
+    code TEXT,                              -- Lua source code
+    default_slot TEXT,                      -- Default slot: 'command:look', NULL, etc.
+    params TEXT,                            -- JSON parameter schema
+
     -- Status
     available INTEGER DEFAULT 1,            -- MCP connected? Tool working?
 
     -- Lifecycle
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     updated_at INTEGER NOT NULL,            -- Unix timestamp ms
-    deleted_at INTEGER                      -- NULL = not deleted (soft delete)
+    deleted_at INTEGER,                     -- NULL = not deleted (soft delete)
+    created_by TEXT                         -- Agent who created this thing
 );
 
 CREATE INDEX IF NOT EXISTS idx_things_parent ON things(parent_id) WHERE deleted_at IS NULL;
@@ -367,6 +336,67 @@ CREATE TABLE IF NOT EXISTS exits (
 
 CREATE INDEX IF NOT EXISTS idx_exits_from ON exits(from_thing_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_exits_to ON exits(to_thing_id) WHERE deleted_at IS NULL;
+
+--------------------------------------------------------------------------------
+-- MCP_TOOLS
+-- Raw catalog of tools from MCP servers (before wrapping as things)
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS mcp_tools (
+    mcp_id TEXT NOT NULL,                               -- MCP server identifier
+    name TEXT NOT NULL,                                 -- Tool name within MCP
+    description TEXT,                                   -- Tool description
+    schema TEXT,                                        -- JSON input schema
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (mcp_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_tools_mcp ON mcp_tools(mcp_id);
+
+--------------------------------------------------------------------------------
+-- ROOM_EQUIP
+-- Things equipped in rooms with slots
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS room_equip (
+    id TEXT PRIMARY KEY,                                -- UUIDv7
+    room_id TEXT NOT NULL REFERENCES rooms(id),         -- Room ID
+    thing_id TEXT NOT NULL REFERENCES things(id),       -- Thing being equipped
+    slot TEXT,                                          -- NULL, 'command:fish', 'hook:wrap', 'hook:background'
+    config TEXT,                                        -- JSON: {"interval_ms": 1000}
+    priority REAL DEFAULT 0.0,                          -- Ordering (lower = first)
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER                                  -- NULL = equipped (soft delete)
+);
+
+CREATE INDEX IF NOT EXISTS idx_room_equip_room ON room_equip(room_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_room_equip_thing ON room_equip(thing_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_room_equip_slot ON room_equip(room_id, slot) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_equip_unique
+    ON room_equip(room_id, thing_id, slot) WHERE deleted_at IS NULL;
+
+--------------------------------------------------------------------------------
+-- AGENT_EQUIP
+-- Things equipped by agents with slots
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS agent_equip (
+    id TEXT PRIMARY KEY,                                -- UUIDv7
+    agent_id TEXT NOT NULL REFERENCES agents(id),       -- Agent ID
+    thing_id TEXT NOT NULL REFERENCES things(id),       -- Thing being equipped
+    slot TEXT,                                          -- NULL, 'command:fish', 'hook:wrap', 'hook:background'
+    config TEXT,                                        -- JSON: {"interval_ms": 1000}
+    priority REAL DEFAULT 0.0,                          -- Ordering (lower = first)
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER                                  -- NULL = equipped (soft delete)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_equip_agent ON agent_equip(agent_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_equip_thing ON agent_equip(thing_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_equip_slot ON agent_equip(agent_id, slot) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_equip_unique
+    ON agent_equip(agent_id, thing_id, slot) WHERE deleted_at IS NULL;
 "#;
 
 /// CTE for computing row depth (nesting level)

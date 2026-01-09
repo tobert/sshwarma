@@ -67,10 +67,17 @@ pub struct Thing {
     pub content: Option<String>,
     pub uri: Option<String>,
     pub metadata: Option<String>,
+    // Lua code fields (for executable things)
+    pub code: Option<String>,        // Lua source code
+    pub default_slot: Option<String>, // Default slot: 'command:look', NULL, etc.
+    pub params: Option<String>,      // JSON parameter schema
+    // Status
     pub available: bool,
+    // Lifecycle
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
+    pub created_by: Option<String>,  // Agent who created this thing
 }
 
 impl Thing {
@@ -87,10 +94,14 @@ impl Thing {
             content: None,
             uri: None,
             metadata: None,
+            code: None,
+            default_slot: None,
+            params: None,
             available: true,
             created_at: now,
             updated_at: now,
             deleted_at: None,
+            created_by: None,
         }
     }
 
@@ -170,8 +181,9 @@ impl Database {
         conn.execute(
             r#"INSERT INTO things
                (id, parent_id, kind, name, qualified_name, description,
-                content, uri, metadata, available, created_at, updated_at, deleted_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"#,
+                content, uri, metadata, code, default_slot, params,
+                available, created_at, updated_at, deleted_at, created_by)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"#,
             params![
                 thing.id,
                 thing.parent_id,
@@ -182,10 +194,14 @@ impl Database {
                 thing.content,
                 thing.uri,
                 thing.metadata,
+                thing.code,
+                thing.default_slot,
+                thing.params,
                 thing.available,
                 thing.created_at,
                 thing.updated_at,
                 thing.deleted_at,
+                thing.created_by,
             ],
         )
         .context("failed to insert thing")?;
@@ -197,7 +213,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things WHERE id = ?1"#,
         )?;
         stmt.query_row(params![id], Self::thing_from_row)
@@ -210,7 +227,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things
                WHERE qualified_name = ?1 AND deleted_at IS NULL"#,
         )?;
@@ -224,7 +242,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things
                WHERE parent_id = ?1 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -243,7 +262,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things
                WHERE parent_id = ?1 AND kind = ?2 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -258,7 +278,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things
                WHERE kind = ?1 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -273,7 +294,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things
                WHERE name GLOB ?1 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -288,7 +310,8 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
-                      content, uri, metadata, available, created_at, updated_at, deleted_at
+                      content, uri, metadata, code, default_slot, params,
+                      available, created_at, updated_at, deleted_at, created_by
                FROM things
                WHERE qualified_name GLOB ?1 AND deleted_at IS NULL
                ORDER BY qualified_name"#,
@@ -304,7 +327,8 @@ impl Database {
         conn.execute(
             r#"UPDATE things SET
                parent_id = ?2, kind = ?3, name = ?4, qualified_name = ?5, description = ?6,
-               content = ?7, uri = ?8, metadata = ?9, available = ?10, updated_at = ?11
+               content = ?7, uri = ?8, metadata = ?9, code = ?10, default_slot = ?11,
+               params = ?12, available = ?13, updated_at = ?14
                WHERE id = ?1"#,
             params![
                 thing.id,
@@ -316,6 +340,9 @@ impl Database {
                 thing.content,
                 thing.uri,
                 thing.metadata,
+                thing.code,
+                thing.default_slot,
+                thing.params,
                 thing.available,
                 now_ms(),
             ],
@@ -376,12 +403,16 @@ impl Database {
         conn.execute(
             r#"INSERT INTO things
                (id, parent_id, kind, name, qualified_name, description,
-                content, uri, metadata, available, created_at, updated_at, deleted_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                content, uri, metadata, code, default_slot, params,
+                available, created_at, updated_at, deleted_at, created_by)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                ON CONFLICT(qualified_name) WHERE deleted_at IS NULL AND qualified_name IS NOT NULL
                DO UPDATE SET
                    description = excluded.description,
                    metadata = excluded.metadata,
+                   code = excluded.code,
+                   default_slot = excluded.default_slot,
+                   params = excluded.params,
                    available = excluded.available,
                    updated_at = excluded.updated_at"#,
             params![
@@ -394,10 +425,14 @@ impl Database {
                 thing.content,
                 thing.uri,
                 thing.metadata,
+                thing.code,
+                thing.default_slot,
+                thing.params,
                 thing.available,
                 thing.created_at,
                 thing.updated_at,
                 thing.deleted_at,
+                thing.created_by,
             ],
         )
         .context("failed to upsert thing")?;
@@ -405,6 +440,10 @@ impl Database {
     }
 
     // Helper to parse a row into a Thing
+    // Expects columns in order:
+    // 0: id, 1: parent_id, 2: kind, 3: name, 4: qualified_name, 5: description,
+    // 6: content, 7: uri, 8: metadata, 9: code, 10: default_slot, 11: params,
+    // 12: available, 13: created_at, 14: updated_at, 15: deleted_at, 16: created_by
     fn thing_from_row(row: &rusqlite::Row) -> rusqlite::Result<Thing> {
         let kind_str: String = row.get(2)?;
         let kind = ThingKind::parse(&kind_str).unwrap_or(ThingKind::Data);
@@ -418,10 +457,14 @@ impl Database {
             content: row.get(6)?,
             uri: row.get(7)?,
             metadata: row.get(8)?,
-            available: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
-            deleted_at: row.get(12)?,
+            code: row.get(9)?,
+            default_slot: row.get(10)?,
+            params: row.get(11)?,
+            available: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
+            deleted_at: row.get(15)?,
+            created_by: row.get(16)?,
         })
     }
 
@@ -462,18 +505,28 @@ impl Database {
         }
 
         // Create home room (shared resources)
+        // Thing entry for world tree
         let mut home = Thing::room("home").with_parent("rooms");
         home.id = "home".to_string();
         home.description = Some("Shared resources accessible from all rooms".to_string());
         home.metadata = Some(r#"{"vibe": "Shared resources"}"#.to_string());
         self.insert_thing(&home)?;
+        // Room entry for equipment/sessions
+        let mut home_room = super::rooms::Room::new("home");
+        home_room.id = "home".to_string();
+        self.insert_room(&home_room)?;
 
         // Create lobby room (default landing)
+        // Thing entry for world tree
         let mut lobby = Thing::room("lobby").with_parent("rooms");
         lobby.id = "lobby".to_string();
         lobby.description = Some("Welcome to sshwarma".to_string());
         lobby.metadata = Some(r#"{"vibe": "Welcome to sshwarma"}"#.to_string());
         self.insert_thing(&lobby)?;
+        // Room entry for equipment/sessions
+        let mut lobby_room = super::rooms::Room::new("lobby");
+        lobby_room.id = "lobby".to_string();
+        self.insert_room(&lobby_room)?;
 
         // Register internal tools
         let internal_tools = [
@@ -509,13 +562,10 @@ impl Database {
             tool_ids.push(tool.id);
         }
 
-        // Equip default tools in defaults container
+        // Equip internal tools directly to lobby room
         for (i, tool_id) in tool_ids.iter().enumerate() {
-            self.equip("defaults", tool_id, i as f64)?;
+            self.room_equip("lobby", tool_id, None, None, i as f64)?;
         }
-
-        // Copy equipped from defaults to lobby
-        self.copy_equipped("defaults", "lobby")?;
 
         tracing::info!(
             "bootstrapped world structure with {} internal tools",
@@ -656,8 +706,8 @@ mod tests {
         let tools = db.get_thing_children("internal")?;
         assert!(tools.len() >= 17); // At least 17 internal tools
 
-        // Verify lobby has equipped tools (copied from defaults)
-        let equipped = db.get_equipped("lobby")?;
+        // Verify lobby has equipped tools
+        let equipped = db.get_room_equipment("lobby", None)?;
         assert!(equipped.len() >= 17);
 
         // Verify sshwarma:look is registered

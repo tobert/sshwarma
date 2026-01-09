@@ -143,16 +143,11 @@ impl SshHandler {
             .unwrap_or_else(|| format!("room_{}", room_name));
 
         // Get equipped tools for this room
-        let equipped = match self.state.db.get_equipped_tools(&room_id) {
-            Ok(e) if !e.is_empty() => e,
-            _ => {
-                // Fall back to defaults
-                self.state
-                    .db
-                    .get_equipped_tools("defaults")
-                    .unwrap_or_default()
-            }
-        };
+        let equipped = self
+            .state
+            .db
+            .get_room_equipment_tools(&room_id)
+            .unwrap_or_default();
 
         // Build set of qualified names
         equipped
