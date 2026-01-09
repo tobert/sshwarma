@@ -638,7 +638,7 @@ impl Database {
         Ok(())
     }
 
-    /// Fork a room - create new room with copied KV
+    /// Fork a room - create new room with copied KV and equipment
     pub fn fork_room(&self, source: &str, new_name: &str) -> Result<()> {
         if let Some(source_room) = self.get_room_by_name(source)? {
             // Create new room
@@ -653,6 +653,9 @@ impl Database {
 
             // Set parent reference
             self.set_room_kv(&new_room.id, "parent", Some(source))?;
+
+            // Copy room equipment (tools, hooks, commands)
+            self.copy_room_equipment(&source_room.id, &new_room.id)?;
         }
         Ok(())
     }
