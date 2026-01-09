@@ -74,26 +74,14 @@ pub async fn register_tools(
         .add_tool(SshwarmaHistory { ctx: ctx.clone() })
         .await?;
     handle.add_tool(SshwarmaExits { ctx: ctx.clone() }).await?;
-    handle
-        .add_tool(SshwarmaJournal { ctx: ctx.clone() })
-        .await?;
     handle.add_tool(SshwarmaTools { ctx: ctx.clone() }).await?;
-    count += 7;
+    count += 6;
 
     // Write tools (only when in a room)
     if include_write_tools {
         handle.add_tool(SshwarmaSay { ctx: ctx.clone() }).await?;
         handle.add_tool(SshwarmaVibe { ctx: ctx.clone() }).await?;
-        handle.add_tool(SshwarmaNote { ctx: ctx.clone() }).await?;
-        handle.add_tool(SshwarmaDecide { ctx: ctx.clone() }).await?;
-        handle.add_tool(SshwarmaIdea { ctx: ctx.clone() }).await?;
-        handle
-            .add_tool(SshwarmaMilestone { ctx: ctx.clone() })
-            .await?;
-        handle
-            .add_tool(SshwarmaInspire { ctx: ctx.clone() })
-            .await?;
-        count += 7;
+        count += 2;
 
         // Navigation tools (toggleable per-room)
         if config.enable_navigation {
@@ -320,74 +308,6 @@ impl ToolDyn for SshwarmaExits {
     }
 }
 
-/// Get journal entries
-#[derive(Clone)]
-struct SshwarmaJournal {
-    ctx: ToolContext,
-}
-
-#[derive(Deserialize)]
-struct JournalArgs {
-    kind: Option<String>,
-    #[serde(default = "default_journal_limit")]
-    limit: usize,
-}
-
-fn default_journal_limit() -> usize {
-    20
-}
-
-impl ToolDyn for SshwarmaJournal {
-    fn name(&self) -> String {
-        "sshwarma_journal".to_string()
-    }
-
-    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: "sshwarma_journal".to_string(),
-                description: "Get journal entries (notes, decisions, ideas, milestones)"
-                    .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["note", "decision", "idea", "milestone"],
-                            "description": "Filter by entry type (optional)"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of entries to retrieve (default: 20)"
-                        }
-                    },
-                    "required": []
-                }),
-            }
-        })
-    }
-
-    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
-        Box::pin(async move {
-            let parsed: JournalArgs = serde_json::from_str(&args).unwrap_or(JournalArgs {
-                kind: None,
-                limit: 20,
-            });
-
-            let entries = ops::get_journal(
-                &self.ctx.state,
-                &self.ctx.room,
-                parsed.kind.as_deref(),
-                parsed.limit,
-            )
-            .await
-            .map_err(anyhow_to_tool_error)?;
-
-            serde_json::to_string(&entries).map_err(ToolError::JsonError)
-        })
-    }
-}
-
 /// List available MCP tools
 #[derive(Clone)]
 struct SshwarmaTools {
@@ -531,155 +451,6 @@ impl ToolDyn for SshwarmaVibe {
                     .await
                     .map_err(anyhow_to_tool_error)?;
                 Ok(json!({"vibe": vibe}).to_string())
-            }
-        })
-    }
-}
-
-// Journal entry tools
-
-#[derive(Deserialize)]
-struct JournalEntryArgs {
-    content: String,
-}
-
-macro_rules! journal_tool {
-    ($name:ident, $tool_name:expr, $kind:expr, $description:expr) => {
-        #[derive(Clone)]
-        struct $name {
-            ctx: ToolContext,
-        }
-
-        impl ToolDyn for $name {
-            fn name(&self) -> String {
-                $tool_name.to_string()
-            }
-
-            fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-                Box::pin(async move {
-                    ToolDefinition {
-                        name: $tool_name.to_string(),
-                        description: $description.to_string(),
-                        parameters: json!({
-                            "type": "object",
-                            "properties": {
-                                "content": {
-                                    "type": "string",
-                                    "description": "The content to add"
-                                }
-                            },
-                            "required": ["content"]
-                        }),
-                    }
-                })
-            }
-
-            fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
-                Box::pin(async move {
-                    debug!(tool = $tool_name, room = %self.ctx.room, "tool call");
-                    let parsed: JournalEntryArgs =
-                        serde_json::from_str(&args).map_err(ToolError::JsonError)?;
-
-                    ops::add_journal(
-                        &self.ctx.state,
-                        &self.ctx.room,
-                        &self.ctx.username,
-                        &parsed.content,
-                        $kind,
-                    )
-                    .await
-                    .map_err(anyhow_to_tool_error)?;
-
-                    Ok(r#"{"status": "ok"}"#.to_string())
-                })
-            }
-        }
-    };
-}
-
-journal_tool!(
-    SshwarmaNote,
-    "sshwarma_note",
-    ops::JournalKind::Note,
-    "Add a note to the room journal"
-);
-
-journal_tool!(
-    SshwarmaDecide,
-    "sshwarma_decide",
-    ops::JournalKind::Decision,
-    "Record a decision in the room journal"
-);
-
-journal_tool!(
-    SshwarmaIdea,
-    "sshwarma_idea",
-    ops::JournalKind::Idea,
-    "Capture an idea in the room journal"
-);
-
-journal_tool!(
-    SshwarmaMilestone,
-    "sshwarma_milestone",
-    ops::JournalKind::Milestone,
-    "Mark a milestone in the room journal"
-);
-
-/// Add inspiration
-#[derive(Clone)]
-struct SshwarmaInspire {
-    ctx: ToolContext,
-}
-
-#[derive(Deserialize)]
-struct InspireArgs {
-    content: Option<String>,
-}
-
-impl ToolDyn for SshwarmaInspire {
-    fn name(&self) -> String {
-        "sshwarma_inspire".to_string()
-    }
-
-    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: "sshwarma_inspire".to_string(),
-                description: "Add inspiration or get existing inspirations".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "Inspiration to add (omit to list existing)"
-                        }
-                    },
-                    "required": []
-                }),
-            }
-        })
-    }
-
-    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
-        Box::pin(async move {
-            let parsed: InspireArgs =
-                serde_json::from_str(&args).unwrap_or(InspireArgs { content: None });
-
-            if let Some(content) = parsed.content {
-                ops::add_inspiration(
-                    &self.ctx.state,
-                    &self.ctx.room,
-                    &content,
-                    &self.ctx.username,
-                )
-                .await
-                .map_err(anyhow_to_tool_error)?;
-                Ok(r#"{"status": "ok"}"#.to_string())
-            } else {
-                let inspirations = ops::get_inspirations(&self.ctx.state, &self.ctx.room)
-                    .await
-                    .map_err(anyhow_to_tool_error)?;
-                serde_json::to_string(&inspirations).map_err(ToolError::JsonError)
             }
         })
     }

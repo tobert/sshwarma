@@ -19,7 +19,6 @@ use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::ModelRegistry;
 use sshwarma::paths;
-use sshwarma::rules::RulesEngine;
 use sshwarma::ssh::SshServer;
 use sshwarma::state::SharedState;
 use sshwarma::world::World;
@@ -93,7 +92,6 @@ async fn main() -> Result<()> {
     let llm = Arc::new(llm);
     let models = Arc::new(models);
     let mcp = Arc::new(McpManager::new());
-    let rules = Arc::new(RulesEngine::new());
 
     let state = Arc::new(SharedState {
         world: world.clone(),
@@ -102,7 +100,6 @@ async fn main() -> Result<()> {
         llm: llm.clone(),
         models: models.clone(),
         mcp,
-        rules,
     });
 
     // Run Lua startup script (can configure MCP connections, etc.)

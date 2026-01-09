@@ -222,36 +222,6 @@ local function format_history_layer(limit)
     return layer_result(table.concat(lines, "\n"))
 end
 
---- Format the journal layer
-local function format_journal_layer(kind, limit)
-    local entries = tools.journal(kind, limit)
-    if not entries or #entries == 0 then
-        return layer_result("")
-    end
-
-    local lines = fun.chain(
-        {"## Journal"},
-        fun.iter(entries):map(function(e) return "[" .. e.kind .. "] " .. e.content end)
-    ):totable()
-
-    return layer_result(table.concat(lines, "\n"))
-end
-
---- Format the inspirations layer
-local function format_inspirations_layer()
-    local inspirations = tools.inspirations()
-    if not inspirations or #inspirations == 0 then
-        return layer_result("")
-    end
-
-    local lines = fun.chain(
-        {"## Inspirations"},
-        fun.iter(inspirations):map(function(insp) return "- " .. insp.content end)
-    ):totable()
-
-    return layer_result(table.concat(lines, "\n"))
-end
-
 --- Find room thing ID by name
 --- Returns the thing ID for the room, or nil if not found
 local function get_room_thing_id(room_name)
@@ -462,64 +432,6 @@ local function format_look_markdown()
 end
 
 --------------------------------------------------------------------------------
--- Prompt System Layers
---------------------------------------------------------------------------------
-
---- Format the model prompts layer (new prompt system)
---- Gets all prompts assigned to the current model via slots
-local function format_model_prompts_layer()
-    local model = tools.current_model()
-    if not model then return layer_result("") end
-
-    local prompts = tools.get_target_prompts(model.name)
-    if not prompts or #prompts == 0 then
-        return layer_result("")
-    end
-
-    local contents = fun.iter(prompts)
-        :filter(function(slot) return slot.content end)
-        :map(function(slot) return slot.content end)
-        :totable()
-
-    if #contents == 0 then
-        return layer_result("")
-    end
-
-    local lines = fun.chain({"## Model Instructions"}, contents):totable()
-    return layer_result(table.concat(lines, "\n\n"))
-end
-
---- Format the current user layer (enhanced with prompts)
-local function format_user_with_prompts_layer()
-    local user = tools.current_user()
-    if not user then
-        return layer_result("## Current User\nUnknown user.\n")
-    end
-
-    local base = {"## Current User", "You are talking with **" .. user.name .. "**."}
-
-    -- Add user's prompts if any
-    local prompts = tools.get_target_prompts(user.name)
-    if prompts and #prompts > 0 then
-        local prompt_lines = fun.iter(prompts)
-            :filter(function(slot) return slot.content end)
-            :map(function(slot) return "- " .. slot.content end)
-            :totable()
-
-        if #prompt_lines > 0 then
-            local lines = fun.chain(
-                base,
-                {"", "### About " .. user.name},
-                prompt_lines
-            ):totable()
-            return layer_result(table.concat(lines, "\n"))
-        end
-    end
-
-    return layer_result(table.concat(base, "\n"))
-end
-
---------------------------------------------------------------------------------
 -- WrapBuilder class
 --------------------------------------------------------------------------------
 
@@ -581,35 +493,10 @@ function WrapBuilder:history(limit)
     end, false)
 end
 
--- Built-in source: Journal entries
-function WrapBuilder:journal(limit, kind)
-    limit = limit or 5
-    return self:add_source("journal", 80, function()
-        return format_journal_layer(kind, limit)
-    end, false)
-end
-
--- Built-in source: Inspiration board
-function WrapBuilder:inspirations()
-    return self:add_source("inspirations", 70, format_inspirations_layer, false)
-end
-
 -- Built-in source: Equipped tools (all tools in room)
 -- Priority 5 puts it early in system prompt (after system, before model)
 function WrapBuilder:equipped()
     return self:add_source("equipped", 5, format_equipped_layer, true)
-end
-
--- Built-in source: Named prompts
--- Adds model prompts to system prompt section
-function WrapBuilder:prompts()
-    return self:add_source("prompts", 15, format_model_prompts_layer, true)
-end
-
--- Built-in source: User with prompts (enhanced user info)
--- Replaces :user() with version that includes user prompts
-function WrapBuilder:user_with_prompts()
-    return self:add_source("user", 25, format_user_with_prompts_layer, false)
 end
 
 -- Add a custom source with explicit content
@@ -690,12 +577,9 @@ function default_wrap(target_tokens)
         :system()
         :equipped()          -- Show equipped tools from inventory (before model identity)
         :model_identity()
-        :prompts()           -- Named prompts for this model (new system)
-        :user_with_prompts() -- User info with their context prompts
+        :user()
         :room()
         :participants()
-        :inspirations()
-        :journal(5)
         :history(30)
 end
 

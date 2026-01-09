@@ -8,7 +8,6 @@ use crate::db::Database;
 use crate::llm::LlmClient;
 use crate::mcp::McpManager;
 use crate::model::ModelRegistry;
-use crate::rules::RulesEngine;
 use crate::world::World;
 
 /// The shared world state accessible by both SSH and MCP servers
@@ -19,5 +18,4 @@ pub struct SharedState {
     pub llm: Arc<LlmClient>,
     pub models: Arc<ModelRegistry>,
     pub mcp: Arc<McpManager>,
-    pub rules: Arc<RulesEngine>,
 }

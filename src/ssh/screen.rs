@@ -2,10 +2,7 @@
 //!
 //! Event-driven rendering - only redraws when state changes.
 //! Lua owns the entire screen layout - chat, status, input, everything.
-//!
-//! Also executes room rules on background tick triggers.
 
-use crate::db::rules::ActionSlot;
 use crate::lua::LuaRuntime;
 use crate::state::SharedState;
 use crate::ui::RenderBuffer;
@@ -37,7 +34,7 @@ async fn screen_refresh_task(
     handle: Handle,
     channel: ChannelId,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
-    state: Arc<SharedState>,
+    _state: Arc<SharedState>,
     term_width: u16,
     term_height: u16,
 ) {
@@ -100,46 +97,6 @@ async fn screen_refresh_task(
                 let lua = lua_runtime.lock().await;
                 if let Err(e) = lua.call_background(background_tick) {
                     tracing::debug!("lua background error: {}", e);
-                }
-            }
-
-            // Execute room rules (tick and interval triggers)
-            let room_name = {
-                let lua = lua_runtime.lock().await;
-                lua.tool_state()
-                    .session_context()
-                    .and_then(|ctx| ctx.room_name.clone())
-            };
-
-            if let Some(ref room_id) = room_name {
-                state.rules.tick();
-
-                if let Ok(matches) = state.rules.match_tick(&state.db, room_id) {
-                    for rule_match in matches {
-                        if rule_match.rule.action_slot == ActionSlot::Background {
-                            execute_rule_script(
-                                &lua_runtime,
-                                &state,
-                                &rule_match.rule.script_id,
-                                background_tick,
-                            )
-                            .await;
-                        }
-                    }
-                }
-
-                if let Ok(matches) = state.rules.match_interval(&state.db, room_id) {
-                    for rule_match in matches {
-                        if rule_match.rule.action_slot == ActionSlot::Background {
-                            execute_rule_script(
-                                &lua_runtime,
-                                &state,
-                                &rule_match.rule.script_id,
-                                background_tick,
-                            )
-                            .await;
-                        }
-                    }
                 }
             }
         }
@@ -254,30 +211,4 @@ async fn render_screen_with_tags(
     }
 
     true
-}
-
-/// Execute a rule script by loading it from the database
-async fn execute_rule_script(
-    lua_runtime: &Arc<TokioMutex<LuaRuntime>>,
-    state: &Arc<SharedState>,
-    script_id: &str,
-    tick: u64,
-) {
-    let script = match state.db.get_script(script_id) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            tracing::warn!("rule script not found: {}", script_id);
-            return;
-        }
-        Err(e) => {
-            tracing::warn!("failed to load rule script {}: {}", script_id, e);
-            return;
-        }
-    };
-
-    let lua = lua_runtime.lock().await;
-    let script_name = &script.module_path;
-    if let Err(e) = lua.execute_rule_script(&script.code, script_name, tick) {
-        tracing::debug!("rule script '{}' error: {}", script_name, e);
-    }
 }

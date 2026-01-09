@@ -132,9 +132,6 @@ const HELP_TOOLS: &str = include_str!("../embedded/help/tools.md");
 /// Help documentation - Room navigation and vibes
 const HELP_ROOM: &str = include_str!("../embedded/help/room.md");
 
-/// Help documentation - Journal entries and decisions
-const HELP_JOURNAL: &str = include_str!("../embedded/help/journal.md");
-
 /// Help system module
 const HELP_MODULE: &str = include_str!("../embedded/lib/help.lua");
 
@@ -150,9 +147,6 @@ const COMMANDS_ROOM_MODULE: &str = include_str!("../embedded/commands/room.lua")
 /// Embedded inventory commands
 const COMMANDS_INVENTORY_MODULE: &str = include_str!("../embedded/commands/inventory.lua");
 
-/// Embedded journal commands
-const COMMANDS_JOURNAL_MODULE: &str = include_str!("../embedded/commands/journal.lua");
-
 /// Embedded MCP commands
 const COMMANDS_MCP_MODULE: &str = include_str!("../embedded/commands/mcp.lua");
 
@@ -162,11 +156,6 @@ const COMMANDS_HISTORY_MODULE: &str = include_str!("../embedded/commands/history
 /// Embedded debug commands
 const COMMANDS_DEBUG_MODULE: &str = include_str!("../embedded/commands/debug.lua");
 
-/// Embedded prompt commands
-const COMMANDS_PROMPT_MODULE: &str = include_str!("../embedded/commands/prompt.lua");
-
-/// Embedded rules commands
-const COMMANDS_RULES_MODULE: &str = include_str!("../embedded/commands/rules.lua");
 
 /// Embedded reload commands
 const COMMANDS_RELOAD_MODULE: &str = include_str!("../embedded/commands/reload.lua");
@@ -196,7 +185,6 @@ impl EmbeddedModules {
         modules.insert("help.inspect".to_string(), HELP_INSPECT);
         modules.insert("help.tools".to_string(), HELP_TOOLS);
         modules.insert("help.room".to_string(), HELP_ROOM);
-        modules.insert("help.journal".to_string(), HELP_JOURNAL);
 
         // Help system module
         modules.insert("help".to_string(), HELP_MODULE);
@@ -217,12 +205,9 @@ impl EmbeddedModules {
         modules.insert("commands.nav".to_string(), COMMANDS_NAV_MODULE);
         modules.insert("commands.room".to_string(), COMMANDS_ROOM_MODULE);
         modules.insert("commands.inventory".to_string(), COMMANDS_INVENTORY_MODULE);
-        modules.insert("commands.journal".to_string(), COMMANDS_JOURNAL_MODULE);
         modules.insert("commands.mcp".to_string(), COMMANDS_MCP_MODULE);
         modules.insert("commands.history".to_string(), COMMANDS_HISTORY_MODULE);
         modules.insert("commands.debug".to_string(), COMMANDS_DEBUG_MODULE);
-        modules.insert("commands.prompt".to_string(), COMMANDS_PROMPT_MODULE);
-        modules.insert("commands.rules".to_string(), COMMANDS_RULES_MODULE);
         modules.insert("commands.reload".to_string(), COMMANDS_RELOAD_MODULE);
 
         Self { modules }
@@ -479,11 +464,6 @@ impl LuaRuntime {
                 "embedded:commands/inventory.lua",
             ),
             (
-                "commands.journal",
-                COMMANDS_JOURNAL_MODULE,
-                "embedded:commands/journal.lua",
-            ),
-            (
                 "commands.mcp",
                 COMMANDS_MCP_MODULE,
                 "embedded:commands/mcp.lua",
@@ -497,16 +477,6 @@ impl LuaRuntime {
                 "commands.debug",
                 COMMANDS_DEBUG_MODULE,
                 "embedded:commands/debug.lua",
-            ),
-            (
-                "commands.prompt",
-                COMMANDS_PROMPT_MODULE,
-                "embedded:commands/prompt.lua",
-            ),
-            (
-                "commands.rules",
-                COMMANDS_RULES_MODULE,
-                "embedded:commands/rules.lua",
             ),
             (
                 "commands.reload",
@@ -1430,6 +1400,7 @@ impl Default for LuaRuntime {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
@@ -1437,7 +1408,6 @@ mod tests {
     use crate::llm::LlmClient;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
-    use crate::rules::RulesEngine;
     use crate::state::SharedState;
     use crate::world::World;
     use std::sync::Arc;
@@ -1476,7 +1446,6 @@ mod tests {
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
                 mcp: Arc::new(McpManager::new()),
-                rules: Arc::new(RulesEngine::new()),
             });
 
             Ok(Self {
@@ -1485,7 +1454,6 @@ mod tests {
                 models,
             })
         }
-
         async fn create_room(&self, name: &str, vibe: Option<&str>) {
             let mut world = self.world.write().await;
             world.create_room(name.to_string());

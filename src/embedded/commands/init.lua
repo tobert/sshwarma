@@ -3,9 +3,8 @@
 -- Provides a Lua-based command handler that maps slash commands to
 -- appropriate handlers. Commands are grouped into submodules:
 --   - commands.nav:       Navigation (rooms, join, leave, go, exits, look, who)
---   - commands.room:      Room management (create, fork, vibe, dig, nav)
---   - commands.inventory: Inventory system (inv, equip, unequip, bring, drop, examine)
---   - commands.journal:   Journal entries (journal, note, decide, idea, milestone, inspire)
+--   - commands.room:      Room management (create, fork, vibe, nav)
+--   - commands.inventory: Inventory system (inv, equip, unequip)
 --   - commands.mcp:       MCP tools (mcp, tools, run)
 --
 -- Commands that display content use page.show() directly. Commands returning
@@ -23,11 +22,8 @@ local nav = require("commands.nav")
 -- Room management commands (create, fork, vibe, dig, nav)
 local room = require("commands.room")
 
--- Inventory commands (inv, equip, unequip, bring, drop, examine)
+-- Inventory commands (inv, equip, unequip)
 local inventory = require("commands.inventory")
-
--- Journal commands (journal, note, decide, idea, milestone, inspire)
-local journal = require("commands.journal")
 
 -- MCP commands (mcp, tools, run)
 local mcp = require("commands.mcp")
@@ -37,12 +33,6 @@ local history = require("commands.history")
 
 -- Debug commands (wrap)
 local debug = require("commands.debug")
-
--- Prompt commands (prompt list/show/push/pop/rm/insert/delete)
-local prompt = require("commands.prompt")
-
--- Rules commands (rules list/add/del/enable/disable/scripts)
-local rules = require("commands.rules")
 
 -- Reload commands (reload, reload default)
 local reload = require("commands.reload")
@@ -84,7 +74,6 @@ Navigation:
 
 Looking:
   /look               Room summary
-  /examine <role>     Inspect bound asset
   /who                Who's online
   /history [n]        Recent messages
   /history --tools    Tool call history
@@ -92,22 +81,14 @@ Looking:
 
 Room Context:
   /vibe [text]        Set/view room vibe
-  /note <text>        Add journal note
-  /decide <text>      Record decision
-  /idea <text>        Capture idea
-  /milestone <text>   Mark milestone
-  /journal [kind]     View journal entries
-  /bring <id> as <role>  Bind artifact
-  /drop <role>        Unbind asset
-  /inspire <text>     Add to mood board
   /nav [on|off]       Toggle model navigation
+  /portal <dir> <room>  Create exit to another room
 
 Inventory:
-  /inv                Show equipped tools in room
+  /inv                Show equipped tools
   /inv all            Include available (not equipped)
-  /equip <thing>      Equip tool/data by qualified name
-  /unequip <thing>    Unequip from room
-  /portal <dir> <room>  Create exit to another room
+  /equip <thing>      Equip tool by qualified name
+  /unequip <thing>    Unequip tool
 
 Communication:
   <text>              Say to room
@@ -134,7 +115,6 @@ Help Topics:
   /help inspect       Table pretty-printing
   /help tools         MCP tool reference
   /help room          Room navigation, vibes
-  /help journal       Notes, decisions, milestones
 
 /quit to disconnect
 ]]
@@ -184,17 +164,6 @@ local handlers = {
     ["inventory"] = inventory.inv,  -- alias
     ["equip"]     = inventory.equip,
     ["unequip"]   = inventory.unequip,
-    ["bring"]     = inventory.bring,
-    ["drop"]      = inventory.drop,
-    ["examine"]   = inventory.examine,
-
-    -- Journal (from commands.journal)
-    ["journal"]   = journal.journal,
-    ["note"]      = journal.note,
-    ["decide"]    = journal.decide,
-    ["idea"]      = journal.idea,
-    ["milestone"] = journal.milestone,
-    ["inspire"]   = journal.inspire,
 
     -- MCP (from commands.mcp)
     ["mcp"]   = mcp.mcp,
@@ -206,12 +175,6 @@ local handlers = {
 
     -- Debug (from commands.debug)
     ["wrap"] = debug.wrap,
-
-    -- Prompt (from commands.prompt)
-    ["prompt"] = prompt.prompt,
-
-    -- Rules (from commands.rules)
-    ["rules"] = rules.rules,
 
     -- Reload (from commands.reload)
     ["reload"] = reload.reload,

@@ -11,7 +11,6 @@ pub mod equipped;
 pub mod exits;
 pub mod rooms;
 pub mod rows;
-pub mod rules;
 pub mod scripts;
 pub mod things;
 pub mod view;
@@ -179,25 +178,6 @@ pub struct Inspiration {
     pub content: String,
 }
 
-/// Legacy target with slots
-#[derive(Debug, Clone)]
-pub struct TargetWithSlots {
-    pub target: String,
-    pub target_type: String,
-    pub slots: Vec<PromptSlot>,
-}
-
-/// Legacy prompt slot
-#[derive(Debug, Clone)]
-pub struct PromptSlot {
-    pub index: usize,
-    pub prompt_name: String,
-    pub content: Option<String>,
-    pub target_type: String,
-}
-
-/// Legacy user info
-#[derive(Debug, Clone)]
 pub struct UserInfo {
     pub handle: String,
     pub created_at: String,
@@ -596,58 +576,6 @@ impl Database {
         Ok(deleted > 0)
     }
 
-    /// List all targets that have prompt slots in a room
-    pub fn list_targets_with_slots(&self, room: &str) -> Result<Vec<(String, String)>> {
-        // Get room to find room_id
-        let room_obj = self.get_room_by_name(room)?;
-        let room_id = match room_obj {
-            Some(r) => r.id,
-            None => return Ok(Vec::new()),
-        };
-
-        self.list_targets_with_wrap_rules(&room_id)
-    }
-
-    /// Get all prompt slots for a target in a room
-    pub fn get_target_slots(&self, room: &str, target: &str) -> Result<Vec<PromptSlot>> {
-        // Get room to find room_id
-        let room_obj = self.get_room_by_name(room)?;
-        let room_id = match room_obj {
-            Some(r) => r.id,
-            None => return Ok(Vec::new()),
-        };
-
-        let rules = self.list_wrap_rules_for_target(&room_id, target)?;
-
-        let mut slots = Vec::new();
-        for rule in rules {
-            // Parse name format: "target_type:prompt_name"
-            let (target_type, prompt_name) = match &rule.name {
-                Some(name) => {
-                    let parts: Vec<&str> = name.splitn(2, ':').collect();
-                    if parts.len() == 2 {
-                        (parts[0].to_string(), parts[1].to_string())
-                    } else {
-                        ("unknown".to_string(), name.clone())
-                    }
-                }
-                None => ("unknown".to_string(), "unnamed".to_string()),
-            };
-
-            // Get script content
-            let content = self.get_script(&rule.script_id)?.map(|s| s.code);
-
-            slots.push(PromptSlot {
-                index: rule.priority as usize,
-                prompt_name,
-                content,
-                target_type,
-            });
-        }
-
-        Ok(slots)
-    }
-
     /// Set (create or update) a prompt in a room
     pub fn set_prompt(
         &self,
@@ -668,112 +596,6 @@ impl Database {
             // Create new script
             self.create_script(ScriptScope::Room, Some(room), &module_path, content, created_by)?;
         }
-        Ok(())
-    }
-
-    /// Push a prompt slot to the end of a target's slots
-    pub fn push_slot(
-        &self,
-        room: &str,
-        target: &str,
-        target_type: &str,
-        prompt_name: &str,
-    ) -> Result<()> {
-        use rules::{ActionSlot, RoomRule, TriggerKind};
-        use scripts::ScriptScope;
-
-        // Get room to find room_id
-        let room_obj = self
-            .get_room_by_name(room)?
-            .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room))?;
-
-        // Find the prompt script
-        let module_path = format!("prompt.{}", prompt_name);
-        let script = self
-            .get_current_script(ScriptScope::Room, Some(room), &module_path)?
-            .ok_or_else(|| anyhow::anyhow!("Prompt not found: {}", prompt_name))?;
-
-        // Get max priority for target
-        let max_priority = self.max_wrap_priority(&room_obj.id, target)?;
-        let new_priority = max_priority.map(|p| p + 1.0).unwrap_or(0.0);
-
-        // Create new rule
-        let mut rule = RoomRule::row_trigger(&room_obj.id, &script.id, ActionSlot::Wrap);
-        rule.trigger_kind = TriggerKind::Row; // Wrap rules are row-triggered
-        rule.match_source_agent = Some(target.to_string());
-        rule.name = Some(format!("{}:{}", target_type, prompt_name));
-        rule.priority = new_priority;
-
-        self.insert_rule(&rule)?;
-
-        Ok(())
-    }
-
-    /// Remove the last (highest priority) slot from a target
-    pub fn pop_slot(&self, room: &str, target: &str) -> Result<bool> {
-        // Get room to find room_id
-        let room_obj = self.get_room_by_name(room)?;
-        let room_id = match room_obj {
-            Some(r) => r.id,
-            None => return Ok(false),
-        };
-
-        // Get max priority
-        let max_priority = self.max_wrap_priority(&room_id, target)?;
-        match max_priority {
-            Some(priority) => self.delete_wrap_rule_by_priority(&room_id, target, priority),
-            None => Ok(false),
-        }
-    }
-
-    /// Remove a slot by index from a target
-    pub fn rm_slot(&self, room: &str, target: &str, index: i64) -> Result<bool> {
-        // Get room to find room_id
-        let room_obj = self.get_room_by_name(room)?;
-        let room_id = match room_obj {
-            Some(r) => r.id,
-            None => return Ok(false),
-        };
-
-        // Delete rule by priority (index = priority)
-        self.delete_wrap_rule_by_priority(&room_id, target, index as f64)
-    }
-
-    /// Insert a slot at a specific index, shifting others up
-    pub fn insert_slot(
-        &self,
-        room: &str,
-        target: &str,
-        target_type: &str,
-        index: i64,
-        prompt_name: &str,
-    ) -> Result<()> {
-        use rules::{ActionSlot, RoomRule, TriggerKind};
-        use scripts::ScriptScope;
-
-        // Get room to find room_id
-        let room_obj = self
-            .get_room_by_name(room)?
-            .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room))?;
-
-        // Find the prompt script
-        let module_path = format!("prompt.{}", prompt_name);
-        let script = self
-            .get_current_script(ScriptScope::Room, Some(room), &module_path)?
-            .ok_or_else(|| anyhow::anyhow!("Prompt not found: {}", prompt_name))?;
-
-        // Shift existing rules at or above this index up by 1
-        self.shift_wrap_priorities(&room_obj.id, target, index as f64)?;
-
-        // Create new rule at the specified index
-        let mut rule = RoomRule::row_trigger(&room_obj.id, &script.id, ActionSlot::Wrap);
-        rule.trigger_kind = TriggerKind::Row;
-        rule.match_source_agent = Some(target.to_string());
-        rule.name = Some(format!("{}:{}", target_type, prompt_name));
-        rule.priority = index as f64;
-
-        self.insert_rule(&rule)?;
-
         Ok(())
     }
 
