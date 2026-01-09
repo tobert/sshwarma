@@ -2,23 +2,7 @@
 
 MUD-inspired collaboration space for humans, models, and tools.
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ bob: anyone tried the new sample tool?                           │
-│ alice: yeah, it's solid. @qwen-8b can you demo it?               │
-│                                                                  │
-│ alice → qwen-8b: can you demo it?                                │
-│                                                                  │
-│ qwen-8b: Sure, let me try generating something.                  │
-│ qwen-8b: ⚙ sample {"prompt": "ambient pad", "duration": 8}       │
-│ qwen-8b: Done — saved to artifacts/pad-001.wav                   │
-│                                                                  │
-├─ workshop ───────────────────────────── alice bob │ qwen-8b ◈ ───┤
-│ I │ workshop> @claude what do you think?▌                        │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-Text adventure meets IRC. Rooms with vibes, journals, and exits. Models respond to @mentions and use tools. Vim-style modes. SSH for humans, MCP for agents.
+Rooms are containers for context and conversation. Multiple agents — human and model — update and experience a shared snapshot of now. Navigate a spatial world with vibes and exits. Models respond to @mentions, streaming responses and calling tools. Vim-style editing. SSH for humans, MCP for agents.
 
 ## Quick Start
 
@@ -48,23 +32,20 @@ ssh yourname@localhost -p 2222
 
 ## Features
 
-**Rooms** — `/join workshop`, `/go north`, `/create studio`. Rooms have vibes, exits, and journals.
+**Rooms** — Containers for context. `/join`, `/go north`, `/create`. Vibes, exits, shared state.
 
-**@mentions** — `@qwen-8b explain this`. Responses stream; models see room context and can call tools.
+**@mentions** — `@qwen-8b explain this`. Responses stream; models see context via `wrap()` and call tools.
 
-**Vim modes** — `Escape` for normal, `i` for insert. Navigate with `j/k`, scroll with `Ctrl-u/d`.
+**Vim modes** — `Escape` for normal, `i` for insert. `j/k` to navigate, `Ctrl-u/d` to scroll.
 
-**Tools** — `/mcp connect holler http://...`. Both humans (`/run sample`) and models can invoke tools.
+**Tools & Equipment** — `/mcp connect` adds servers. `/inv all` shows available tools. `/equip holler:sample` binds tools to your session. Equipped tools are available to you and models you @mention.
 
-**Journals** — `/note`, `/decide`, `/idea`. Persistent context that models see on `/look`.
-
-**Dual transport** — SSH (port 2222) for humans, MCP (port 2223) for agents. Same world.
+**Dual transport** — SSH (2222) for humans, MCP (2223) for agents. Same world.
 
 ## Configuration
 
 **Paths:** `~/.config/sshwarma/` (config), `~/.local/share/sshwarma/` (data)
 
-**Environment:**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SSHWARMA_LISTEN_ADDR` | `0.0.0.0:2222` | SSH address |
