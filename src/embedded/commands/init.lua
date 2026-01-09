@@ -194,6 +194,7 @@ local handlers = {
 --- @param args string The arguments string (may be empty)
 --- @return table Action table with {text, mode, title?}
 function M.dispatch(name, args)
+    -- Check built-in handlers first
     local handler = handlers[name]
     if handler then
         local ok, result = pcall(handler, args or "")
@@ -209,12 +210,50 @@ function M.dispatch(name, args)
                 mode = "notification"
             }
         end
-    else
-        return {
-            text = "Unknown command: /" .. name,
-            mode = "notification"
-        }
     end
+
+    -- Check for equipped command slot (e.g., command:fish)
+    local slot_name = "command:" .. name
+    local session = tools.session()
+
+    -- Check agent equipment first, then room equipment
+    local equipped = {}
+    if session and session.username then
+        equipped = tools.get_agent_equipment(session.username, slot_name) or {}
+    end
+
+    if #equipped == 0 and session and session.room_name then
+        equipped = tools.get_room_equipment(session.room_name, slot_name) or {}
+    end
+
+    if #equipped > 0 then
+        -- Found an equipped thing for this command slot
+        local item = equipped[1]
+        if item.code then
+            -- Execute the thing's Lua code
+            local result = tools.execute_code(item.code, args or "")
+            if type(result) == "table" then
+                result.text = result.text or ""
+                result.mode = result.mode or "notification"
+                return result
+            else
+                return {
+                    text = tostring(result or ""),
+                    mode = "notification"
+                }
+            end
+        else
+            return {
+                text = string.format("Command /%s has no code", name),
+                mode = "notification"
+            }
+        end
+    end
+
+    return {
+        text = "Unknown command: /" .. name,
+        mode = "notification"
+    }
 end
 
 --- Check if a command exists

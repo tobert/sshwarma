@@ -1283,6 +1283,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                     t.set("qualified_name", thing.qualified_name)?;
                     t.set("description", thing.description)?;
                     t.set("content", thing.content)?;
+                    t.set("code", thing.code)?;
+                    t.set("default_slot", thing.default_slot)?;
+                    t.set("params", thing.params)?;
                     t.set("available", thing.available)?;
                     Ok(Value::Table(t))
                 }
@@ -1291,6 +1294,80 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         })?
     };
     tools.set("things_get", things_get_fn)?;
+
+    // thing_get_by_id(thing_id) -> thing table or nil
+    let thing_get_by_id_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, thing_id: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.get_thing(&thing_id) {
+                Ok(Some(thing)) => {
+                    let t = lua.create_table()?;
+                    t.set("id", thing.id)?;
+                    t.set("parent_id", thing.parent_id)?;
+                    t.set("kind", thing.kind.as_str())?;
+                    t.set("name", thing.name)?;
+                    t.set("qualified_name", thing.qualified_name)?;
+                    t.set("description", thing.description)?;
+                    t.set("content", thing.content)?;
+                    t.set("code", thing.code)?;
+                    t.set("default_slot", thing.default_slot)?;
+                    t.set("params", thing.params)?;
+                    t.set("available", thing.available)?;
+                    Ok(Value::Table(t))
+                }
+                _ => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("thing_get_by_id", thing_get_by_id_fn)?;
+
+    // execute_thing(thing_id, args) -> result table
+    // Loads and executes the thing's Lua code with the given args
+    // Note: For now, this returns an error; use execute_code instead
+    let execute_thing_fn =
+        lua.create_function(move |lua, (_thing_id, _args): (String, Value)| -> mlua::Result<Value> {
+            let result = lua.create_table()?;
+            result.set("success", false)?;
+            result.set(
+                "error",
+                "execute_thing requires code passed as argument; use execute_code instead",
+            )?;
+            Ok(Value::Table(result))
+        })?;
+    tools.set("execute_thing", execute_thing_fn)?;
+
+    // execute_code(code, args) -> result
+    // Execute Lua code string with the given args
+    let execute_code_fn = lua.create_function(move |lua, (code, args): (String, Value)| {
+        // Load and execute the code
+        let chunk = lua.load(&code);
+        let func: mlua::Function = match chunk.eval() {
+            Ok(f) => f,
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("success", false)?;
+                result.set("error", format!("failed to load code: {}", e))?;
+                return Ok(Value::Table(result));
+            }
+        };
+
+        // Call the function with args
+        match func.call::<Value>(args) {
+            Ok(ret) => Ok(ret),
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("success", false)?;
+                result.set("error", format!("execution error: {}", e))?;
+                Ok(Value::Table(result))
+            }
+        }
+    })?;
+    tools.set("execute_code", execute_code_fn)?;
 
     // things_children(parent_id) -> array of thing tables
     let things_children_fn = {
@@ -1518,6 +1595,165 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
         )?
     };
     tools.set("room_unequip", unequip_fn)?;
+
+    // things_match(pattern) -> array of thing tables (alias for things_find)
+    let things_match_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, pattern: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            let things = shared
+                .db
+                .find_things_by_qualified_name(&pattern)
+                .unwrap_or_default();
+            let result = lua.create_table()?;
+            for (i, thing) in things.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", thing.id.clone())?;
+                t.set("kind", thing.kind.as_str())?;
+                t.set("name", thing.name.clone())?;
+                t.set("qualified_name", thing.qualified_name.clone())?;
+                t.set("description", thing.description.clone())?;
+                t.set("default_slot", thing.default_slot.clone())?;
+                t.set("available", thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("things_match", things_match_fn)?;
+
+    // agent_equip(agent_id, thing_id, slot, config, priority) -> bool success
+    let agent_equip_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |_lua,
+                  (agent_id, thing_id, slot, config, priority): (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<f64>,
+            )| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return Ok(false),
+                };
+
+                shared
+                    .db
+                    .agent_equip(
+                        &agent_id,
+                        &thing_id,
+                        slot.as_deref(),
+                        config.as_deref(),
+                        priority.unwrap_or(0.0),
+                    )
+                    .is_ok()
+                    .then_some(true)
+                    .ok_or_else(|| mlua::Error::external("agent_equip failed"))
+            },
+        )?
+    };
+    tools.set("agent_equip", agent_equip_fn)?;
+
+    // agent_unequip(agent_id, thing_id, slot) -> bool success
+    let agent_unequip_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |_lua, (agent_id, thing_id, slot): (String, String, Option<String>)| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return Ok(false),
+                };
+
+                shared
+                    .db
+                    .agent_unequip(&agent_id, &thing_id, slot.as_deref())
+                    .is_ok()
+                    .then_some(true)
+                    .ok_or_else(|| mlua::Error::external("agent_unequip failed"))
+            },
+        )?
+    };
+    tools.set("agent_unequip", agent_unequip_fn)?;
+
+    // get_room_equipment(room_id, slot_filter) -> array of equipped things
+    // slot_filter: nil=all, ""=NULL slot only, "hook:wrap"=specific slot
+    let get_room_equipment_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (room_id, slot_filter): (String, Option<String>)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            let equipment = shared
+                .db
+                .get_room_equipment(&room_id, slot_filter.as_deref())
+                .unwrap_or_default();
+
+            let result = lua.create_table()?;
+            for (i, item) in equipment.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("equip_id", item.equip_id.clone())?;
+                t.set("room_id", item.room_id.clone())?;
+                t.set("thing_id", item.thing.id.clone())?;
+                t.set("slot", item.slot.clone())?;
+                t.set("config", item.config.clone())?;
+                t.set("priority", item.priority)?;
+                t.set("name", item.thing.name.clone())?;
+                t.set("qualified_name", item.thing.qualified_name.clone())?;
+                t.set("description", item.thing.description.clone())?;
+                t.set("code", item.thing.code.clone())?;
+                t.set("default_slot", item.thing.default_slot.clone())?;
+                t.set("available", item.thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("get_room_equipment", get_room_equipment_fn)?;
+
+    // get_agent_equipment(agent_id, slot_filter) -> array of equipped things
+    // slot_filter: nil=all, ""=NULL slot only, "command:fish"=specific slot
+    let get_agent_equipment_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (agent_id, slot_filter): (String, Option<String>)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            let equipment = shared
+                .db
+                .get_agent_equipment(&agent_id, slot_filter.as_deref())
+                .unwrap_or_default();
+
+            let result = lua.create_table()?;
+            for (i, item) in equipment.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("equip_id", item.equip_id.clone())?;
+                t.set("agent_id", item.agent_id.clone())?;
+                t.set("thing_id", item.thing.id.clone())?;
+                t.set("slot", item.slot.clone())?;
+                t.set("config", item.config.clone())?;
+                t.set("priority", item.priority)?;
+                t.set("name", item.thing.name.clone())?;
+                t.set("qualified_name", item.thing.qualified_name.clone())?;
+                t.set("description", item.thing.description.clone())?;
+                t.set("code", item.thing.code.clone())?;
+                t.set("default_slot", item.thing.default_slot.clone())?;
+                t.set("available", item.thing.available)?;
+                result.set(i + 1, t)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("get_agent_equipment", get_agent_equipment_fn)?;
 
     // exits_list(room_thing_id) -> array of {direction, target_name, target_id}
     let exits_list_fn = {
