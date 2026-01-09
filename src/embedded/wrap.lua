@@ -14,6 +14,8 @@
 --   local system_prompt = w:system_prompt()  -- Stable (for .preamble())
 --   local context = w:context()              -- Dynamic (prepend to message)
 
+local fun = require("fun")
+
 --------------------------------------------------------------------------------
 -- Tokyo Night color palette (hex for segment rendering)
 --------------------------------------------------------------------------------
@@ -53,6 +55,37 @@ end
 --- Create a layer result with content and token count
 local function layer_result(content)
     return { content = content or "", tokens = estimate_tokens(content) }
+end
+
+--- Partition a who() list into user names and model names
+--- Returns two arrays: {user_names...}, {model_names...}
+local function partition_who(who)
+    if not who or #who == 0 then
+        return {}, {}
+    end
+    local models, users = fun.partition(function(p) return p.is_model end, who)
+    return fun.iter(users):map(function(p) return p.name end):totable(),
+           fun.iter(models):map(function(p) return p.name end):totable()
+end
+
+--- Get qualified name for an equipped tool
+local function tool_name(eq)
+    return eq.qualified_name or eq.name
+end
+
+--- Check if a tool is internal (sshwarma:*)
+local function is_internal_tool(eq)
+    return tool_name(eq):match("^sshwarma:")
+end
+
+--- Filter equipped tools by namespace
+--- Returns internal tools (sshwarma:*) and external tools (everything else)
+local function partition_tools(equipped)
+    if not equipped or #equipped == 0 then
+        return {}, {}
+    end
+    local internal, external = fun.partition(is_internal_tool, equipped)
+    return fun.totable(internal), fun.totable(external)
 end
 
 --------------------------------------------------------------------------------
@@ -176,20 +209,9 @@ end
 
 --- Format the participants layer
 local function format_participants_layer()
-    local who = tools.who()
-    if not who or #who == 0 then
+    local users, models = partition_who(tools.who())
+    if #users == 0 and #models == 0 then
         return layer_result("")
-    end
-
-    local users = {}
-    local models = {}
-
-    for _, p in ipairs(who) do
-        if p.is_model then
-            table.insert(models, p.name)
-        else
-            table.insert(users, p.name)
-        end
     end
 
     local parts = {}
@@ -334,40 +356,32 @@ local function format_internal_tools_layer()
         return layer_result("")
     end
 
-    -- Get equipped tools and filter to sshwarma:* only
+    -- Get equipped tools
     local equipped = tools.equipped_tools(room_id)
     if not equipped or #equipped == 0 then
         equipped = tools.equipped_tools("defaults")
     end
 
-    if not equipped or #equipped == 0 then
-        return layer_result("")
-    end
-
-    local internal = {}
-    for _, eq in ipairs(equipped) do
-        local name = eq.qualified_name or eq.name
-        if name:match("^sshwarma:") then
-            table.insert(internal, eq)
-        end
-    end
-
+    local internal = (partition_tools(equipped))  -- first return value only
     if #internal == 0 then
         return layer_result("")
     end
 
-    local lines = {"## Room Functions"}
-    lines[2] = "Built-in sshwarma functions for navigating and interacting:"
-    lines[3] = ""
+    local lines = {"## Room Functions", "Built-in sshwarma functions for navigating and interacting:", ""}
 
-    for _, eq in ipairs(internal) do
-        local display = (eq.qualified_name or eq.name):gsub("^sshwarma:", "")
+    -- Format each tool as a list item
+    local items = fun.iter(internal):map(function(eq)
+        local display = tool_name(eq):gsub("^sshwarma:", "")
         local desc = eq.description or ""
         if desc ~= "" then
-            table.insert(lines, "- **" .. display .. "**: " .. desc)
+            return "- **" .. display .. "**: " .. desc
         else
-            table.insert(lines, "- **" .. display .. "**")
+            return "- **" .. display .. "**"
         end
+    end):totable()
+
+    for _, item in ipairs(items) do
+        table.insert(lines, item)
     end
 
     return layer_result(table.concat(lines, "\n"))
@@ -387,36 +401,32 @@ local function format_external_tools_layer()
         return layer_result("")
     end
 
-    -- Get equipped tools and filter to non-sshwarma:* only
+    -- Get equipped tools
     local equipped = tools.equipped_tools(room_id)
     if not equipped or #equipped == 0 then
         return layer_result("")
     end
 
-    local external = {}
-    for _, eq in ipairs(equipped) do
-        local name = eq.qualified_name or eq.name
-        if not name:match("^sshwarma:") then
-            table.insert(external, eq)
-        end
-    end
-
+    local _, external = partition_tools(equipped)
     if #external == 0 then
         return layer_result("")
     end
 
-    local lines = {"## External Tools"}
-    lines[2] = "MCP tools available in this room:"
-    lines[3] = ""
+    local lines = {"## External Tools", "MCP tools available in this room:", ""}
 
-    for _, eq in ipairs(external) do
-        local name = eq.qualified_name or eq.name
+    -- Format each tool as a list item
+    local items = fun.iter(external):map(function(eq)
+        local name = tool_name(eq)
         local desc = eq.description or ""
         if desc ~= "" then
-            table.insert(lines, "- **" .. name .. "**: " .. desc)
+            return "- **" .. name .. "**: " .. desc
         else
-            table.insert(lines, "- **" .. name .. "**")
+            return "- **" .. name .. "**"
         end
+    end):totable()
+
+    for _, item in ipairs(items) do
+        table.insert(lines, item)
     end
 
     return layer_result(table.concat(lines, "\n"))
@@ -466,18 +476,8 @@ local function format_look_ansi()
     -- Empty line
     table.insert(rows, box_row(inner, { seg("") }))
 
-    -- Users
-    local users = {}
-    local models = {}
-    if who then
-        for _, p in ipairs(who) do
-            if p.is_model then
-                table.insert(models, p.name)
-            else
-                table.insert(users, p.name)
-            end
-        end
-    end
+    -- Users and models
+    local users, models = partition_who(who)
 
     if #users > 0 then
         table.insert(rows, box_row(inner, {
@@ -556,17 +556,7 @@ local function format_look_markdown()
     end
 
     -- Participants
-    local users = {}
-    local models = {}
-    if who then
-        for _, p in ipairs(who) do
-            if p.is_model then
-                table.insert(models, p.name)
-            else
-                table.insert(users, p.name)
-            end
-        end
-    end
+    local users, models = partition_who(who)
 
     table.insert(lines, "")
     table.insert(lines, "### Present")
