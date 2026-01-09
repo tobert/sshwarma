@@ -411,6 +411,9 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
     // Create temporary database
     let db = Database::open(":memory:").expect("failed to create test db");
 
+    // Bootstrap the world structure (creates internal tools, lobby, etc.)
+    db.bootstrap_world().expect("failed to bootstrap world");
+
     // Create test model registry with mock backend
     let mut models = ModelRegistry::new();
     models.register(ModelHandle {
@@ -760,6 +763,226 @@ async fn test_sshwarma_mcp_exits() -> Result<()> {
         .await?;
     assert!(result.content.contains("south"));
     assert!(result.content.contains("lobby"));
+
+    manager.remove("sshwarma");
+    Ok(())
+}
+
+// ============================================================================
+// Inventory/Equipment Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sshwarma_mcp_inventory_equip_unequip() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let manager = McpManager::new();
+    manager.add("sshwarma", &url);
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
+
+    // Create a room
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "workshop"}))
+        .await?;
+
+    // List inventory (initially has bootstrap tools copied from lobby)
+    let result = manager
+        .call_tool(
+            "inventory_list",
+            serde_json::json!({
+                "room": "workshop",
+                "include_available": true
+            }),
+        )
+        .await?;
+    assert!(
+        result.content.contains("Inventory for 'workshop'"),
+        "Expected inventory for workshop, got: {}",
+        result.content
+    );
+    assert!(!result.is_error);
+
+    // Equip a tool (sshwarma:look should exist from bootstrap)
+    let result = manager
+        .call_tool(
+            "inventory_equip",
+            serde_json::json!({
+                "room": "workshop",
+                "qualified_name": "sshwarma:look"
+            }),
+        )
+        .await?;
+    assert!(
+        result.content.contains("Equipped") || result.content.contains("sshwarma:look"),
+        "Expected equip confirmation, got: {}",
+        result.content
+    );
+    assert!(!result.is_error);
+
+    // Verify in inventory
+    let result = manager
+        .call_tool(
+            "inventory_list",
+            serde_json::json!({
+                "room": "workshop"
+            }),
+        )
+        .await?;
+    assert!(
+        result.content.contains("sshwarma:look"),
+        "Expected sshwarma:look in inventory, got: {}",
+        result.content
+    );
+
+    // Unequip
+    let result = manager
+        .call_tool(
+            "inventory_unequip",
+            serde_json::json!({
+                "room": "workshop",
+                "qualified_name": "sshwarma:look"
+            }),
+        )
+        .await?;
+    assert!(result.content.contains("Unequipped"));
+    assert!(!result.is_error);
+
+    manager.remove("sshwarma");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sshwarma_mcp_fork_copies_equipment() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let manager = McpManager::new();
+    manager.add("sshwarma", &url);
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
+
+    // Create a room and equip tools
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "original"}))
+        .await?;
+
+    // Equip multiple tools to the original room
+    manager
+        .call_tool(
+            "inventory_equip",
+            serde_json::json!({
+                "room": "original",
+                "qualified_name": "sshwarma:look"
+            }),
+        )
+        .await?;
+    manager
+        .call_tool(
+            "inventory_equip",
+            serde_json::json!({
+                "room": "original",
+                "qualified_name": "sshwarma:say"
+            }),
+        )
+        .await?;
+
+    // Verify original has the tools
+    let result = manager
+        .call_tool(
+            "inventory_list",
+            serde_json::json!({"room": "original"}),
+        )
+        .await?;
+    assert!(result.content.contains("sshwarma:look"));
+    assert!(result.content.contains("sshwarma:say"));
+
+    // Fork the room
+    let result = manager
+        .call_tool(
+            "fork_room",
+            serde_json::json!({
+                "source": "original",
+                "new_name": "forked"
+            }),
+        )
+        .await?;
+    assert!(result.content.contains("Forked"));
+    assert!(!result.is_error);
+
+    // Verify forked room has the equipment copied
+    let result = manager
+        .call_tool(
+            "inventory_list",
+            serde_json::json!({"room": "forked"}),
+        )
+        .await?;
+    assert!(
+        result.content.contains("sshwarma:look") || result.content.contains("Inventory"),
+        "Expected equipment in forked room, got: {}",
+        result.content
+    );
+
+    manager.remove("sshwarma");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sshwarma_mcp_equip_wildcards() -> Result<()> {
+    let (url, _handle) = start_sshwarma_mcp_server().await?;
+
+    let manager = McpManager::new();
+    manager.add("sshwarma", &url);
+    manager
+        .wait_for_connected("sshwarma", Duration::from_secs(5))
+        .await?;
+
+    // Create a room
+    manager
+        .call_tool("create_room", serde_json::json!({"name": "wildcards"}))
+        .await?;
+
+    // Equip all sshwarma tools using wildcard
+    let result = manager
+        .call_tool(
+            "inventory_equip",
+            serde_json::json!({
+                "room": "wildcards",
+                "qualified_name": "sshwarma:*"
+            }),
+        )
+        .await?;
+    assert!(
+        result.content.contains("Equipped") && result.content.contains("things"),
+        "Expected multiple tools equipped, got: {}",
+        result.content
+    );
+    assert!(!result.is_error);
+
+    // Verify multiple tools are equipped
+    let result = manager
+        .call_tool(
+            "inventory_list",
+            serde_json::json!({"room": "wildcards"}),
+        )
+        .await?;
+    // Should have multiple sshwarma tools
+    assert!(result.content.contains("sshwarma:look"));
+    assert!(result.content.contains("sshwarma:say"));
+
+    // Unequip all with wildcard
+    let result = manager
+        .call_tool(
+            "inventory_unequip",
+            serde_json::json!({
+                "room": "wildcards",
+                "qualified_name": "sshwarma:*"
+            }),
+        )
+        .await?;
+    assert!(result.content.contains("Unequipped"));
+    assert!(!result.is_error);
 
     manager.remove("sshwarma");
     Ok(())

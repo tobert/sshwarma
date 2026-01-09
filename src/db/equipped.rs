@@ -618,4 +618,102 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_merged_equipment() -> Result<()> {
+        let db = Database::in_memory()?;
+
+        // Create room and agent
+        use crate::db::agents::{Agent, AgentKind};
+        use crate::db::rooms::Room;
+
+        let room = Room::new("workshop");
+        db.insert_room(&room)?;
+        let agent = Agent::new("testuser", AgentKind::Human);
+        db.insert_agent(&agent)?;
+
+        // Create tools
+        let look = Thing::tool("look", "sshwarma:look");
+        let say = Thing::tool("say", "sshwarma:say");
+        let fish = Thing::tool("fish", "atobey:fish");
+        db.insert_thing(&look)?;
+        db.insert_thing(&say)?;
+        db.insert_thing(&fish)?;
+
+        // Equip look and say to room (general availability)
+        db.room_equip(&room.id, &look.id, None, None, 0.0)?;
+        db.room_equip(&room.id, &say.id, None, None, 1.0)?;
+
+        // Equip fish to agent (personal tool)
+        db.agent_equip(&agent.id, &fish.id, None, None, 0.0)?;
+
+        // Get merged equipment (should include all 3)
+        let merged = db.get_merged_equipment(&room.id, &agent.id, None)?;
+        assert_eq!(merged.len(), 3);
+
+        // Room equipment comes first (priority 0.0, 1.0)
+        // Agent equipment comes after (priority + 1000.0)
+        assert!(merged[0].thing.name == "look" || merged[0].thing.name == "say");
+        assert_eq!(merged[2].thing.name, "fish");
+
+        // If agent has same tool as room, room wins
+        db.agent_equip(&agent.id, &look.id, None, None, 0.0)?;
+        let merged = db.get_merged_equipment(&room.id, &agent.id, None)?;
+        assert_eq!(merged.len(), 3); // Still 3, not 4 (room look wins)
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_slot_filter_semantics() -> Result<()> {
+        let db = Database::in_memory()?;
+
+        use crate::db::rooms::Room;
+        let room = Room::new("workshop");
+        db.insert_room(&room)?;
+
+        // Create tools
+        let look = Thing::tool("look", "sshwarma:look");
+        let fish = Thing::tool("fish", "atobey:fish");
+        let ticker = Thing::tool("ticker", "atobey:ticker");
+        let wrapper = Thing::tool("wrapper", "atobey:wrapper");
+        db.insert_thing(&look)?;
+        db.insert_thing(&fish)?;
+        db.insert_thing(&ticker)?;
+        db.insert_thing(&wrapper)?;
+
+        // Equip with different slots
+        db.room_equip(&room.id, &look.id, None, None, 0.0)?; // General availability (NULL slot)
+        db.room_equip(&room.id, &fish.id, Some("command:fish"), None, 0.0)?;
+        db.room_equip(&room.id, &ticker.id, Some("hook:background:ui"), Some(r#"{"interval_ms":1000}"#), 0.0)?;
+        db.room_equip(&room.id, &wrapper.id, Some("hook:wrap"), None, 0.0)?;
+
+        // None filter: get all
+        let all = db.get_room_equipment(&room.id, None)?;
+        assert_eq!(all.len(), 4);
+
+        // Empty string filter: get only NULL slot (general availability)
+        let general = db.get_room_equipment(&room.id, Some(""))?;
+        assert_eq!(general.len(), 1);
+        assert_eq!(general[0].thing.name, "look");
+        assert!(general[0].slot.is_none());
+
+        // Specific slot filter: command:fish
+        let commands = db.get_room_equipment(&room.id, Some("command:fish"))?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].thing.name, "fish");
+
+        // Specific slot filter: hook:wrap
+        let wrap_hooks = db.get_room_equipment(&room.id, Some("hook:wrap"))?;
+        assert_eq!(wrap_hooks.len(), 1);
+        assert_eq!(wrap_hooks[0].thing.name, "wrapper");
+
+        // Specific slot filter: hook:background:ui (with config)
+        let bg_hooks = db.get_room_equipment(&room.id, Some("hook:background:ui"))?;
+        assert_eq!(bg_hooks.len(), 1);
+        assert_eq!(bg_hooks[0].thing.name, "ticker");
+        assert!(bg_hooks[0].config.as_ref().unwrap().contains("interval_ms"));
+
+        Ok(())
+    }
 }

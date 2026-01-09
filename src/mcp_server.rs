@@ -972,24 +972,43 @@ impl SshwarmaMcpServer {
             Some(t) => t,
             None => {
                 // Room might exist in old system but not in things
-                let world = self.state.world.read().await;
-                if world.get_room(&params.room).is_some() {
-                    drop(world);
-                    // Create thing for it
-                    let mut new_room =
-                        crate::db::things::Thing::room(&params.room).with_parent("rooms");
-                    new_room.id = format!("room_{}", params.room);
-                    if let Err(e) = self.state.db.insert_thing(&new_room) {
+                // Look up the actual Room to get its ID
+                let room = match self.state.db.get_room_by_name(&params.room) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        // Also check World (in-memory)
+                        let world = self.state.world.read().await;
+                        if world.get_room(&params.room).is_none() {
+                            return format!("Room '{}' does not exist.", params.room);
+                        }
+                        drop(world);
+                        // Create room in DB if only in World
+                        if let Err(e) = self.state.db.create_room(&params.room, None) {
+                            return format!("Error creating room: {}", e);
+                        }
+                        match self.state.db.get_room_by_name(&params.room) {
+                            Ok(Some(r)) => r,
+                            _ => return format!("Failed to get room '{}'", params.room),
+                        }
+                    }
+                    Err(e) => return format!("Error: {}", e),
+                };
+
+                // Create thing for it with same ID as the Room
+                let mut new_room =
+                    crate::db::things::Thing::room(&params.room).with_parent("rooms");
+                new_room.id = room.id.clone();
+                if let Err(e) = self.state.db.insert_thing(&new_room) {
+                    // Might already exist, which is fine
+                    if !e.to_string().contains("UNIQUE constraint") {
                         return format!("Error creating room thing: {}", e);
                     }
-                    // Copy equipment from lobby (which has internal tools)
-                    if let Err(e) = self.state.db.copy_room_equipment("lobby", &new_room.id) {
-                        return format!("Error copying equipment: {}", e);
-                    }
-                    new_room
-                } else {
-                    return format!("Room '{}' does not exist.", params.room);
                 }
+                // Copy equipment from lobby (which has internal tools)
+                if let Err(e) = self.state.db.copy_room_equipment("lobby", &room.id) {
+                    return format!("Error copying equipment: {}", e);
+                }
+                new_room
             }
         };
 
@@ -1042,22 +1061,16 @@ impl SshwarmaMcpServer {
         &self,
         Parameters(params): Parameters<InventoryEquipParams>,
     ) -> String {
-        use crate::db::things::ThingKind;
-
         // Ensure world is bootstrapped
         if let Err(e) = self.state.db.bootstrap_world() {
             return format!("Error: {}", e);
         }
 
-        // Find room thing
-        let room_thing = match self.state.db.find_things_by_name(&params.room) {
-            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
+        // Get the room ID from the rooms table
+        let room = match self.state.db.get_room_by_name(&params.room) {
+            Ok(Some(r)) => r,
+            Ok(None) => return format!("Room '{}' does not exist.", params.room),
             Err(e) => return format!("Error: {}", e),
-        };
-
-        let room_thing = match room_thing {
-            Some(t) => t,
-            None => return format!("Room '{}' not found in things system.", params.room),
         };
 
         // Find thing by qualified name
@@ -1090,7 +1103,7 @@ impl SshwarmaMcpServer {
         let priority = params.priority.unwrap_or(0.0);
         let mut equipped_count = 0;
         for thing in &things {
-            if let Err(e) = self.state.db.room_equip(&room_thing.id, &thing.id, None, None, priority) {
+            if let Err(e) = self.state.db.room_equip(&room.id, &thing.id, None, None, priority) {
                 return format!("Error equipping {}: {}", thing.name, e);
             }
             equipped_count += 1;
@@ -1115,17 +1128,11 @@ impl SshwarmaMcpServer {
         &self,
         Parameters(params): Parameters<InventoryUnequipParams>,
     ) -> String {
-        use crate::db::things::ThingKind;
-
-        // Find room thing
-        let room_thing = match self.state.db.find_things_by_name(&params.room) {
-            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
+        // Get the room ID from the rooms table
+        let room = match self.state.db.get_room_by_name(&params.room) {
+            Ok(Some(r)) => r,
+            Ok(None) => return format!("Room '{}' does not exist.", params.room),
             Err(e) => return format!("Error: {}", e),
-        };
-
-        let room_thing = match room_thing {
-            Some(t) => t,
-            None => return format!("Room '{}' not found in things system.", params.room),
         };
 
         // Find thing by qualified name
@@ -1157,7 +1164,7 @@ impl SshwarmaMcpServer {
         // Unequip each thing
         let mut unequipped_count = 0;
         for thing in &things {
-            if let Err(e) = self.state.db.room_unequip(&room_thing.id, &thing.id, None) {
+            if let Err(e) = self.state.db.room_unequip(&room.id, &thing.id, None) {
                 return format!("Error unequipping {}: {}", thing.name, e);
             }
             unequipped_count += 1;
