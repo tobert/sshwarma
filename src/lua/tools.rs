@@ -1369,6 +1369,110 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     })?;
     tools.set("execute_code", execute_code_fn)?;
 
+    // thing_create(opts) -> thing table or error
+    // opts: {qualified_name, name, description?, code?, default_slot?, params?}
+    let thing_create_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, opts: Table| -> mlua::Result<Value> {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            // Get required fields
+            let qualified_name: String = opts.get("qualified_name")?;
+            let name: String = opts.get("name")?;
+
+            // Get optional fields
+            let description: Option<String> = opts.get("description").ok();
+            let code: Option<String> = opts.get("code").ok();
+            let default_slot: Option<String> = opts.get("default_slot").ok();
+            let params: Option<String> = opts.get("params").ok();
+            let created_by: Option<String> = opts.get("created_by").ok();
+
+            // Create the thing
+            use crate::db::things::Thing;
+            let mut thing = Thing::tool(&name, &qualified_name).with_parent("internal");
+            thing.description = description;
+            thing.code = code;
+            thing.default_slot = default_slot;
+            thing.params = params;
+            thing.created_by = created_by;
+
+            match shared.db.upsert_thing_by_qualified_name(&thing) {
+                Ok(()) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    result.set("id", thing.id.clone())?;
+                    result.set("qualified_name", qualified_name)?;
+                    result.set("name", name)?;
+                    Ok(Value::Table(result))
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(Value::Table(result))
+                }
+            }
+        })?
+    };
+    tools.set("thing_create", thing_create_fn)?;
+
+    // thing_delete(qualified_name) -> {success, error?}
+    let thing_delete_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, qualified_name: String| -> mlua::Result<Value> {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            // Find the thing first
+            let thing = match shared.db.get_thing_by_qualified_name(&qualified_name) {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", "thing not found")?;
+                    return Ok(Value::Table(result));
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            // Soft delete
+            match shared.db.soft_delete_thing(&thing.id) {
+                Ok(()) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    Ok(Value::Table(result))
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(Value::Table(result))
+                }
+            }
+        })?
+    };
+    tools.set("thing_delete", thing_delete_fn)?;
+
     // things_children(parent_id) -> array of thing tables
     let things_children_fn = {
         let state = state.clone();

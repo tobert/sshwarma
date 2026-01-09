@@ -160,6 +160,9 @@ const COMMANDS_DEBUG_MODULE: &str = include_str!("../embedded/commands/debug.lua
 /// Embedded reload commands
 const COMMANDS_RELOAD_MODULE: &str = include_str!("../embedded/commands/reload.lua");
 
+/// Embedded conjure commands
+const COMMANDS_CONJURE_MODULE: &str = include_str!("../embedded/commands/conjure.lua");
+
 /// Registry of embedded Lua modules
 ///
 /// Provides module lookup for the custom require system.
@@ -209,6 +212,7 @@ impl EmbeddedModules {
         modules.insert("commands.history".to_string(), COMMANDS_HISTORY_MODULE);
         modules.insert("commands.debug".to_string(), COMMANDS_DEBUG_MODULE);
         modules.insert("commands.reload".to_string(), COMMANDS_RELOAD_MODULE);
+        modules.insert("commands.conjure".to_string(), COMMANDS_CONJURE_MODULE);
 
         Self { modules }
     }
@@ -482,6 +486,11 @@ impl LuaRuntime {
                 "commands.reload",
                 COMMANDS_RELOAD_MODULE,
                 "embedded:commands/reload.lua",
+            ),
+            (
+                "commands.conjure",
+                COMMANDS_CONJURE_MODULE,
+                "embedded:commands/conjure.lua",
             ),
         ];
 

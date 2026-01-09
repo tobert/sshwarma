@@ -37,6 +37,9 @@ local debug = require("commands.debug")
 -- Reload commands (reload, reload default)
 local reload = require("commands.reload")
 
+-- Conjure commands (conjure, unconjure)
+local conjure = require("commands.conjure")
+
 -- ============================================================================
 -- System commands (inline implementations)
 -- ============================================================================
@@ -178,6 +181,10 @@ local handlers = {
 
     -- Reload (from commands.reload)
     ["reload"] = reload.reload,
+
+    -- Conjure (from commands.conjure)
+    ["conjure"]   = conjure.conjure,
+    ["unconjure"] = conjure.unconjure,
 
     -- System (inline)
     ["help"]  = cmd_help,
