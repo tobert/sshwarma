@@ -311,12 +311,9 @@ src/
 │       ├── renderer.rs   # Calls Lua to render HUD
 │       └── spinner.rs    # Spinner animation frames
 │
-├── ui/                   # New Lua-driven UI system
+├── ui/                   # Lua-driven UI system
 │   ├── mod.rs            # UI module exports
-│   ├── layout.rs         # Region constraint resolver (anchors, percentages)
-│   ├── render.rs         # RenderBuffer, DrawContext, widgets (gauge, sparkline)
-│   ├── input.rs          # Key handling, InputBuffer, completion system
-│   └── scroll.rs         # ScrollState, ViewStack, tail/pinned modes
+│   └── render.rs         # RenderBuffer, DrawContext, widgets (gauge, sparkline)
 │
 ├── rules.rs              # Room rules engine (glob matching, tick triggers)
 │
@@ -357,8 +354,6 @@ src/
 │
 ├── mcp_server.rs         # MCP server: expose sshwarma to Claude Code
 │
-├── ansi.rs               # ANSI escape sequence parser
-├── line_editor.rs        # Readline-style input with completion
 ├── comm.rs               # Broadcast utilities
 └── lib.rs                # Library exports
 
@@ -427,10 +422,10 @@ Currently, the HUD uses this system. Full chat rendering integration is in progr
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| `ui/layout.rs` | Ready | Region constraint system, tested |
 | `ui/render.rs` | Ready | RenderBuffer, DrawContext, widgets |
-| `ui/input.rs` | Ready | InputBuffer, completion, Lua bindings |
-| `ui/scroll.rs` | Ready | ScrollState, ViewStack, Lua bindings |
+| `embedded/ui/input.lua` | Ready | Input buffer, key parsing, history |
+| `embedded/ui/mode.lua` | Ready | Vim-style normal/insert modes |
+| `embedded/ui/layout.lua` | Ready | Bar layout, 1-indexed rows |
 | `db/rows.rs` | Ready | Row CRUD, tags, fractional indexing |
 | `db/buffers.rs` | Ready | Buffer CRUD, tombstoning |
 | `db/agents.rs` | Ready | Unified agent model |
@@ -503,10 +498,24 @@ This applies to commands.rs, internal_tools.rs, and any async code that needs sy
 
 ### Version Control
 
-- Never use wildcards when staging files
-- Add files by explicit path
-- Review with `git diff --staged` before committing
-- Use Co-Authored-By for model attributions
+**Commit workflow:**
+1. Run `cargo test` before committing
+2. **Always** stage files by explicit path
+3. Review with `git diff --staged`
+4. Commit with Co-Authored-By attribution
+
+Use `git -C /path/to/repo` for precision - explicit paths help avoid mistakes.
+
+**History philosophy:**
+- Each commit on main is permanent history - treat it that way
+- Fix commits are good commits - they document the journey
+- When something breaks after a commit, create a new fix commit
+- Reserve `--amend` for typos caught immediately, before any other work
+
+**Why this matters:**
+- Tests catch issues before they become commits
+- Fix commits show what went wrong and how it was resolved
+- Amending rewrites history, which complicates collaboration and obscures learning
 
 ### Testing
 
