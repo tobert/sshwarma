@@ -86,10 +86,7 @@ loaded.set("foo", chunk)?;  // for require()
 
 **Multiple return values**: Wrap in parens to capture only first:
 ```lua
--- BAD: gsub returns (result, count)
-table.insert(lines, chunk:gsub("%s+$", ""))
-
--- GOOD
+-- GOOD: gsub returns (result, count)
 table.insert(lines, (chunk:gsub("%s+$", "")))
 ```
 
@@ -102,10 +99,7 @@ table.insert(lines, (chunk:gsub("%s+$", "")))
 
 **Async/blocking**: Wrap blocking locks in async contexts:
 ```rust
-// BAD: panics
-let world = self.state.world.blocking_write();
-
-// GOOD
+// GOOD: block_in_place prevents panics on blocking writes
 let world = tokio::task::block_in_place(|| self.state.world.blocking_write());
 ```
 
