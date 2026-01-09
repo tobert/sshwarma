@@ -335,7 +335,7 @@ impl SshHandler {
             server.run()
         };
 
-        // Register internal sshwarma tools
+        // Register internal sshwarma tools (filtered by equipment status)
         let room_for_tools = room_name.clone().unwrap_or_else(|| "lobby".to_string());
         let in_room = room_name.is_some();
 
@@ -352,6 +352,7 @@ impl SshHandler {
                 tool_ctx,
                 &config,
                 in_room,
+                &equipped_tools,
             )
             .await
             {

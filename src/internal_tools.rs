@@ -58,39 +58,89 @@ pub struct ToolContext {
 ///
 /// Note: Must use add_tool (not append_toolset) because rig's append_toolset
 /// doesn't add tools to static_tool_names, making them invisible to get_tool_defs.
+///
+/// Tools are filtered by equipped_tools: only tools whose corresponding
+/// sshwarma:* qualified name is in the set will be registered. If equipped_tools
+/// is empty, all tools are registered (backward compatibility).
 pub async fn register_tools(
     handle: &rig::tool::server::ToolServerHandle,
     ctx: ToolContext,
     config: &InternalToolConfig,
     include_write_tools: bool,
+    equipped_tools: &std::collections::HashSet<String>,
 ) -> anyhow::Result<usize> {
     let mut count = 0;
 
-    // Read-only tools (always available)
-    handle.add_tool(SshwarmaLook { ctx: ctx.clone() }).await?;
-    handle.add_tool(SshwarmaWho { ctx: ctx.clone() }).await?;
-    handle.add_tool(SshwarmaRooms { ctx: ctx.clone() }).await?;
-    handle
-        .add_tool(SshwarmaHistory { ctx: ctx.clone() })
-        .await?;
-    handle.add_tool(SshwarmaExits { ctx: ctx.clone() }).await?;
-    handle.add_tool(SshwarmaTools { ctx: ctx.clone() }).await?;
-    count += 6;
+    // Helper to check if a tool should be registered
+    let should_register = |name: &str| -> bool {
+        if equipped_tools.is_empty() {
+            true // No filtering when empty (backward compatibility)
+        } else {
+            equipped_tools.contains(&format!("sshwarma:{}", name))
+        }
+    };
 
-    // Write tools (only when in a room)
+    // Read-only tools (available if equipped)
+    if should_register("look") {
+        handle.add_tool(SshwarmaLook { ctx: ctx.clone() }).await?;
+        count += 1;
+    }
+    if should_register("who") {
+        handle.add_tool(SshwarmaWho { ctx: ctx.clone() }).await?;
+        count += 1;
+    }
+    if should_register("rooms") {
+        handle.add_tool(SshwarmaRooms { ctx: ctx.clone() }).await?;
+        count += 1;
+    }
+    if should_register("history") {
+        handle
+            .add_tool(SshwarmaHistory { ctx: ctx.clone() })
+            .await?;
+        count += 1;
+    }
+    if should_register("exits") {
+        handle.add_tool(SshwarmaExits { ctx: ctx.clone() }).await?;
+        count += 1;
+    }
+    if should_register("tools") {
+        handle.add_tool(SshwarmaTools { ctx: ctx.clone() }).await?;
+        count += 1;
+    }
+
+    // Write tools (only when in a room and equipped)
     if include_write_tools {
-        handle.add_tool(SshwarmaSay { ctx: ctx.clone() }).await?;
-        handle.add_tool(SshwarmaVibe { ctx: ctx.clone() }).await?;
-        count += 2;
+        if should_register("say") {
+            handle.add_tool(SshwarmaSay { ctx: ctx.clone() }).await?;
+            count += 1;
+        }
+        if should_register("vibe") {
+            handle.add_tool(SshwarmaVibe { ctx: ctx.clone() }).await?;
+            count += 1;
+        }
 
-        // Navigation tools (toggleable per-room)
+        // Navigation tools (toggleable per-room and must be equipped)
         if config.enable_navigation {
-            handle.add_tool(SshwarmaJoin { ctx: ctx.clone() }).await?;
-            handle.add_tool(SshwarmaLeave { ctx: ctx.clone() }).await?;
-            handle.add_tool(SshwarmaGo { ctx: ctx.clone() }).await?;
-            handle.add_tool(SshwarmaCreate { ctx: ctx.clone() }).await?;
-            handle.add_tool(SshwarmaFork { ctx: ctx.clone() }).await?;
-            count += 5;
+            if should_register("join") {
+                handle.add_tool(SshwarmaJoin { ctx: ctx.clone() }).await?;
+                count += 1;
+            }
+            if should_register("leave") {
+                handle.add_tool(SshwarmaLeave { ctx: ctx.clone() }).await?;
+                count += 1;
+            }
+            if should_register("go") {
+                handle.add_tool(SshwarmaGo { ctx: ctx.clone() }).await?;
+                count += 1;
+            }
+            if should_register("create") {
+                handle.add_tool(SshwarmaCreate { ctx: ctx.clone() }).await?;
+                count += 1;
+            }
+            if should_register("fork") {
+                handle.add_tool(SshwarmaFork { ctx: ctx.clone() }).await?;
+                count += 1;
+            }
         }
     }
 
