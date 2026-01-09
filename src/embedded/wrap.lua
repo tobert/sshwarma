@@ -68,26 +68,6 @@ local function partition_who(who)
            fun.iter(models):map(function(p) return p.name end):totable()
 end
 
---- Get qualified name for an equipped tool
-local function tool_name(eq)
-    return eq.qualified_name or eq.name
-end
-
---- Check if a tool is internal (sshwarma:*)
-local function is_internal_tool(eq)
-    return tool_name(eq):match("^sshwarma:")
-end
-
---- Filter equipped tools by namespace
---- Returns internal tools (sshwarma:*) and external tools (everything else)
-local function partition_tools(equipped)
-    if not equipped or #equipped == 0 then
-        return {}, {}
-    end
-    local internal, external = fun.partition(is_internal_tool, equipped)
-    return fun.totable(internal), fun.totable(external)
-end
-
 --------------------------------------------------------------------------------
 -- ANSI segment helpers (produce {Text, Fg, Bg} tables for TTY rendering)
 --------------------------------------------------------------------------------
@@ -337,96 +317,6 @@ local function format_equipped_layer()
         else
             table.insert(lines, "- **" .. name .. "**")
         end
-    end
-
-    return layer_result(table.concat(lines, "\n"))
-end
-
---- Format internal tools layer (sshwarma:* only)
---- Shows only the internal navigation and room tools
-local function format_internal_tools_layer()
-    local look = tools.look()
-    if not look or not look.room then
-        return layer_result("")
-    end
-
-    -- Get room thing ID
-    local room_id = get_room_thing_id(look.room)
-    if not room_id then
-        return layer_result("")
-    end
-
-    -- Get equipped tools
-    local equipped = tools.equipped_tools(room_id)
-    if not equipped or #equipped == 0 then
-        equipped = tools.equipped_tools("defaults")
-    end
-
-    local internal = (partition_tools(equipped))  -- first return value only
-    if #internal == 0 then
-        return layer_result("")
-    end
-
-    local lines = {"## Room Functions", "Built-in sshwarma functions for navigating and interacting:", ""}
-
-    -- Format each tool as a list item
-    local items = fun.iter(internal):map(function(eq)
-        local display = tool_name(eq):gsub("^sshwarma:", "")
-        local desc = eq.description or ""
-        if desc ~= "" then
-            return "- **" .. display .. "**: " .. desc
-        else
-            return "- **" .. display .. "**"
-        end
-    end):totable()
-
-    for _, item in ipairs(items) do
-        table.insert(lines, item)
-    end
-
-    return layer_result(table.concat(lines, "\n"))
-end
-
---- Format external tools layer (non-sshwarma:* tools)
---- Shows MCP tools and other external capabilities
-local function format_external_tools_layer()
-    local look = tools.look()
-    if not look or not look.room then
-        return layer_result("")
-    end
-
-    -- Get room thing ID
-    local room_id = get_room_thing_id(look.room)
-    if not room_id then
-        return layer_result("")
-    end
-
-    -- Get equipped tools
-    local equipped = tools.equipped_tools(room_id)
-    if not equipped or #equipped == 0 then
-        return layer_result("")
-    end
-
-    local _, external = partition_tools(equipped)
-    if #external == 0 then
-        return layer_result("")
-    end
-
-    local lines = {"## External Tools", "MCP tools available in this room:", ""}
-
-    -- Format each tool as a list item
-    local items = fun.iter(external):map(function(eq)
-        local name = tool_name(eq)
-        local desc = eq.description or ""
-        if desc ~= "" then
-            return "- **" .. name .. "**: " .. desc
-        else
-            return "- **" .. name .. "**"
-        end
-    end):totable()
-
-    for _, item in ipairs(items) do
-        table.insert(lines, item)
     end
 
     return layer_result(table.concat(lines, "\n"))
@@ -739,16 +629,6 @@ end
 -- Priority 5 puts it early in system prompt (after system, before model)
 function WrapBuilder:equipped()
     return self:add_source("equipped", 5, format_equipped_layer, true)
-end
-
--- Built-in source: Internal sshwarma tools only
-function WrapBuilder:internal_tools()
-    return self:add_source("internal_tools", 5, format_internal_tools_layer, true)
-end
-
--- Built-in source: External MCP tools only
-function WrapBuilder:external_tools()
-    return self:add_source("external_tools", 6, format_external_tools_layer, true)
 end
 
 -- Built-in source: Named prompts
