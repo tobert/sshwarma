@@ -80,15 +80,6 @@ local function seg(text, fg, bg)
     return s
 end
 
---- Pad a string to a given width (visible chars only)
-local function pad(str, width)
-    local len = #str  -- approximate for ASCII, emoji will be off
-    if len >= width then
-        return str
-    end
-    return str .. string.rep(" ", width - len)
-end
-
 --- Create a box row with left border, content segments, right border
 local function box_row(inner_width, content_segments)
     local row = { seg(box.v, colors.dim) }
@@ -223,10 +214,10 @@ local function format_history_layer(limit)
         return layer_result("")
     end
 
-    local lines = {"## Recent Conversation"}
-    for _, msg in ipairs(messages) do
-        table.insert(lines, msg.author .. ": " .. msg.content)
-    end
+    local lines = fun.chain(
+        {"## Recent Conversation"},
+        fun.iter(messages):map(function(msg) return msg.author .. ": " .. msg.content end)
+    ):totable()
 
     return layer_result(table.concat(lines, "\n"))
 end
@@ -238,10 +229,10 @@ local function format_journal_layer(kind, limit)
         return layer_result("")
     end
 
-    local lines = {"## Journal"}
-    for _, entry in ipairs(entries) do
-        table.insert(lines, "[" .. entry.kind .. "] " .. entry.content)
-    end
+    local lines = fun.chain(
+        {"## Journal"},
+        fun.iter(entries):map(function(e) return "[" .. e.kind .. "] " .. e.content end)
+    ):totable()
 
     return layer_result(table.concat(lines, "\n"))
 end
@@ -253,10 +244,10 @@ local function format_inspirations_layer()
         return layer_result("")
     end
 
-    local lines = {"## Inspirations"}
-    for _, insp in ipairs(inspirations) do
-        table.insert(lines, "- " .. insp.content)
-    end
+    local lines = fun.chain(
+        {"## Inspirations"},
+        fun.iter(inspirations):map(function(insp) return "- " .. insp.content end)
+    ):totable()
 
     return layer_result(table.concat(lines, "\n"))
 end
@@ -305,19 +296,18 @@ local function format_equipped_layer()
         return layer_result("")
     end
 
-    local lines = {"## Your Functions"}
-    lines[2] = "You have access to the following tools in this room:"
-    lines[3] = ""
-
-    for _, eq in ipairs(equipped) do
-        local name = eq.qualified_name or eq.name
-        local desc = eq.description or ""
-        if desc ~= "" then
-            table.insert(lines, "- **" .. name .. "**: " .. desc)
-        else
-            table.insert(lines, "- **" .. name .. "**")
-        end
-    end
+    local lines = fun.chain(
+        {"## Your Functions", "You have access to the following tools in this room:", ""},
+        fun.iter(equipped):map(function(eq)
+            local name = eq.qualified_name or eq.name
+            local desc = eq.description or ""
+            if desc ~= "" then
+                return "- **" .. name .. "**: " .. desc
+            else
+                return "- **" .. name .. "**"
+            end
+        end)
+    ):totable()
 
     return layer_result(table.concat(lines, "\n"))
 end
@@ -463,9 +453,9 @@ local function format_look_markdown()
     if exits and next(exits) then
         table.insert(lines, "")
         table.insert(lines, "### Exits")
-        for dir, room in pairs(exits) do
-            table.insert(lines, "- " .. dir .. " -> " .. room)
-        end
+        fun.iter(exits)
+            :map(function(dir, room) return "- " .. dir .. " -> " .. room end)
+            :each(function(line) table.insert(lines, line) end)
     end
 
     return table.concat(lines, "\n")
@@ -486,43 +476,17 @@ local function format_model_prompts_layer()
         return layer_result("")
     end
 
-    local lines = {"## Model Instructions"}
-    for _, slot in ipairs(prompts) do
-        if slot.content then
-            table.insert(lines, slot.content)
-        end
+    local contents = fun.iter(prompts)
+        :filter(function(slot) return slot.content end)
+        :map(function(slot) return slot.content end)
+        :totable()
+
+    if #contents == 0 then
+        return layer_result("")
     end
 
-    if #lines == 1 then
-        return layer_result("")  -- Only header, no content
-    end
-
+    local lines = fun.chain({"## Model Instructions"}, contents):totable()
     return layer_result(table.concat(lines, "\n\n"))
-end
-
---- Format user context layer (new prompt system)
---- Gets prompts assigned to the current user to help model understand them
-local function format_user_prompts_layer()
-    local user = tools.current_user()
-    if not user then return layer_result("") end
-
-    local prompts = tools.get_target_prompts(user.name)
-    if not prompts or #prompts == 0 then
-        return layer_result("")
-    end
-
-    local lines = {"### User Context"}
-    for _, slot in ipairs(prompts) do
-        if slot.content then
-            table.insert(lines, "- " .. slot.prompt_name .. ": " .. slot.content)
-        end
-    end
-
-    if #lines == 1 then
-        return layer_result("")
-    end
-
-    return layer_result(table.concat(lines, "\n"))
 end
 
 --- Format the current user layer (enhanced with prompts)
@@ -532,22 +496,27 @@ local function format_user_with_prompts_layer()
         return layer_result("## Current User\nUnknown user.\n")
     end
 
-    local lines = {"## Current User"}
-    table.insert(lines, "You are talking with **" .. user.name .. "**.")
+    local base = {"## Current User", "You are talking with **" .. user.name .. "**."}
 
     -- Add user's prompts if any
     local prompts = tools.get_target_prompts(user.name)
     if prompts and #prompts > 0 then
-        table.insert(lines, "")
-        table.insert(lines, "### About " .. user.name)
-        for _, slot in ipairs(prompts) do
-            if slot.content then
-                table.insert(lines, "- " .. slot.content)
-            end
+        local prompt_lines = fun.iter(prompts)
+            :filter(function(slot) return slot.content end)
+            :map(function(slot) return "- " .. slot.content end)
+            :totable()
+
+        if #prompt_lines > 0 then
+            local lines = fun.chain(
+                base,
+                {"", "### About " .. user.name},
+                prompt_lines
+            ):totable()
+            return layer_result(table.concat(lines, "\n"))
         end
     end
 
-    return layer_result(table.concat(lines, "\n"))
+    return layer_result(table.concat(base, "\n"))
 end
 
 --------------------------------------------------------------------------------
@@ -738,3 +707,8 @@ _G.WrapBuilder = WrapBuilder
 -- Look functions (for /look command and sshwarma_look tool)
 _G.look_ansi = format_look_ansi
 _G.look_markdown = format_look_markdown
+
+-- Test helpers (for unit testing internal functions)
+_G._test = {
+    partition_who = partition_who,
+}

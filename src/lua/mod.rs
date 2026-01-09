@@ -2240,6 +2240,209 @@ mod tests {
             .expect("estimate_tokens should work");
     }
 
+    #[test]
+    fn test_partition_who_basic() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local who = {
+                {name = "alice", is_model = false},
+                {name = "bob", is_model = false},
+                {name = "qwen", is_model = true},
+                {name = "claude", is_model = true},
+            }
+            local users, models = _test.partition_who(who)
+
+            assert(#users == 2, "should have 2 users, got " .. #users)
+            assert(#models == 2, "should have 2 models, got " .. #models)
+            assert(users[1] == "alice" or users[1] == "bob", "first user should be alice or bob")
+            assert(models[1] == "qwen" or models[1] == "claude", "first model should be qwen or claude")
+        "#,
+            )
+            .exec()
+            .expect("partition_who basic test should pass");
+    }
+
+    #[test]
+    fn test_partition_who_empty() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local users, models = _test.partition_who({})
+            assert(#users == 0, "empty input should give empty users")
+            assert(#models == 0, "empty input should give empty models")
+        "#,
+            )
+            .exec()
+            .expect("partition_who empty test should pass");
+    }
+
+    #[test]
+    fn test_partition_who_nil() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local users, models = _test.partition_who(nil)
+            assert(#users == 0, "nil input should give empty users")
+            assert(#models == 0, "nil input should give empty models")
+        "#,
+            )
+            .exec()
+            .expect("partition_who nil test should pass");
+    }
+
+    #[test]
+    fn test_partition_who_all_users() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local who = {
+                {name = "alice", is_model = false},
+                {name = "bob", is_model = false},
+            }
+            local users, models = _test.partition_who(who)
+
+            assert(#users == 2, "should have 2 users")
+            assert(#models == 0, "should have 0 models")
+        "#,
+            )
+            .exec()
+            .expect("partition_who all users test should pass");
+    }
+
+    #[test]
+    fn test_partition_who_all_models() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local who = {
+                {name = "qwen", is_model = true},
+                {name = "claude", is_model = true},
+            }
+            local users, models = _test.partition_who(who)
+
+            assert(#users == 0, "should have 0 users")
+            assert(#models == 2, "should have 2 models")
+        "#,
+            )
+            .exec()
+            .expect("partition_who all models test should pass");
+    }
+
+    #[test]
+    fn test_wrap_budget_calculation() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            -- Create a builder with a known budget
+            local w = wrap(10000)
+                :custom("small", "x", 1, true)   -- system
+                :custom("small2", "y", 2, false) -- context
+
+            -- System budget should be 25% = 2500 tokens
+            -- Context budget should be 75% = 7500 tokens
+            -- Both "x" and "y" are tiny so should not exceed budgets
+
+            local system = w:system_prompt()
+            local context = w:context()
+
+            assert(system == "x", "system prompt should be 'x', got: " .. system)
+            assert(context == "y", "context should be 'y', got: " .. context)
+        "#,
+            )
+            .exec()
+            .expect("budget calculation test should pass");
+    }
+
+    #[test]
+    fn test_wrap_budget_overflow() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        let result = runtime.lua().load(
+            r#"
+            -- Create a builder with tiny budget (100 tokens = 400 chars)
+            -- System gets 25% = 25 tokens = 100 chars
+            local big_content = string.rep("x", 500)  -- 500 chars = 125 tokens
+            local w = wrap(100)
+                :custom("big", big_content, 1, true)
+
+            -- This should error because 125 tokens > 25 token budget
+            w:system_prompt()
+        "#,
+        ).exec();
+
+        assert!(result.is_err(), "should error on budget overflow");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds budget"),
+            "error should mention budget exceeded: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_look_markdown_lobby() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        let result: String = runtime
+            .lua()
+            .load(r#"return look_markdown()"#)
+            .eval()
+            .expect("look_markdown should work");
+
+        // Without room context, should return lobby message
+        assert!(
+            result.contains("Lobby"),
+            "should mention lobby: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_look_ansi_lobby() {
+        let runtime = LuaRuntime::new().expect("should create runtime");
+
+        runtime
+            .lua()
+            .load(
+                r#"
+            local rows = look_ansi()
+            -- Should return an array of rows (for lobby, 3 rows: top border, lobby text, bottom border)
+            assert(type(rows) == "table", "should return a table")
+            assert(#rows >= 3, "should have at least 3 rows for lobby box, got " .. #rows)
+
+            -- Each row should be an array of segments
+            for i, row in ipairs(rows) do
+                assert(type(row) == "table", "row " .. i .. " should be a table")
+                for j, seg in ipairs(row) do
+                    assert(type(seg) == "table", "segment should be a table")
+                    assert(seg.Text ~= nil, "segment should have Text field")
+                end
+            end
+        "#,
+            )
+            .exec()
+            .expect("look_ansi lobby test should pass");
+    }
+
     // =========================================================================
     // Hot-reload tests
     // =========================================================================
