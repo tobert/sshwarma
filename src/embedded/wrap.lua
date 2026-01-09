@@ -282,6 +282,61 @@ local function format_equipped_layer()
     return layer_result(table.concat(lines, "\n"))
 end
 
+--- Format the wrap hooks layer
+--- Executes all hook:wrap things equipped to the room and includes their output
+local function format_wrap_hooks_layer()
+    local session = tools.session()
+    if not session or not session.room_name then
+        return layer_result("")
+    end
+
+    -- Get hook:wrap equipment for this room
+    local hooks = tools.get_room_equipment(session.room_name, "hook:wrap")
+    if not hooks or #hooks == 0 then
+        return layer_result("")
+    end
+
+    local results = {}
+    for _, hook in ipairs(hooks) do
+        -- Get the thing's code
+        local thing = tools.thing_get_by_id(hook.thing_id)
+        if thing and thing.code then
+            -- Execute the thing's code
+            local ok, result = pcall(function()
+                return tools.execute_code(thing.code, {})
+            end)
+            if ok and result then
+                -- If result is a string, use it directly
+                -- If result is a table with content, use that
+                local content
+                if type(result) == "string" then
+                    content = result
+                elseif type(result) == "table" and result.content then
+                    content = result.content
+                elseif type(result) == "table" and result.text then
+                    content = result.text
+                end
+                if content and content ~= "" then
+                    table.insert(results, content)
+                end
+            else
+                -- Log hook execution errors but continue
+                tools.log_warn(string.format(
+                    "wrap hook %s failed: %s",
+                    hook.qualified_name or hook.thing_id,
+                    tostring(result)
+                ))
+            end
+        end
+    end
+
+    if #results == 0 then
+        return layer_result("")
+    end
+
+    return layer_result(table.concat(results, "\n\n"))
+end
+
 --------------------------------------------------------------------------------
 -- ANSI formatters for /look command (TTY output)
 --------------------------------------------------------------------------------
@@ -499,6 +554,13 @@ function WrapBuilder:equipped()
     return self:add_source("equipped", 5, format_equipped_layer, true)
 end
 
+-- Built-in source: Wrap hooks (hook:wrap things)
+-- Priority 15 puts it after model identity but before user/room context
+-- These are dynamic context injections from equipped things
+function WrapBuilder:wrap_hooks()
+    return self:add_source("wrap_hooks", 15, format_wrap_hooks_layer, false)
+end
+
 -- Add a custom source with explicit content
 function WrapBuilder:custom(name, content, priority, is_system)
     priority = priority or 50
@@ -577,6 +639,7 @@ function default_wrap(target_tokens)
         :system()
         :equipped()          -- Show equipped tools from inventory (before model identity)
         :model_identity()
+        :wrap_hooks()        -- Execute hook:wrap things for dynamic context
         :user()
         :room()
         :participants()
