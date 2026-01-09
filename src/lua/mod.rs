@@ -27,7 +27,7 @@ pub use wrap::{WrapResult, WrapState};
 // Re-export startup script path for main.rs
 pub use self::startup_script_path as get_startup_script_path;
 
-use crate::lua::tools::register_tools;
+use crate::lua::tools::{json_to_lua, lua_to_json, register_tools};
 use crate::paths;
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
@@ -585,6 +585,30 @@ impl LuaRuntime {
         }
 
         Ok(runtime)
+    }
+
+    /// Execute Lua code string with the given args
+    ///
+    /// The code is expected to return a function that will be called with args.
+    /// Example: `return function(args) return args.tick end`
+    pub fn execute_code(&self, code: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+        // Load and evaluate the code to get a function
+        let chunk = self.lua.load(code);
+        let func: mlua::Function = chunk
+            .eval()
+            .map_err(|e| anyhow::anyhow!("failed to load code: {}", e))?;
+
+        // Convert args to Lua value
+        let lua_args = json_to_lua(&self.lua, &args)
+            .map_err(|e| anyhow::anyhow!("failed to convert args: {}", e))?;
+
+        // Call the function with args
+        let result: mlua::Value = func
+            .call(lua_args)
+            .map_err(|e| anyhow::anyhow!("execution error: {}", e))?;
+
+        // Convert result back to JSON
+        lua_to_json(&result).map_err(|e| anyhow::anyhow!("failed to convert result: {}", e))
     }
 
     /// Run the startup script if it exists

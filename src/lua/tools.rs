@@ -2962,7 +2962,7 @@ impl UserData for LuaToolStateWrapper {
 }
 
 /// Convert serde_json::Value to mlua::Value
-fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<Value> {
+pub(crate) fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<Value> {
     match value {
         serde_json::Value::Null => Ok(Value::Nil),
         serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
@@ -2992,7 +2992,7 @@ fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<Value> {
 }
 
 /// Convert mlua::Value to serde_json::Value
-fn lua_to_json(value: &Value) -> LuaResult<serde_json::Value> {
+pub(crate) fn lua_to_json(value: &Value) -> LuaResult<serde_json::Value> {
     match value {
         Value::Nil => Ok(serde_json::Value::Null),
         Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
