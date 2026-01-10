@@ -87,6 +87,10 @@ local normal_keys = {
     -- Page operations
     ["q"] = function()
         if pages.close() then
+            -- Mark chat dirty so content area refreshes
+            if tools and tools.mark_dirty then
+                tools.mark_dirty("chat")
+            end
             return { type = "redraw" }
         end
         return nil
@@ -100,6 +104,10 @@ local normal_keys = {
     escape = function()
         if not pages.is_chat() then
             pages.close()
+            -- Mark chat dirty so content area refreshes
+            if tools and tools.mark_dirty then
+                tools.mark_dirty("chat")
+            end
         end
         return { type = "redraw" }
     end,
