@@ -28,6 +28,8 @@ pub struct SessionContext {
     pub model: Option<ModelHandle>,
     /// Current room name (None if in lobby)
     pub room_name: Option<String>,
+    /// Current room ID (UUID from rooms table)
+    pub room_id: Option<String>,
 }
 
 /// Current input line state for Lua rendering
@@ -522,11 +524,14 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             let spinner_frame = ((now / 100) % 10) as u8;
             result.set("spinner_frame", spinner_frame)?;
 
-            // Add session context (username, room_name)
+            // Add session context (username, room_name, room_id)
             if let Some(ctx) = state.session_context() {
                 result.set("username", ctx.username)?;
                 if let Some(ref room) = ctx.room_name {
                     result.set("room_name", room.clone())?;
+                }
+                if let Some(ref room_id) = ctx.room_id {
+                    result.set("room_id", room_id.clone())?;
                 }
             }
 
@@ -1929,11 +1934,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(room_summary) => {
+                    // Look up room_id from room_name
+                    let room_id = shared.db.get_room_by_name(&room_name)
+                        .ok().flatten().map(|r| r.id);
+
                     // Update session context with new room
                     state.set_session_context(Some(crate::lua::SessionContext {
                         username: session.username.clone(),
                         model: None,
                         room_name: Some(room_name.clone()),
+                        room_id,
                     }));
 
                     result.set("success", true)?;
@@ -2003,11 +2013,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                     ))
                 }) {
                     Ok(room_summary) => {
+                        // Look up room_id from room_name
+                        let room_id = shared.db.get_room_by_name(&room_name)
+                            .ok().flatten().map(|r| r.id);
+
                         // Update session context with new room (create auto-joins)
                         state.set_session_context(Some(crate::lua::SessionContext {
                             username: session.username.clone(),
                             model: None,
                             room_name: Some(room_name.clone()),
+                            room_id,
                         }));
 
                         result.set("success", true)?;
@@ -2074,6 +2089,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                         username: session.username.clone(),
                         model: None,
                         room_name: None,
+                        room_id: None,
                     }));
 
                     result.set("success", true)?;
@@ -2132,11 +2148,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(room_summary) => {
+                    // Look up room_id from room_name
+                    let room_id = shared.db.get_room_by_name(&room_summary.name)
+                        .ok().flatten().map(|r| r.id);
+
                     // Update session context with new room
                     state.set_session_context(Some(crate::lua::SessionContext {
                         username: session.username.clone(),
                         model: None,
                         room_name: Some(room_summary.name.clone()),
+                        room_id,
                     }));
 
                     result.set("success", true)?;
@@ -2263,11 +2284,16 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 ))
             }) {
                 Ok(room_summary) => {
+                    // Look up room_id from new room name
+                    let room_id = shared.db.get_room_by_name(&new_name)
+                        .ok().flatten().map(|r| r.id);
+
                     // Update session context with new room (fork auto-joins)
                     state.set_session_context(Some(crate::lua::SessionContext {
                         username: session.username.clone(),
                         model: None,
                         room_name: Some(new_name.clone()),
+                        room_id,
                     }));
 
                     result.set("success", true)?;
@@ -3298,10 +3324,12 @@ mod tests {
         /// Get a SessionContext for this instance
         fn session_context(&self, room: &str) -> SessionContext {
             let model = self.models.get("test").cloned();
+            let room_id = self.db.get_room_by_name(room).ok().flatten().map(|r| r.id);
             SessionContext {
                 username: "testuser".to_string(),
                 model,
                 room_name: Some(room.to_string()),
+                room_id,
             }
         }
 

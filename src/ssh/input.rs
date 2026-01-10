@@ -111,6 +111,11 @@ impl SshHandler {
         };
 
         let room_name = self.current_room().await;
+        let room_id = if let Some(ref name) = room_name {
+            self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+        } else {
+            None
+        };
         let username = player.username.clone();
 
         // Add user's message to buffer
@@ -144,6 +149,7 @@ impl SshHandler {
                     username: username.clone(),
                     model: Some(model.clone()),
                     room_name: room_name.clone(),
+                    room_id: room_id.clone(),
                 }));
             lua.tool_state()
                 .set_status(&model.short_name, Status::Thinking);
@@ -181,6 +187,11 @@ impl SshHandler {
         // Get session info for context
         let username = self.player.as_ref().map(|p| p.username.clone());
         let room_name = self.current_room().await;
+        let room_id = if let Some(ref name) = room_name {
+            self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+        } else {
+            None
+        };
 
         let lua = lua_runtime.lock().await;
 
@@ -191,6 +202,7 @@ impl SshHandler {
                     username: user.clone(),
                     model: None,
                     room_name: room_name.clone(),
+                    room_id: room_id.clone(),
                 }));
         }
 

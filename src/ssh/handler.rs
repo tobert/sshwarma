@@ -190,6 +190,13 @@ impl SshHandler {
         // Get/create room buffer
         let buffer = self.state.db.get_or_create_room_buffer(room_name)?;
 
+        // Get room ID from database
+        let room_id = self
+            .state
+            .db
+            .get_room_by_name(room_name)?
+            .map(|r| r.id);
+
         // Update session state
         {
             let mut sess = self.session_state.lock().await;
@@ -210,6 +217,7 @@ impl SshHandler {
                         username: player.username.clone(),
                         model: None,
                         room_name: Some(room_name.to_string()),
+                        room_id: room_id.clone(),
                     }));
             }
         }
@@ -285,6 +293,7 @@ impl SshHandler {
                         username: player.username.clone(),
                         model: None,
                         room_name: None,
+                        room_id: None,
                     }));
             }
         }

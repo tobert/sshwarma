@@ -732,13 +732,19 @@ impl SshwarmaMcpServer {
 
         let lua_runtime = self.state.lua_runtime.lock().await;
 
+        // Look up room_id from room_name
+        let room_id = params.room.as_ref().and_then(|name| {
+            self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+        });
+
         // Set session context so tools.history() etc. work
         lua_runtime
             .tool_state()
             .set_session_context(Some(crate::lua::SessionContext {
                 username,
                 model: Some(model.clone()),
-                room_name: params.room,
+                room_name: params.room.clone(),
+                room_id,
             }));
         lua_runtime
             .tool_state()

@@ -47,8 +47,8 @@ end
 
 local function get_room_id()
     local session = tools.session()
-    if session and session.room_name then
-        return session.room_name  -- Room ID matches room name
+    if session and session.room_id then
+        return session.room_id  -- Use actual room ID from database
     end
     return nil
 end

@@ -944,11 +944,17 @@ impl LuaRuntime {
         // Save current session context (don't clobber screen's context)
         let saved_context = self.tool_state.session_context();
 
+        // Look up room_id from room_name
+        let room_id = wrap_state.room_name.as_ref().and_then(|name| {
+            wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+        });
+
         // Set session context for unified tools to access
         self.tool_state.set_session_context(Some(SessionContext {
             username: wrap_state.username.clone(),
             model: Some(wrap_state.model.clone()),
             room_name: wrap_state.room_name.clone(),
+            room_id,
         }));
 
         // Set shared state for extended data tools
@@ -974,11 +980,17 @@ impl LuaRuntime {
         // Save current session context (don't clobber screen's context)
         let saved_context = self.tool_state.session_context();
 
+        // Look up room_id from room_name
+        let room_id = wrap_state.room_name.as_ref().and_then(|name| {
+            wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+        });
+
         // Set session context for tools to access
         self.tool_state.set_session_context(Some(SessionContext {
             username: wrap_state.username.clone(),
             model: None, // Not needed for look
             room_name: wrap_state.room_name.clone(),
+            room_id,
         }));
 
         // Set shared state for extended data tools
@@ -1014,11 +1026,17 @@ impl LuaRuntime {
         // Save current session context (don't clobber screen's context)
         let saved_context = self.tool_state.session_context();
 
+        // Look up room_id from room_name
+        let room_id = wrap_state.room_name.as_ref().and_then(|name| {
+            wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+        });
+
         // Set session context for tools to access
         self.tool_state.set_session_context(Some(SessionContext {
             username: wrap_state.username.clone(),
             model: None,
             room_name: wrap_state.room_name.clone(),
+            room_id,
         }));
 
         // Set shared state for extended data tools
