@@ -928,7 +928,7 @@ impl SshwarmaMcpServer {
                 if let Some(ep) = entrypoint {
                     format!("Set UI entrypoint to '{}'. Use /reload to apply.", ep)
                 } else {
-                    format!("Reset to default UI. Use /reload to apply.")
+                    "Reset to default UI. Use /reload to apply.".to_string()
                 }
             }
             Err(e) => format!("Error setting entrypoint: {}", e),

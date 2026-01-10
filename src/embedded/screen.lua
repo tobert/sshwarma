@@ -452,7 +452,8 @@ function on_tick(dirty_tags, tick, ctx)
         local current_page = pages.current_name()
 
         if current_page == "chat" then
-            local my_name = (state.session or {}).username or ""
+            local current_user = tools.current_user and tools.current_user()
+            local my_name = current_user and current_user.name or ""
             local display_lines = M.build_display_lines(state.history, content_ctx.w, my_name)
             M.render_chat(content_ctx, display_lines, "chat", content.height)
         elseif current_page == "help" then
