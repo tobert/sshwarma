@@ -178,7 +178,22 @@ impl SshHandler {
             return Ok(());
         };
 
+        // Get session info for context
+        let username = self.player.as_ref().map(|p| p.username.clone());
+        let room_name = self.current_room().await;
+
         let lua = lua_runtime.lock().await;
+
+        // Set session context so commands can access tools.session()
+        if let Some(ref user) = username {
+            lua.tool_state()
+                .set_session_context(Some(crate::lua::SessionContext {
+                    username: user.clone(),
+                    model: None,
+                    room_name: room_name.clone(),
+                }));
+        }
+
         tracing::info!("dispatch_command: calling lua.call_dispatch_command");
         match lua.call_dispatch_command(name, args) {
             Ok(Some(cmd_result)) => {

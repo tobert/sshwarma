@@ -680,16 +680,14 @@ impl server::Handler for SshHandler {
         let init_seq = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l";
         let _ = session.data(channel, CryptoVec::from(init_seq.as_bytes()));
 
-        // Set session context and send welcome notification
+        // Auto-join user to lobby and send welcome notification
+        if let Err(e) = self.join_room("lobby").await {
+            tracing::warn!("failed to join lobby: {}", e);
+        }
+
         if let Some(ref player) = self.player {
             if let Some(ref lua_runtime) = self.lua_runtime {
                 let lua = lua_runtime.lock().await;
-                lua.tool_state()
-                    .set_session_context(Some(crate::lua::SessionContext {
-                        username: player.username.clone(),
-                        model: None,
-                        room_name: None,
-                    }));
                 // Welcome as notification
                 lua.tool_state()
                     .push_notification(format!("Welcome, {}!", player.username), 5000);

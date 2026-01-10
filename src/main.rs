@@ -46,6 +46,9 @@ async fn main() -> Result<()> {
     info!("opening database at {}", config.db_path);
     let db = Database::open(&config.db_path).context("failed to open database")?;
 
+    // Bootstrap world structure (creates lobby, internal tools, etc.)
+    db.bootstrap_world().context("failed to bootstrap world")?;
+
     // Check users
     let users = db.list_users()?;
     if users.is_empty() {
