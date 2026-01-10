@@ -1228,11 +1228,20 @@ impl SshwarmaMcpServer {
         use crate::db::things::ids;
 
         if target == "me" {
-            // For MCP, "me" = agent_claude
+            // For MCP, "me" = agent_claude - ensure it exists
+            self.state
+                .db
+                .ensure_agent_thing("claude")
+                .map_err(|e| format!("Failed to ensure agent: {}", e))?;
             Ok("agent_claude".to_string())
         } else if target == "shared" || target == "world" {
             Ok(ids::SHARED.to_string())
         } else if let Some(agent_name) = target.strip_prefix('@') {
+            // Ensure agent thing exists
+            self.state
+                .db
+                .ensure_agent_thing(agent_name)
+                .map_err(|e| format!("Failed to ensure agent: {}", e))?;
             Ok(format!("agent_{}", agent_name))
         } else {
             // Assume it's a room name - look up the room

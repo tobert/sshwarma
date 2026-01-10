@@ -1408,7 +1408,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     tools.set("execute_code", execute_code_fn)?;
 
     // thing_create(opts) -> thing table or error
-    // opts: {qualified_name, name, description?, code?, default_slot?, params?}
+    // opts: {qualified_name, name, kind?, parent_id?, description?, code?, default_slot?, params?, created_by?}
     let thing_create_fn = {
         let state = state.clone();
         lua.create_function(move |lua, opts: Table| -> mlua::Result<Value> {
@@ -1427,17 +1427,36 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             let name: String = opts.get("name")?;
 
             // Get optional fields
+            let kind_str: Option<String> = opts.get("kind").ok();
+            let parent_id: Option<String> = opts.get("parent_id").ok();
             let description: Option<String> = opts.get("description").ok();
             let code: Option<String> = opts.get("code").ok();
+            let content: Option<String> = opts.get("content").ok();
             let default_slot: Option<String> = opts.get("default_slot").ok();
             let params: Option<String> = opts.get("params").ok();
             let created_by: Option<String> = opts.get("created_by").ok();
 
-            // Create the thing
-            use crate::db::things::Thing;
-            let mut thing = Thing::tool(&name, &qualified_name).with_parent("internal");
+            // Parse kind (default to "tool" for backwards compat)
+            use crate::db::things::{Thing, ThingKind};
+            let kind = match kind_str.as_deref() {
+                Some("data") => ThingKind::Data,
+                Some("container") => ThingKind::Container,
+                Some("tool") | None => ThingKind::Tool,
+                Some(other) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", format!("invalid kind: {}", other))?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            // Create the thing with appropriate parent
+            let mut thing = Thing::new(&name, kind);
+            thing.qualified_name = Some(qualified_name.clone());
+            thing.parent_id = parent_id.or_else(|| Some("internal".to_string()));
             thing.description = description;
             thing.code = code;
+            thing.content = content;
             thing.default_slot = default_slot;
             thing.params = params;
             thing.created_by = created_by;
