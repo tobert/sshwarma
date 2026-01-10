@@ -325,14 +325,14 @@ impl SshHandler {
         let tool_server_handle = {
             let mut server = ToolServer::new();
 
-            // Add MCP tools if available (filtered by equipped status)
+            // Add MCP tools if available (only if equipped to room)
             if let Some(ref ctx) = mcp_context {
                 for (tool, peer) in ctx.tools.iter() {
                     // Convert MCP tool name to qualified format: server__tool -> server:tool
                     let qualified = tool.name.replace("__", ":");
 
-                    // Check if this tool is equipped (or if no filtering is active)
-                    if equipped_tools.is_empty() || equipped_tools.contains(&qualified) {
+                    // Only include tools that are equipped to this room
+                    if equipped_tools.contains(&qualified) {
                         server = server.rmcp_tool(tool.clone(), peer.clone());
                     } else {
                         tracing::debug!("skipping MCP tool {} (not equipped)", qualified);

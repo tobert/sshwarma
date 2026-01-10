@@ -96,6 +96,40 @@ function M.inventory(args)
         else
             table.insert(lines, "  (not in a room)")
         end
+        table.insert(lines, "")
+    end
+
+    -- Available (unequipped) things
+    table.insert(lines, "Available to Equip:")
+    local all_things = tools.things_match("*:*") or {}
+    local equipped_ids = {}
+
+    -- Collect IDs of equipped things
+    if agent_id then
+        local user_equip = tools.get_agent_equipment(agent_id, nil) or {}
+        for _, item in ipairs(user_equip) do
+            equipped_ids[item.thing_id] = true
+        end
+    end
+    if room_id then
+        local room_equip = tools.get_room_equipment(room_id, nil) or {}
+        for _, item in ipairs(room_equip) do
+            equipped_ids[item.thing_id] = true
+        end
+    end
+
+    -- Filter to available, unequipped things
+    local available_count = 0
+    for _, thing in ipairs(all_things) do
+        if thing.available and not equipped_ids[thing.id] then
+            local status = "○"
+            local qname = thing.qualified_name or thing.name
+            table.insert(lines, string.format("  %s %s", status, qname))
+            available_count = available_count + 1
+        end
+    end
+    if available_count == 0 then
+        table.insert(lines, "  (none)")
     end
 
     page.show("Inventory", table.concat(lines, "\n"))

@@ -648,6 +648,86 @@ impl Database {
     pub fn ensure_world(&self) -> Result<()> {
         self.bootstrap_world()
     }
+
+    /// Sync MCP tools to the things table
+    ///
+    /// Creates or updates tool things for each MCP tool, with qualified names
+    /// like `holler:sample`. Tools are parented under an MCP container thing
+    /// which is created if it doesn't exist.
+    ///
+    /// Tools that were previously synced but are no longer present are marked
+    /// as unavailable (available=false) rather than deleted.
+    pub fn sync_mcp_tools(
+        &self,
+        mcp_name: &str,
+        tools: &[(String, String)], // (name, description)
+    ) -> Result<usize> {
+        // Ensure world is bootstrapped
+        self.bootstrap_world()?;
+
+        // Create or get MCP container thing (e.g., "holler" under "mcps")
+        let mcp_thing_id = format!("mcp_{}", mcp_name);
+        if self.get_thing(&mcp_thing_id)?.is_none() {
+            let mut mcp_thing = Thing::mcp(mcp_name).with_parent(ids::MCPS);
+            mcp_thing.id = mcp_thing_id.clone();
+            mcp_thing.description = Some(format!("MCP server: {}", mcp_name));
+            self.insert_thing(&mcp_thing)?;
+            tracing::info!(mcp = %mcp_name, "created MCP container thing");
+        }
+
+        // Get existing tools for this MCP (by qualified_name prefix)
+        let prefix = format!("{}:*", mcp_name);
+        let existing = self.find_things_by_qualified_name(&prefix)?;
+
+        // Track which tools we sync
+        let mut synced_names = std::collections::HashSet::new();
+        let mut count = 0;
+
+        for (tool_name, description) in tools {
+            let qualified_name = format!("{}:{}", mcp_name, tool_name);
+            synced_names.insert(qualified_name.clone());
+
+            // Check if tool already exists
+            if let Some(existing_tool) = existing.iter().find(|t| {
+                t.qualified_name.as_ref() == Some(&qualified_name)
+            }) {
+                // Update if description changed or if it was unavailable
+                if existing_tool.description.as_ref() != Some(description)
+                    || !existing_tool.available
+                {
+                    let mut updated = existing_tool.clone();
+                    updated.description = Some(description.clone());
+                    updated.available = true;
+                    self.update_thing(&updated)?;
+                    count += 1;
+                }
+            } else {
+                // Create new tool thing
+                let mut tool = Thing::tool(tool_name, &qualified_name)
+                    .with_parent(&mcp_thing_id);
+                tool.description = Some(description.clone());
+                tool.available = true;
+                self.insert_thing(&tool)?;
+                count += 1;
+            }
+        }
+
+        // Mark removed tools as unavailable
+        for existing_tool in &existing {
+            if let Some(ref qname) = existing_tool.qualified_name {
+                if !synced_names.contains(qname) && existing_tool.available {
+                    self.set_thing_available(&existing_tool.id, false)?;
+                    tracing::debug!(tool = %qname, "marked MCP tool unavailable");
+                }
+            }
+        }
+
+        if count > 0 {
+            tracing::info!(mcp = %mcp_name, synced = count, "synced MCP tools");
+        }
+
+        Ok(count)
+    }
 }
 
 // =============================================================================

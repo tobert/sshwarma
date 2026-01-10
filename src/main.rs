@@ -143,6 +143,56 @@ async fn main() -> Result<()> {
         info!(port = config.mcp_server_port, "MCP server started");
     }
 
+    // Spawn background task to sync MCP tools to things table
+    {
+        use sshwarma::mcp::McpEvent;
+
+        let state = state.clone();
+        let mut events = state.mcp.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Some(McpEvent::Connected { name, .. })
+                    | Some(McpEvent::ToolsRefreshed { name, .. }) => {
+                        // Get tools for this MCP
+                        let tools = state.mcp.list_tools().await;
+                        let mcp_tools: Vec<_> = tools
+                            .iter()
+                            .filter(|t| t.source == name)
+                            .map(|t| (t.name.clone(), t.description.clone()))
+                            .collect();
+
+                        if !mcp_tools.is_empty() {
+                            match state.db.sync_mcp_tools(&name, &mcp_tools) {
+                                Ok(count) => {
+                                    if count > 0 {
+                                        info!(mcp = %name, count, "synced MCP tools to things");
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(mcp = %name, error = %e, "failed to sync MCP tools");
+                                }
+                            }
+                        }
+                    }
+                    Some(McpEvent::Removed { name }) => {
+                        // Mark all tools from this MCP as unavailable
+                        let prefix = format!("{}:*", name);
+                        if let Ok(tools) = state.db.find_things_by_qualified_name(&prefix) {
+                            for tool in tools {
+                                let _ = state.db.set_thing_available(&tool.id, false);
+                            }
+                            info!(mcp = %name, "marked MCP tools unavailable");
+                        }
+                    }
+                    Some(_) => {} // Ignore other events
+                    None => break, // Channel closed
+                }
+            }
+        });
+    }
+
     // Start SSH server
     let mut server = SshServer { state };
     info!("listening on {}", config.listen_addr);
