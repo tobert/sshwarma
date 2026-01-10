@@ -3,7 +3,7 @@
 //! Event-driven rendering - only redraws when state changes.
 //! Lua owns the entire screen layout - chat, status, input, everything.
 
-use crate::lua::LuaRuntime;
+use crate::lua::{LuaReloadReceiver, LuaRuntime, NotificationLevel};
 use crate::state::SharedState;
 use crate::ui::RenderBuffer;
 use russh::server::Handle;
@@ -18,11 +18,21 @@ pub fn spawn_screen_refresh(
     channel: ChannelId,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
     state: Arc<SharedState>,
+    lua_reload_rx: LuaReloadReceiver,
     term_width: u16,
     term_height: u16,
 ) {
     tokio::spawn(async move {
-        screen_refresh_task(handle, channel, lua_runtime, state, term_width, term_height).await;
+        screen_refresh_task(
+            handle,
+            channel,
+            lua_runtime,
+            state,
+            lua_reload_rx,
+            term_width,
+            term_height,
+        )
+        .await;
     });
 }
 
@@ -35,6 +45,7 @@ async fn screen_refresh_task(
     channel: ChannelId,
     lua_runtime: Arc<TokioMutex<LuaRuntime>>,
     _state: Arc<SharedState>,
+    mut lua_reload_rx: LuaReloadReceiver,
     term_width: u16,
     term_height: u16,
 ) {
@@ -79,24 +90,56 @@ async fn screen_refresh_task(
     loop {
         // Wait for either:
         // 1. Dirty signal (something changed, redraw)
-        // 2. 500ms timeout (run background tasks)
-        let was_background = tokio::select! {
-            _ = dirty.notified() => false,
-            _ = tokio::time::sleep(Duration::from_millis(500)) => true,
+        // 2. Lua reload event (module changed on disk)
+        // 3. 500ms timeout (run background tasks)
+        enum Event {
+            Dirty,
+            Reload(String),
+            Background,
+        }
+
+        let event = tokio::select! {
+            _ = dirty.notified() => Event::Dirty,
+            reload = lua_reload_rx.recv() => {
+                match reload {
+                    Some(e) => Event::Reload(e.module_name().to_string()),
+                    None => continue, // Sender dropped, keep running
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(500)) => Event::Background,
         };
 
         tick += 1;
 
-        if was_background {
-            // 500ms background tick
-            background_tick += 1;
-
-            // Run user's background() function
-            // (This can call tools.mark_dirty() to trigger redraws)
-            {
+        match event {
+            Event::Dirty => {
+                // Normal dirty signal, fall through to render
+            }
+            Event::Reload(module_name) => {
+                // Module changed on disk - invalidate and notify
                 let lua = lua_runtime.lock().await;
-                if let Err(e) = lua.call_background(background_tick) {
-                    tracing::debug!("lua background error: {}", e);
+                if lua.invalidate_module(&module_name) {
+                    // Module was loaded, now cleared - show notification
+                    lua.tool_state().push_notification_with_level(
+                        format!("⟳ {}", module_name),
+                        3000, // 3 second TTL
+                        NotificationLevel::Info,
+                    );
+                    dirty.mark_many(["status", "chat", "input"]);
+                    tracing::debug!("invalidated lua module: {}", module_name);
+                }
+            }
+            Event::Background => {
+                // 500ms background tick
+                background_tick += 1;
+
+                // Run user's background() function
+                // (This can call tools.mark_dirty() to trigger redraws)
+                {
+                    let lua = lua_runtime.lock().await;
+                    if let Err(e) = lua.call_background(background_tick) {
+                        tracing::debug!("lua background error: {}", e);
+                    }
                 }
             }
         }

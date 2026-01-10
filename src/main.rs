@@ -15,6 +15,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use sshwarma::config::{Config, ModelsConfig};
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
+use sshwarma::lua::{start_watcher, LuaReloadSender};
 use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::ModelRegistry;
@@ -96,6 +97,11 @@ async fn main() -> Result<()> {
     let models = Arc::new(models);
     let mcp = Arc::new(McpManager::new());
 
+    // Create Lua hot reload broadcaster and start filesystem watcher
+    let lua_reload = LuaReloadSender::new();
+    let _lua_watcher = start_watcher(lua_reload.clone())
+        .context("failed to start Lua filesystem watcher")?;
+
     let state = Arc::new(SharedState {
         world: world.clone(),
         db: db.clone(),
@@ -103,6 +109,7 @@ async fn main() -> Result<()> {
         llm: llm.clone(),
         models: models.clone(),
         mcp,
+        lua_reload,
     });
 
     // Run Lua startup script (can configure MCP connections, etc.)

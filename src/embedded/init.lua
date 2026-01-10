@@ -5,12 +5,15 @@
 --
 --   require("sshwarma.X")  -> embedded/X.lua (stable toolkit, always embedded)
 --   require("room.X")      -> DB: room-scoped script X (graceful nil if missing)
---   require("X")           -> DB: user script first, then embedded fallback
+--   require("X")           -> filesystem first, then DB, then embedded
 --
 -- Module path resolution:
 --   require("sshwarma.ui.input") -> embedded/ui/input.lua
---   require("screen")            -> user DB "screen" OR embedded/screen.lua
+--   require("screen")            -> ~/.config/sshwarma/lua/screen.lua OR embedded
 --   require("room.tools")        -> room DB "tools" (nil if not found)
+--
+-- Filesystem takes priority for hot reload during development.
+-- If a file exists but has errors, the error is returned (no silent fallback).
 
 -- Custom searcher for sshwarma modules
 -- Inserted at position 2 (after preload, before standard path searchers)
@@ -60,9 +63,49 @@ local function sshwarma_searcher(modname)
         return nil  -- No loader available, graceful nil
     end
 
-    -- 3. Plain "X" -> user DB first, then embedded fallback
+    -- 3. Plain "X" -> filesystem FIRST, then DB, then embedded
+    --
+    -- Filesystem takes priority for hot reload during development.
+    -- If a file exists but has errors, return the error (don't silently fall back).
 
-    -- Try user DB script first
+    -- Try filesystem first (hot reload dev directory)
+    if io and io.open and sshwarma and sshwarma.config_path then
+        local path = modname:gsub("%.", "/")
+
+        -- Try direct file
+        local user_path = sshwarma.config_path .. "/lua/" .. path .. ".lua"
+        local f = io.open(user_path, "r")
+        if f then
+            local content = f:read("*a")
+            f:close()
+            if load_fn then
+                local loader, err = load_fn(content, "@" .. user_path)
+                if loader then
+                    return loader, user_path
+                end
+                -- File exists but has errors - return the error, don't fall through
+                return "\n\tcannot load '" .. modname .. "' from " .. user_path .. ": " .. (err or "?")
+            end
+        end
+
+        -- Try init.lua for packages
+        local init_path = sshwarma.config_path .. "/lua/" .. path .. "/init.lua"
+        f = io.open(init_path, "r")
+        if f then
+            local content = f:read("*a")
+            f:close()
+            if load_fn then
+                local loader, err = load_fn(content, "@" .. init_path)
+                if loader then
+                    return loader, init_path
+                end
+                -- File exists but has errors - return the error, don't fall through
+                return "\n\tcannot load '" .. modname .. "' from " .. init_path .. ": " .. (err or "?")
+            end
+        end
+    end
+
+    -- Then try user DB script
     if sshwarma and sshwarma.load_user_script then
         local code, err = sshwarma.load_user_script(modname)
         if code then
@@ -90,41 +133,6 @@ local function sshwarma_searcher(modname)
                 return "\n\tcannot load embedded '" .. modname .. "': " .. (lerr or "?")
             elseif sshwarma.load_module then
                 return function() return sshwarma.load_module(modname) end, "embedded:" .. modname
-            end
-        end
-    end
-
-    -- Try user config directory (filesystem fallback for development)
-    if io and io.open and sshwarma and sshwarma.config_path then
-        local path = modname:gsub("%.", "/")
-
-        -- Try direct file
-        local user_path = sshwarma.config_path .. "/lua/" .. path .. ".lua"
-        local f = io.open(user_path, "r")
-        if f then
-            local content = f:read("*a")
-            f:close()
-            if load_fn then
-                local loader, err = load_fn(content, "@" .. user_path)
-                if loader then
-                    return loader, user_path
-                end
-                return "\n\tcannot load user module '" .. modname .. "': " .. (err or "?")
-            end
-        end
-
-        -- Try init.lua for packages
-        local init_path = sshwarma.config_path .. "/lua/" .. path .. "/init.lua"
-        f = io.open(init_path, "r")
-        if f then
-            local content = f:read("*a")
-            f:close()
-            if load_fn then
-                local loader, err = load_fn(content, "@" .. init_path)
-                if loader then
-                    return loader, init_path
-                end
-                return "\n\tcannot load user module '" .. modname .. "': " .. (err or "?")
             end
         end
     end

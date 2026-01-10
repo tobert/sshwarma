@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 use sshwarma::config::Config;
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
-use sshwarma::lua::LuaRuntime;
+use sshwarma::lua::{LuaReloadSender, LuaRuntime};
 use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState};
 use sshwarma::model::{ModelBackend, ModelHandle, ModelRegistry};
@@ -440,6 +440,7 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
         llm: llm.clone(),
         models: models.clone(),
         mcp: Arc::new(McpManager::new()),
+        lua_reload: LuaReloadSender::new(),
     });
 
     // Create LuaRuntime with shared state

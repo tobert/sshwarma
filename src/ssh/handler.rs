@@ -713,11 +713,14 @@ impl server::Handler for SshHandler {
         }
 
         // Spawn screen refresh - Lua owns full terminal
+        // Subscribe to hot reload events for this session
+        let lua_reload_rx = self.state.lua_reload.subscribe();
         spawn_screen_refresh(
             session.handle(),
             channel,
             self.lua_runtime.clone().expect("lua_runtime"),
             self.state.clone(),
+            lua_reload_rx,
             width,
             height,
         );

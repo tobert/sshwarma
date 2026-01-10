@@ -3406,6 +3406,7 @@ mod tests {
     use crate::config::Config;
     use crate::db::Database;
     use crate::llm::LlmClient;
+    use crate::lua::LuaReloadSender;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelRegistry};
     use crate::state::SharedState;
@@ -3449,6 +3450,7 @@ mod tests {
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
                 mcp: Arc::new(McpManager::new()),
+                lua_reload: LuaReloadSender::new(),
             });
 
             Ok(Self {

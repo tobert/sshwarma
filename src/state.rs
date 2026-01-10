@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use crate::config::Config;
 use crate::db::Database;
 use crate::llm::LlmClient;
+use crate::lua::LuaReloadSender;
 use crate::mcp::McpManager;
 use crate::model::ModelRegistry;
 use crate::world::World;
@@ -18,4 +19,6 @@ pub struct SharedState {
     pub llm: Arc<LlmClient>,
     pub models: Arc<ModelRegistry>,
     pub mcp: Arc<McpManager>,
+    /// Broadcast sender for Lua hot reload events
+    pub lua_reload: LuaReloadSender,
 }

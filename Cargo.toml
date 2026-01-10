@@ -60,6 +60,9 @@ uuid = { version = "1", features = ["v4", "v7"] }
 dashmap = "6"
 toml = "0.8"
 
+# Filesystem watching for hot reload
+notify = "6"
+
 # HTTP server for MCP
 axum = "0.8"
 

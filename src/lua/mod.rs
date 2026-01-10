@@ -9,9 +9,11 @@ pub mod data;
 pub mod dirty;
 pub mod mcp_bridge;
 pub mod registry;
+pub mod reload;
 pub mod render;
 pub mod tool_middleware;
 pub mod tools;
+pub mod watcher;
 pub mod wrap;
 
 pub use cache::ToolCache;
@@ -19,9 +21,11 @@ pub use context::{NotificationLevel, PendingNotification};
 pub use dirty::DirtyState;
 pub use mcp_bridge::{mcp_request_handler, McpBridge};
 pub use registry::ToolRegistry;
+pub use reload::{LuaReloadEvent, LuaReloadReceiver, LuaReloadSender};
 pub use render::parse_lua_rows;
 pub use tool_middleware::{ToolContext, ToolMiddleware};
 pub use tools::{register_mcp_tools, InputState, LuaToolState, SessionContext};
+pub use watcher::{start_watcher, WatcherHandle};
 pub use wrap::{WrapResult, WrapState};
 
 // Re-export startup script path for main.rs
@@ -927,6 +931,31 @@ impl LuaRuntime {
         &self.lua
     }
 
+    /// Invalidate a module in package.loaded
+    ///
+    /// Clears the module from package.loaded so the next require() will reload it.
+    /// Returns true if the module was loaded (and is now cleared), false if not loaded.
+    pub fn invalidate_module(&self, module_name: &str) -> bool {
+        let result: mlua::Result<bool> = (|| {
+            let package: Table = self.lua.globals().get("package")?;
+            let loaded: Table = package.get("loaded")?;
+            let was_loaded = loaded.contains_key(module_name)?;
+            if was_loaded {
+                loaded.set(module_name, Value::Nil)?;
+                debug!("invalidated lua module: {}", module_name);
+            }
+            Ok(was_loaded)
+        })();
+
+        match result {
+            Ok(was_loaded) => was_loaded,
+            Err(e) => {
+                warn!("failed to invalidate lua module '{}': {}", module_name, e);
+                false
+            }
+        }
+    }
+
     /// Build context for LLM interactions via Lua wrap() system
     ///
     /// Calls Lua's `default_wrap()` function with the target token budget,
@@ -1478,6 +1507,7 @@ mod tests {
     use crate::config::Config;
     use crate::db::Database;
     use crate::llm::LlmClient;
+    use crate::lua::LuaReloadSender;
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
     use crate::state::SharedState;
@@ -1518,6 +1548,7 @@ mod tests {
                 llm: Arc::new(LlmClient::new()?),
                 models: models.clone(),
                 mcp: Arc::new(McpManager::new()),
+                lua_reload: LuaReloadSender::new(),
             });
 
             Ok(Self {
