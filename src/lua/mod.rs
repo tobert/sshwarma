@@ -949,11 +949,18 @@ impl LuaRuntime {
             wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
         });
 
+        // Look up agent_id from username
+        let agent_id = wrap_state
+            .shared_state
+            .db
+            .get_or_create_human_agent(&wrap_state.username)
+            .map(|a| a.id)
+            .unwrap_or_else(|_| wrap_state.username.clone()); // Fallback to username if lookup fails
+
         // Set session context for unified tools to access
         self.tool_state.set_session_context(Some(SessionContext {
-            username: wrap_state.username.clone(),
+            agent_id,
             model: Some(wrap_state.model.clone()),
-            room_name: wrap_state.room_name.clone(),
             room_id,
         }));
 
@@ -985,11 +992,18 @@ impl LuaRuntime {
             wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
         });
 
+        // Look up agent_id from username
+        let agent_id = wrap_state
+            .shared_state
+            .db
+            .get_or_create_human_agent(&wrap_state.username)
+            .map(|a| a.id)
+            .unwrap_or_else(|_| wrap_state.username.clone());
+
         // Set session context for tools to access
         self.tool_state.set_session_context(Some(SessionContext {
-            username: wrap_state.username.clone(),
+            agent_id,
             model: None, // Not needed for look
-            room_name: wrap_state.room_name.clone(),
             room_id,
         }));
 
@@ -1031,11 +1045,18 @@ impl LuaRuntime {
             wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
         });
 
+        // Look up agent_id from username
+        let agent_id = wrap_state
+            .shared_state
+            .db
+            .get_or_create_human_agent(&wrap_state.username)
+            .map(|a| a.id)
+            .unwrap_or_else(|_| wrap_state.username.clone());
+
         // Set session context for tools to access
         self.tool_state.set_session_context(Some(SessionContext {
-            username: wrap_state.username.clone(),
+            agent_id,
             model: None,
-            room_name: wrap_state.room_name.clone(),
             room_id,
         }));
 

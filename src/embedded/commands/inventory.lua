@@ -35,8 +35,8 @@ end
 
 local function get_agent_id()
     local session = tools.session()
-    if session and session.username then
-        return session.username  -- Agent ID matches username
+    if session and session.agent_id then
+        return session.agent_id  -- UUID from agents table
     end
     return nil
 end

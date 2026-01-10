@@ -143,12 +143,16 @@ impl SshHandler {
         };
 
         // Update session context with model and status
+        let agent = self
+            .state
+            .db
+            .get_agent_by_name(&username)?
+            .ok_or_else(|| anyhow::anyhow!("agent not found: {}", username))?;
         self.with_lua(|lua| {
             lua.tool_state()
                 .set_session_context(Some(crate::lua::SessionContext {
-                    username: username.clone(),
+                    agent_id: agent.id.clone(),
                     model: Some(model.clone()),
-                    room_name: room_name.clone(),
                     room_id: room_id.clone(),
                 }));
             lua.tool_state()
@@ -197,11 +201,15 @@ impl SshHandler {
 
         // Set session context so commands can access tools.session()
         if let Some(ref user) = username {
+            let agent = self
+                .state
+                .db
+                .get_agent_by_name(user)?
+                .ok_or_else(|| anyhow::anyhow!("agent not found: {}", user))?;
             lua.tool_state()
                 .set_session_context(Some(crate::lua::SessionContext {
-                    username: user.clone(),
+                    agent_id: agent.id,
                     model: None,
-                    room_name: room_name.clone(),
                     room_id: room_id.clone(),
                 }));
         }

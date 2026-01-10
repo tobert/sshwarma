@@ -72,19 +72,22 @@ impl SshHandler {
 
     /// Get the current room name from Lua session context.
     ///
+    /// Looks up room name from room_id via database.
     /// Falls back to player.current_room for backward compatibility.
     pub async fn current_room(&self) -> Option<String> {
-        // Try Lua session context first
-        if let Some(room) = self
+        // Try Lua session context first - look up room name from room_id
+        if let Some(room_id) = self
             .with_lua(|lua| {
                 lua.tool_state()
                     .session_context()
-                    .and_then(|ctx| ctx.room_name.clone())
+                    .and_then(|ctx| ctx.room_id.clone())
             })
             .await
             .flatten()
         {
-            return Some(room);
+            if let Ok(Some(room)) = self.state.db.get_room(&room_id) {
+                return Some(room.name);
+            }
         }
         // Fall back to player state
         self.player.as_ref().and_then(|p| p.current_room.clone())
@@ -212,11 +215,15 @@ impl SshHandler {
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
             if let Some(ref player) = self.player {
+                let agent = self
+                    .state
+                    .db
+                    .get_agent_by_name(&player.username)?
+                    .ok_or_else(|| anyhow::anyhow!("agent not found: {}", player.username))?;
                 lua.tool_state()
                     .set_session_context(Some(crate::lua::SessionContext {
-                        username: player.username.clone(),
+                        agent_id: agent.id,
                         model: None,
-                        room_name: Some(room_name.to_string()),
                         room_id: room_id.clone(),
                     }));
             }
@@ -288,11 +295,15 @@ impl SshHandler {
         if let Some(ref lua_runtime) = self.lua_runtime {
             let lua = lua_runtime.lock().await;
             if let Some(ref player) = self.player {
+                let agent = self
+                    .state
+                    .db
+                    .get_agent_by_name(&player.username)?
+                    .ok_or_else(|| anyhow::anyhow!("agent not found: {}", player.username))?;
                 lua.tool_state()
                     .set_session_context(Some(crate::lua::SessionContext {
-                        username: player.username.clone(),
+                        agent_id: agent.id,
                         model: None,
-                        room_name: None,
                         room_id: None,
                     }));
             }

@@ -737,13 +737,18 @@ impl SshwarmaMcpServer {
             self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
         });
 
+        // Look up agent_id from username
+        let agent_id = match self.state.db.get_or_create_human_agent(&username) {
+            Ok(agent) => agent.id,
+            Err(e) => return format!("Error getting agent: {}", e),
+        };
+
         // Set session context so tools.history() etc. work
         lua_runtime
             .tool_state()
             .set_session_context(Some(crate::lua::SessionContext {
-                username,
+                agent_id,
                 model: Some(model.clone()),
-                room_name: params.room.clone(),
                 room_id,
             }));
         lua_runtime
