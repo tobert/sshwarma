@@ -88,11 +88,11 @@ function M.inv(args)
     if #children == 0 then
         table.insert(lines, "  (empty)")
     else
-        fun.iter(children):each(function(_, thing)
-            local icon = thing.kind == "container" and "[+]" or " - "
-            local name = thing.qualified_name or thing.name
+        for _, thing in ipairs(children) do
+            local icon = (thing.kind == "container") and "[+]" or " - "
+            local name = thing.qualified_name or thing.name or "(unnamed)"
             table.insert(lines, string.format("  %s %s", icon, name))
-        end)
+        end
     end
 
     page.show("Inventory", table.concat(lines, "\n"))
