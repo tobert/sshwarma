@@ -78,6 +78,7 @@ pub struct Thing {
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
     pub created_by: Option<String>,  // Agent who created this thing
+    pub copied_from: Option<String>, // Source thing ID for CoW copies
 }
 
 impl Thing {
@@ -102,6 +103,7 @@ impl Thing {
             updated_at: now,
             deleted_at: None,
             created_by: None,
+            copied_from: None,
         }
     }
 
@@ -182,8 +184,8 @@ impl Database {
             r#"INSERT INTO things
                (id, parent_id, kind, name, qualified_name, description,
                 content, uri, metadata, code, default_slot, params,
-                available, created_at, updated_at, deleted_at, created_by)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"#,
+                available, created_at, updated_at, deleted_at, created_by, copied_from)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"#,
             params![
                 thing.id,
                 thing.parent_id,
@@ -202,6 +204,7 @@ impl Database {
                 thing.updated_at,
                 thing.deleted_at,
                 thing.created_by,
+                thing.copied_from,
             ],
         )
         .context("failed to insert thing")?;
@@ -214,7 +217,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things WHERE id = ?1"#,
         )?;
         stmt.query_row(params![id], Self::thing_from_row)
@@ -228,7 +231,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things
                WHERE qualified_name = ?1 AND deleted_at IS NULL"#,
         )?;
@@ -243,7 +246,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things
                WHERE parent_id = ?1 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -263,7 +266,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things
                WHERE parent_id = ?1 AND kind = ?2 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -279,7 +282,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things
                WHERE kind = ?1 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -295,7 +298,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things
                WHERE name GLOB ?1 AND deleted_at IS NULL
                ORDER BY name"#,
@@ -311,7 +314,7 @@ impl Database {
         let mut stmt = conn.prepare(
             r#"SELECT id, parent_id, kind, name, qualified_name, description,
                       content, uri, metadata, code, default_slot, params,
-                      available, created_at, updated_at, deleted_at, created_by
+                      available, created_at, updated_at, deleted_at, created_by, copied_from
                FROM things
                WHERE qualified_name GLOB ?1 AND deleted_at IS NULL
                ORDER BY qualified_name"#,
@@ -392,6 +395,104 @@ impl Database {
         Ok(())
     }
 
+    /// Copy a thing to a new parent (CoW)
+    ///
+    /// Creates a new thing with the same content but:
+    /// - New ID
+    /// - New parent_id
+    /// - No qualified_name (copies don't get unique names)
+    /// - Sets copied_from to track lineage
+    pub fn copy_thing(&self, thing_id: &str, new_parent_id: &str) -> Result<Thing> {
+        let original = self
+            .get_thing(thing_id)?
+            .ok_or_else(|| anyhow::anyhow!("thing not found: {}", thing_id))?;
+
+        let now = now_ms();
+        let copy = Thing {
+            id: new_id(),
+            parent_id: Some(new_parent_id.to_string()),
+            kind: original.kind,
+            name: original.name.clone(),
+            qualified_name: None, // Copies don't get qualified names
+            description: original.description.clone(),
+            content: original.content.clone(),
+            uri: original.uri.clone(),
+            metadata: original.metadata.clone(),
+            code: original.code.clone(),
+            default_slot: original.default_slot.clone(),
+            params: original.params.clone(),
+            available: original.available,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            created_by: original.created_by.clone(),
+            copied_from: Some(thing_id.to_string()),
+        };
+
+        self.insert_thing(&copy)?;
+        tracing::debug!(
+            original = thing_id,
+            copy = %copy.id,
+            parent = new_parent_id,
+            "copied thing"
+        );
+
+        Ok(copy)
+    }
+
+    /// Move a thing to a new parent
+    pub fn move_thing(&self, thing_id: &str, new_parent_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE things SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![thing_id, new_parent_id, now_ms()],
+        )
+        .context("failed to move thing")?;
+        tracing::debug!(thing = thing_id, new_parent = new_parent_id, "moved thing");
+        Ok(())
+    }
+
+    /// Ensure an agent has a corresponding Thing in the world tree.
+    ///
+    /// Creates a thing with id "agent_{name}" under the agents/ container
+    /// if it doesn't already exist. This allows agents to own things directly.
+    pub fn ensure_agent_thing(&self, agent_name: &str) -> Result<String> {
+        let thing_id = format!("agent_{}", agent_name);
+
+        // Check if already exists
+        if self.get_thing(&thing_id)?.is_some() {
+            return Ok(thing_id);
+        }
+
+        // Create agent thing under agents/ container
+        let now = now_ms();
+        let thing = Thing {
+            id: thing_id.clone(),
+            parent_id: Some(ids::AGENTS.to_string()),
+            kind: ThingKind::Agent,
+            name: agent_name.to_string(),
+            qualified_name: None,
+            description: Some(format!("Agent: {}", agent_name)),
+            content: None,
+            uri: None,
+            metadata: None,
+            code: None,
+            default_slot: None,
+            params: None,
+            available: true,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            created_by: None,
+            copied_from: None,
+        };
+
+        self.insert_thing(&thing)?;
+        tracing::info!(agent = agent_name, thing_id = %thing_id, "created agent thing");
+
+        Ok(thing_id)
+    }
+
     /// Get the root thing (world container, id = 'world')
     pub fn get_world(&self) -> Result<Option<Thing>> {
         self.get_thing("world")
@@ -404,8 +505,8 @@ impl Database {
             r#"INSERT INTO things
                (id, parent_id, kind, name, qualified_name, description,
                 content, uri, metadata, code, default_slot, params,
-                available, created_at, updated_at, deleted_at, created_by)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                available, created_at, updated_at, deleted_at, created_by, copied_from)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                ON CONFLICT(qualified_name) WHERE deleted_at IS NULL AND qualified_name IS NOT NULL
                DO UPDATE SET
                    description = excluded.description,
@@ -433,6 +534,7 @@ impl Database {
                 thing.updated_at,
                 thing.deleted_at,
                 thing.created_by,
+                thing.copied_from,
             ],
         )
         .context("failed to upsert thing")?;
@@ -443,7 +545,7 @@ impl Database {
     // Expects columns in order:
     // 0: id, 1: parent_id, 2: kind, 3: name, 4: qualified_name, 5: description,
     // 6: content, 7: uri, 8: metadata, 9: code, 10: default_slot, 11: params,
-    // 12: available, 13: created_at, 14: updated_at, 15: deleted_at, 16: created_by
+    // 12: available, 13: created_at, 14: updated_at, 15: deleted_at, 16: created_by, 17: copied_from
     fn thing_from_row(row: &rusqlite::Row) -> rusqlite::Result<Thing> {
         let kind_str: String = row.get(2)?;
         let kind = ThingKind::parse(&kind_str).unwrap_or(ThingKind::Data);
@@ -465,13 +567,14 @@ impl Database {
             updated_at: row.get(14)?,
             deleted_at: row.get(15)?,
             created_by: row.get(16)?,
+            copied_from: row.get(17)?,
         })
     }
 
     /// Bootstrap the world structure if it doesn't exist.
     /// Creates:
     /// - world (root container)
-    /// - rooms, agents, mcps, internal, defaults (top-level containers)
+    /// - rooms, agents, mcps, internal, defaults, shared (top-level containers)
     /// - home (shared resources room)
     /// - lobby (default landing room)
     /// - Internal tools (sshwarma:look, sshwarma:say, etc.)
@@ -495,6 +598,7 @@ impl Database {
             ("mcps", "Container for MCP server connections"),
             ("internal", "Container for internal sshwarma tools"),
             ("defaults", "Default equipped relationships for new rooms"),
+            ("shared", "System resources accessible to all"),
         ];
 
         for (name, desc) in containers {
@@ -742,6 +846,7 @@ pub mod ids {
     pub const MCPS: &str = "mcps";
     pub const INTERNAL: &str = "internal";
     pub const DEFAULTS: &str = "defaults";
+    pub const SHARED: &str = "shared";
     pub const HOME: &str = "home";
     pub const LOBBY: &str = "lobby";
 }
@@ -846,7 +951,7 @@ mod tests {
 
         // Verify containers
         let children = db.get_thing_children("world")?;
-        assert_eq!(children.len(), 5); // rooms, agents, mcps, internal, defaults
+        assert_eq!(children.len(), 6); // rooms, agents, mcps, internal, defaults, shared
 
         // Verify rooms container has lobby and home
         let rooms = db.get_thing_children("rooms")?;

@@ -90,10 +90,14 @@ Room Context:
   /portal <dir> <room>  Create exit to another room
 
 Inventory:
-  /inv                Show equipped tools
-  /inv all            Include available (not equipped)
-  /equip <thing>      Equip tool by qualified name
-  /unequip <thing>    Unequip tool
+  /inv [target]       Show contents (me, room, shared, @agent)
+  /take <thing>       Copy thing into your inventory
+  /drop <thing>       Move thing to current room
+  /destroy owner:name Delete a thing
+
+Equipment:
+  /equip <ctx> <thing>    Equip tool (me, room, @agent)
+  /unequip <ctx> <thing>  Unequip tool
 
 Communication:
   <text>              Say to room
@@ -167,6 +171,9 @@ local handlers = {
     -- Inventory (from commands.inventory)
     ["inv"]       = inventory.inv,
     ["inventory"] = inventory.inv,  -- alias
+    ["take"]      = inventory.take,
+    ["drop"]      = inventory.drop,
+    ["destroy"]   = inventory.destroy,
     ["equip"]     = inventory.equip,
     ["unequip"]   = inventory.unequip,
 

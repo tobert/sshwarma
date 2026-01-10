@@ -152,6 +152,11 @@ impl SshHandler {
         // Create player session
         self.player = Some(PlayerSession::new(username.to_string()));
 
+        // Ensure agent has a corresponding Thing in world tree for inventory
+        if let Err(e) = self.state.db.ensure_agent_thing(username) {
+            tracing::warn!("Failed to create agent thing for '{}': {}", username, e);
+        }
+
         // Create Lua runtime (automatically loads user-specific script)
         let runtime =
             LuaRuntime::new_for_user(Some(username)).expect("failed to create lua runtime");

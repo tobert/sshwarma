@@ -1596,6 +1596,68 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("things_by_kind", things_by_kind_fn)?;
 
+    // thing_copy(thing_id, new_parent_id) -> thing table (CoW copy)
+    let thing_copy_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (thing_id, new_parent_id): (String, String)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.copy_thing(&thing_id, &new_parent_id) {
+                Ok(thing) => {
+                    let t = lua.create_table()?;
+                    t.set("id", thing.id)?;
+                    t.set("parent_id", thing.parent_id)?;
+                    t.set("kind", thing.kind.as_str())?;
+                    t.set("name", thing.name)?;
+                    t.set("qualified_name", thing.qualified_name)?;
+                    t.set("copied_from", thing.copied_from)?;
+                    Ok(Value::Table(t))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "thing_copy failed");
+                    Ok(Value::Nil)
+                }
+            }
+        })?
+    };
+    tools.set("thing_copy", thing_copy_fn)?;
+
+    // thing_move(thing_id, new_parent_id) -> bool
+    let thing_move_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, (thing_id, new_parent_id): (String, String)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(false),
+            };
+
+            match shared.db.move_thing(&thing_id, &new_parent_id) {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    tracing::warn!(error = %e, "thing_move failed");
+                    Ok(false)
+                }
+            }
+        })?
+    };
+    tools.set("thing_move", thing_move_fn)?;
+
+    // get_agent_thing_id() -> string (returns "agent_{username}")
+    let get_agent_thing_id_fn = {
+        let state = state.clone();
+        lua.create_function(move |_lua, ()| {
+            let agent_name = state.current_agent_name();
+            match agent_name {
+                Some(name) => Ok(Some(format!("agent_{}", name))),
+                None => Ok(None),
+            }
+        })?
+    };
+    tools.set("get_agent_thing_id", get_agent_thing_id_fn)?;
+
     // equipped_list(room_id) -> array of equipped thing tables
     let equipped_list_fn = {
         let state = state.clone();

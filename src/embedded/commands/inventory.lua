@@ -1,9 +1,14 @@
---- commands/inventory.lua - Inventory command handlers
+--- commands/inventory.lua - Inventory and equipment command handlers
 ---
---- Slot-based equipment management:
----   inventory/inv - List equipment (user and room)
----   equip        - Equip things to user or room with optional slot
----   unequip      - Unequip things from user or room
+--- Containment commands (what's IN containers):
+---   inv      - View contents of a container (me, room, shared, @agent)
+---   take     - Copy a thing into your inventory (CoW)
+---   drop     - Move a thing from your inventory to current room
+---   destroy  - Delete a thing (must specify owner)
+---
+--- Equipment commands (what's ACTIVE):
+---   equip    - Equip things to user or room with optional slot
+---   unequip  - Unequip things from user or room
 ---
 --- Slot types:
 ---   nil (no slot) - General availability (visible to LLM)
@@ -22,7 +27,29 @@ local M = {}
 -- Helpers
 --------------------------------------------------------------------------------
 
---- Format equipped item line
+--- Resolve target string to parent_id
+--- @param target string "me", "room", "shared", or "@agent_name"
+--- @return string|nil parent_id, string|nil error
+local function resolve_target(target)
+    if target == "me" then
+        local id = tools.get_agent_thing_id()
+        if id then return id, nil end
+        return nil, "Not logged in"
+    elseif target == "room" then
+        local id = util.get_room_id()
+        if id then return id, nil end
+        return nil, "Not in a room"
+    elseif target == "shared" or target == "world" then
+        return "shared", nil
+    elseif target:match("^@") then
+        local agent_name = target:sub(2)
+        return "agent_" .. agent_name, nil
+    else
+        return nil, "Invalid target: use me, room, shared, or @agent"
+    end
+end
+
+--- Format equipped item line (for equipment display)
 local function format_equipped_line(item)
     local status = item.available and "+" or "o"
     local qname = item.qualified_name or item.name
@@ -31,80 +58,41 @@ local function format_equipped_line(item)
 end
 
 --------------------------------------------------------------------------------
--- /inv [me|room|all] - List equipment
+-- /inv [target] - View contents of a container
+--
+-- target: (empty)=me, room, shared, @agent
 --------------------------------------------------------------------------------
 
-function M.inventory(args)
-    local filter = args and args:match("^%s*(%S+)") or "all"
-    local lines = {}
-    local agent_id = util.get_agent_id()
-    local room_id = util.get_room_id()
+function M.inv(args)
+    local target = args and args:match("^%s*(%S+)") or "me"
 
-    -- User equipment (if showing "me" or "all")
-    if filter == "me" or filter == "all" then
-        table.insert(lines, "Your Equipment:")
-        if agent_id then
-            local user_equip = tools.get_agent_equipment(agent_id, nil) or {}
-            if #user_equip > 0 then
-                fun.iter(user_equip):each(function(_, item)
-                    table.insert(lines, format_equipped_line(item))
-                end)
-            else
-                table.insert(lines, "  (none)")
-            end
-        else
-            table.insert(lines, "  (not logged in)")
-        end
-        table.insert(lines, "")
+    local parent_id, err = resolve_target(target)
+    if not parent_id then
+        return { text = "Error: " .. err, mode = "notification" }
     end
 
-    -- Room equipment (if showing "room" or "all")
-    if filter == "room" or filter == "all" then
-        table.insert(lines, "Room Equipment:")
-        if room_id then
-            local room_equip = tools.get_room_equipment(room_id, nil) or {}
-            if #room_equip > 0 then
-                fun.iter(room_equip):each(function(_, item)
-                    table.insert(lines, format_equipped_line(item))
-                end)
-            else
-                table.insert(lines, "  (none)")
-            end
-        else
-            table.insert(lines, "  (not in a room)")
-        end
-        table.insert(lines, "")
-    end
-
-    -- Available (unequipped) things
-    table.insert(lines, "Available to Equip:")
-    local all_things = tools.things_match("*:*") or {}
-
-    -- Collect IDs of equipped things
-    local equipped_ids = {}
-    if agent_id then
-        fun.iter(tools.get_agent_equipment(agent_id, nil) or {}):each(function(_, item)
-            equipped_ids[item.thing_id] = true
-        end)
-    end
-    if room_id then
-        fun.iter(tools.get_room_equipment(room_id, nil) or {}):each(function(_, item)
-            equipped_ids[item.thing_id] = true
-        end)
-    end
-
-    -- Filter to available, unequipped things
-    local available = fun.iter(all_things)
-        :filter(function(_, thing) return thing.available and not equipped_ids[thing.id] end)
-        :totable()
-
-    if #available > 0 then
-        fun.iter(available):each(function(_, thing)
-            local qname = thing.qualified_name or thing.name
-            table.insert(lines, string.format("  o %s", qname))
-        end)
+    local title
+    if target == "me" then
+        title = "Your Inventory"
+    elseif target == "room" then
+        title = "Room Contents"
+    elseif target == "shared" or target == "world" then
+        title = "Shared Resources"
     else
-        table.insert(lines, "  (none)")
+        title = string.format("%s's Inventory", target)
+    end
+
+    local children = tools.things_children(parent_id) or {}
+    local lines = {title .. ":"}
+
+    if #children == 0 then
+        table.insert(lines, "  (empty)")
+    else
+        fun.iter(children):each(function(_, thing)
+            local icon = thing.kind == "container" and "[+]" or " - "
+            local name = thing.qualified_name or thing.name
+            table.insert(lines, string.format("  %s %s", icon, name))
+        end)
     end
 
     page.show("Inventory", table.concat(lines, "\n"))
@@ -112,7 +100,129 @@ function M.inventory(args)
 end
 
 -- Alias
-M.inv = M.inventory
+M.inventory = M.inv
+
+--------------------------------------------------------------------------------
+-- /take <thing> - Copy a thing into your inventory (CoW)
+--------------------------------------------------------------------------------
+
+function M.take(args)
+    if not args or args:match("^%s*$") then
+        return { text = "Usage: /take <thing>", mode = "notification" }
+    end
+
+    local thing_name = args:match("^%s*(%S+)")
+
+    -- Try to find the thing by qualified name first
+    local thing = tools.things_get(thing_name)
+
+    if not thing then
+        -- Try pattern search
+        local matches = tools.things_find(thing_name) or {}
+        if #matches == 1 then
+            thing = matches[1]
+        elseif #matches > 1 then
+            return { text = string.format("Ambiguous: %d matches for '%s'", #matches, thing_name), mode = "notification" }
+        else
+            return { text = "Not found: " .. thing_name, mode = "notification" }
+        end
+    end
+
+    local my_thing_id = tools.get_agent_thing_id()
+    if not my_thing_id then
+        return { text = "Error: not logged in", mode = "notification" }
+    end
+
+    local copy = tools.thing_copy(thing.id, my_thing_id)
+    if copy then
+        return { text = "Took " .. (thing.qualified_name or thing.name), mode = "notification" }
+    else
+        return { text = "Failed to take " .. thing_name, mode = "notification" }
+    end
+end
+
+--------------------------------------------------------------------------------
+-- /drop <thing> - Move a thing from your inventory to current room
+--------------------------------------------------------------------------------
+
+function M.drop(args)
+    if not args or args:match("^%s*$") then
+        return { text = "Usage: /drop <thing>", mode = "notification" }
+    end
+
+    local thing_name = args:match("^%s*(%S+)")
+    local my_thing_id = tools.get_agent_thing_id()
+    local room_id = util.get_room_id()
+
+    if not my_thing_id then
+        return { text = "Error: not logged in", mode = "notification" }
+    end
+    if not room_id then
+        return { text = "Error: not in a room", mode = "notification" }
+    end
+
+    -- Find thing in my inventory
+    local my_things = tools.things_children(my_thing_id) or {}
+    local thing = nil
+    for _, t in ipairs(my_things) do
+        if t.name == thing_name or t.qualified_name == thing_name then
+            thing = t
+            break
+        end
+    end
+
+    if not thing then
+        return { text = "Not in your inventory: " .. thing_name, mode = "notification" }
+    end
+
+    if tools.thing_move(thing.id, room_id) then
+        return { text = "Dropped " .. (thing.qualified_name or thing.name), mode = "notification" }
+    else
+        return { text = "Failed to drop " .. thing_name, mode = "notification" }
+    end
+end
+
+--------------------------------------------------------------------------------
+-- /destroy <owner>:<thing> - Delete a thing
+-- Must specify owner to prevent accidents
+--------------------------------------------------------------------------------
+
+function M.destroy(args)
+    if not args or args:match("^%s*$") then
+        return { text = "Usage: /destroy <owner>:<thing>", mode = "notification" }
+    end
+
+    local owner, thing_name = args:match("^%s*([^:]+):(.+)%s*$")
+    if not owner or not thing_name then
+        return { text = "Must specify owner:thing (e.g., me:old-note)", mode = "notification" }
+    end
+
+    -- Resolve owner to parent_id
+    local parent_id, err = resolve_target(owner)
+    if not parent_id then
+        return { text = "Error: " .. err, mode = "notification" }
+    end
+
+    -- Find thing under owner
+    local children = tools.things_children(parent_id) or {}
+    local thing = nil
+    for _, t in ipairs(children) do
+        if t.name == thing_name or t.qualified_name == thing_name then
+            thing = t
+            break
+        end
+    end
+
+    if not thing then
+        return { text = "Not found: " .. owner .. ":" .. thing_name, mode = "notification" }
+    end
+
+    if tools.thing_delete(thing.id) then
+        return { text = "Destroyed " .. thing_name, mode = "notification" }
+    else
+        return { text = "Failed to destroy " .. thing_name, mode = "notification" }
+    end
+end
 
 --------------------------------------------------------------------------------
 -- /equip <context> [slot] <pattern>

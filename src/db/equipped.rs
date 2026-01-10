@@ -235,7 +235,7 @@ impl Database {
             r#"SELECT e.id, e.room_id, e.slot, e.config, e.priority,
                       t.id, t.parent_id, t.kind, t.name, t.qualified_name, t.description,
                       t.content, t.uri, t.metadata, t.code, t.default_slot, t.params,
-                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by
+                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by, t.copied_from
                FROM room_equip e
                JOIN things t ON e.thing_id = t.id
                WHERE e.room_id = ?1
@@ -265,7 +265,7 @@ impl Database {
             r#"SELECT e.id, e.room_id, e.slot, e.config, e.priority,
                       t.id, t.parent_id, t.kind, t.name, t.qualified_name, t.description,
                       t.content, t.uri, t.metadata, t.code, t.default_slot, t.params,
-                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by
+                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by, t.copied_from
                FROM room_equip e
                JOIN things t ON e.thing_id = t.id
                WHERE e.room_id = ?1
@@ -332,6 +332,7 @@ impl Database {
                 updated_at: row.get(19)?,
                 deleted_at: row.get(20)?,
                 created_by: row.get(21)?,
+                copied_from: row.get(22)?,
             },
         })
     }
@@ -425,7 +426,7 @@ impl Database {
             r#"SELECT e.id, e.agent_id, e.slot, e.config, e.priority,
                       t.id, t.parent_id, t.kind, t.name, t.qualified_name, t.description,
                       t.content, t.uri, t.metadata, t.code, t.default_slot, t.params,
-                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by
+                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by, t.copied_from
                FROM agent_equip e
                JOIN things t ON e.thing_id = t.id
                WHERE e.agent_id = ?1
@@ -475,6 +476,7 @@ impl Database {
                 updated_at: row.get(19)?,
                 deleted_at: row.get(20)?,
                 created_by: row.get(21)?,
+                copied_from: row.get(22)?,
             },
         })
     }

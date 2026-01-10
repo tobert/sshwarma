@@ -4,7 +4,7 @@
 //! Uses UUIDv7 for primary keys (time-sortable) and fractional REAL for ordering.
 
 /// Schema version for migrations
-pub const SCHEMA_VERSION: i32 = 103; // 103: Equipment slots, mcp_tools catalog
+pub const SCHEMA_VERSION: i32 = 104; // 104: Add copied_from for CoW tracking
 
 /// Complete schema SQL
 pub const SCHEMA: &str = r#"
@@ -294,7 +294,8 @@ CREATE TABLE IF NOT EXISTS things (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     updated_at INTEGER NOT NULL,            -- Unix timestamp ms
     deleted_at INTEGER,                     -- NULL = not deleted (soft delete)
-    created_by TEXT                         -- Agent who created this thing
+    created_by TEXT,                        -- Agent who created this thing
+    copied_from TEXT REFERENCES things(id)  -- Source thing ID for CoW copies
 );
 
 CREATE INDEX IF NOT EXISTS idx_things_parent ON things(parent_id) WHERE deleted_at IS NULL;

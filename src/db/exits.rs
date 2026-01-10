@@ -99,7 +99,7 @@ impl Database {
             r#"SELECT e.direction,
                       t.id, t.parent_id, t.kind, t.name, t.qualified_name, t.description,
                       t.content, t.uri, t.metadata, t.code, t.default_slot, t.params,
-                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by
+                      t.available, t.created_at, t.updated_at, t.deleted_at, t.created_by, t.copied_from
                FROM exits e
                JOIN things t ON e.to_thing_id = t.id
                WHERE e.from_thing_id = ?1
@@ -131,6 +131,7 @@ impl Database {
                     updated_at: row.get(15)?,
                     deleted_at: row.get(16)?,
                     created_by: row.get(17)?,
+                    copied_from: row.get(18)?,
                 },
             })
         })?;
