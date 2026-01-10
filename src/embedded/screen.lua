@@ -359,9 +359,18 @@ end
 
 function M.render_page_content(ctx, page_name, content, height)
     local C = M.colors
+    -- Split content by newlines, preserving empty lines
     local lines = {}
-    for line in content:gmatch("[^\n]*") do
-        table.insert(lines, line)
+    local pos = 1
+    while true do
+        local nl = content:find("\n", pos, true)
+        if nl then
+            table.insert(lines, content:sub(pos, nl - 1))
+            pos = nl + 1
+        else
+            table.insert(lines, content:sub(pos))
+            break
+        end
     end
 
     scroll.set_content_height(page_name, #lines)
@@ -436,6 +445,10 @@ function on_tick(dirty_tags, tick, ctx)
     local content = bar_layout.content
     if content and content.height > 0 then
         local content_ctx = ctx:sub(0, content.row - 1, ctx.w, content.height)
+
+        -- Clear content area (fills with spaces) to remove stale content
+        content_ctx:clear()
+
         local current_page = pages.current_name()
 
         if current_page == "chat" then
