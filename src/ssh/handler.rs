@@ -127,23 +127,11 @@ impl SshHandler {
     /// Returns empty set if room has no equipped tools or things system not initialized.
     /// This is used to filter which MCP/internal tools are available during @mention.
     fn get_equipped_tool_names(&self, room_name: &str) -> std::collections::HashSet<String> {
-        use crate::db::things::ThingKind;
-
-        // Ensure world is bootstrapped
-        if self.state.db.bootstrap_world().is_err() {
-            return std::collections::HashSet::new();
-        }
-
-        // Find room thing by name
-        let room_thing = match self.state.db.find_things_by_name(room_name) {
-            Ok(things) => things.into_iter().find(|t| t.kind == ThingKind::Room),
-            Err(_) => None,
+        // Look up room by name to get its UUID
+        let room_id = match self.state.db.get_room_by_name(room_name) {
+            Ok(Some(room)) => room.id,
+            _ => return std::collections::HashSet::new(),
         };
-
-        // Get room ID, falling back to convention
-        let room_id = room_thing
-            .map(|t| t.id)
-            .unwrap_or_else(|| format!("room_{}", room_name));
 
         // Get equipped tools for this room
         let equipped = self

@@ -991,8 +991,10 @@ impl SshwarmaMcpServer {
                     }
                 }
                 // Copy equipment from lobby (which has internal tools)
-                if let Err(e) = self.state.db.copy_room_equipment("lobby", &room.id) {
-                    return format!("Error copying equipment: {}", e);
+                if let Ok(Some(lobby)) = self.state.db.get_room_by_name("lobby") {
+                    if let Err(e) = self.state.db.copy_room_equipment(&lobby.id, &room.id) {
+                        return format!("Error copying equipment: {}", e);
+                    }
                 }
                 new_room
             }
