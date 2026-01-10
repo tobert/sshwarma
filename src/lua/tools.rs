@@ -2904,6 +2904,32 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("mcp_tools", mcp_tools_fn)?;
 
+    // tools.server_schemas() -> [{name, description, schema}, ...]
+    // Returns our MCP server's tool definitions with full schemas for introspection/composition
+    let server_schemas_fn = lua.create_function(move |lua, ()| {
+        use crate::mcp_server::get_tool_definitions;
+
+        let tools_table = lua.create_table()?;
+
+        for (idx, tool) in get_tool_definitions().iter().enumerate() {
+            let t = lua.create_table()?;
+            t.set("name", tool.name.as_ref())?;
+            if let Some(ref desc) = tool.description {
+                t.set("description", desc.as_ref())?;
+            }
+
+            // Convert JsonObject schema to Lua table
+            let schema_value = serde_json::Value::Object((*tool.input_schema).clone());
+            let schema_table = json_to_lua(lua, &schema_value)?;
+            t.set("schema", schema_table)?;
+
+            tools_table.set(idx + 1, t)?;
+        }
+
+        Ok(tools_table)
+    })?;
+    tools.set("server_schemas", server_schemas_fn)?;
+
     // tools.prompts(target?) -> {prompts = [{name, content, priority}, ...]}
 
     // tools.prompts() -> {prompts = [{name, content}, ...]}

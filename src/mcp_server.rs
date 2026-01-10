@@ -34,7 +34,7 @@ use tokio::sync::{Mutex, RwLock};
 use rmcp::model::JsonObject;
 
 /// Helper to generate schema without the $schema field
-fn generate_schema<T: schemars::JsonSchema>() -> Arc<JsonObject> {
+pub fn generate_schema<T: schemars::JsonSchema>() -> Arc<JsonObject> {
     let root = rmcp::schemars::schema_for!(T);
     let mut value = serde_json::to_value(root).unwrap_or(Value::Null);
     if let Some(obj) = value.as_object_mut() {
@@ -43,6 +43,44 @@ fn generate_schema<T: schemars::JsonSchema>() -> Arc<JsonObject> {
     } else {
         Arc::new(JsonObject::new())
     }
+}
+
+/// Get all tool definitions for introspection/Lua access
+///
+/// Returns the full list of MCP tools with their schemas.
+/// Useful for:
+/// - Exposing to Lua for context composition
+/// - Schema introspection and composition
+/// - Building meta-tools that wrap other tools
+pub fn get_tool_definitions() -> Vec<Tool> {
+    vec![
+        Tool::new("list_rooms", "List all available rooms", generate_schema::<ListRoomsParams>()),
+        Tool::new("get_history", "Get recent message history from a room", generate_schema::<GetHistoryParams>()),
+        Tool::new("say", "Send a message to a room", generate_schema::<SayParams>()),
+        Tool::new("ask_model", "Ask a model a question, optionally with room context", generate_schema::<AskModelParams>()),
+        Tool::new("list_models", "List available AI models", generate_schema::<ListModelsParams>()),
+        Tool::new("help", "Get help docs. No topic = list available.", generate_schema::<HelpParams>()),
+        Tool::new("create_room", "Create a new room", generate_schema::<CreateRoomParams>()),
+        Tool::new("room_context", "Get full room context for agent onboarding - vibe, assets, exits", generate_schema::<RoomContextParams>()),
+        Tool::new("set_vibe", "Set the vibe/atmosphere for a room", generate_schema::<SetVibeParams>()),
+        Tool::new("add_exit", "Create an exit from one room to another", generate_schema::<AddExitParams>()),
+        Tool::new("fork_room", "Fork a room, inheriting its context", generate_schema::<ForkRoomParams>()),
+        Tool::new("preview_wrap", "Preview what context would be composed for an LLM interaction", generate_schema::<PreviewWrapParams>()),
+        Tool::new("list_scripts", "List available Lua scripts", generate_schema::<ListScriptsParams>()),
+        Tool::new("create_script", "Create a new Lua script", generate_schema::<CreateScriptParams>()),
+        Tool::new("read_script", "Read a user's Lua UI script by module path", generate_schema::<ReadScriptParams>()),
+        Tool::new("update_script", "Update a user's Lua UI script (creates new version via copy-on-write)", generate_schema::<UpdateScriptParams>()),
+        Tool::new("delete_script", "Delete a user's Lua UI script (removes all versions)", generate_schema::<DeleteScriptParams>()),
+        Tool::new("set_entrypoint", "Set the main UI script entrypoint for a user", generate_schema::<SetEntrypointParams>()),
+        Tool::new("inventory_list", "List equipped tools in a room's inventory", generate_schema::<InventoryListParams>()),
+        Tool::new("inventory_equip", "Equip a tool in a room", generate_schema::<InventoryEquipParams>()),
+        Tool::new("inventory_unequip", "Unequip a tool from a room", generate_schema::<InventoryUnequipParams>()),
+        Tool::new("thing_contents", "List contents of a container (things inside rooms, agents, or shared)", generate_schema::<ThingContentsParams>()),
+        Tool::new("thing_take", "Copy a thing into your inventory (copy-on-write)", generate_schema::<ThingTakeParams>()),
+        Tool::new("thing_drop", "Move a thing from your inventory to a room", generate_schema::<ThingDropParams>()),
+        Tool::new("thing_create", "Create a new thing in a container", generate_schema::<ThingCreateParams>()),
+        Tool::new("thing_destroy", "Delete a thing (must specify owner:name)", generate_schema::<ThingDestroyParams>()),
+    ]
 }
 
 /// Shared state for the MCP server
@@ -1464,37 +1502,8 @@ impl ServerHandler for SshwarmaMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
-            let tools = vec![
-                Tool::new("list_rooms", "List all available rooms", generate_schema::<ListRoomsParams>()),
-                Tool::new("get_history", "Get recent message history from a room", generate_schema::<GetHistoryParams>()),
-                Tool::new("say", "Send a message to a room", generate_schema::<SayParams>()),
-                Tool::new("ask_model", "Ask a model a question, optionally with room context", generate_schema::<AskModelParams>()),
-                Tool::new("list_models", "List available AI models", generate_schema::<ListModelsParams>()),
-                Tool::new("help", "Get help docs. No topic = list available.", generate_schema::<HelpParams>()),
-                Tool::new("create_room", "Create a new room", generate_schema::<CreateRoomParams>()),
-                Tool::new("room_context", "Get full room context for agent onboarding - vibe, assets, exits", generate_schema::<RoomContextParams>()),
-                Tool::new("set_vibe", "Set the vibe/atmosphere for a room", generate_schema::<SetVibeParams>()),
-                Tool::new("add_exit", "Create an exit from one room to another", generate_schema::<AddExitParams>()),
-                Tool::new("fork_room", "Fork a room, inheriting its context", generate_schema::<ForkRoomParams>()),
-                Tool::new("preview_wrap", "Preview what context would be composed for an LLM interaction", generate_schema::<PreviewWrapParams>()),
-                Tool::new("list_scripts", "List available Lua scripts", generate_schema::<ListScriptsParams>()),
-                Tool::new("create_script", "Create a new Lua script", generate_schema::<CreateScriptParams>()),
-                Tool::new("read_script", "Read a user's Lua UI script by module path", generate_schema::<ReadScriptParams>()),
-                Tool::new("update_script", "Update a user's Lua UI script (creates new version via copy-on-write)", generate_schema::<UpdateScriptParams>()),
-                Tool::new("delete_script", "Delete a user's Lua UI script (removes all versions)", generate_schema::<DeleteScriptParams>()),
-                Tool::new("set_entrypoint", "Set the main UI script entrypoint for a user", generate_schema::<SetEntrypointParams>()),
-                Tool::new("inventory_list", "List equipped tools in a room's inventory", generate_schema::<InventoryListParams>()),
-                Tool::new("inventory_equip", "Equip a tool in a room", generate_schema::<InventoryEquipParams>()),
-                Tool::new("inventory_unequip", "Unequip a tool from a room", generate_schema::<InventoryUnequipParams>()),
-                Tool::new("thing_contents", "List contents of a container (things inside rooms, agents, or shared)", generate_schema::<ThingContentsParams>()),
-                Tool::new("thing_take", "Copy a thing into your inventory (copy-on-write)", generate_schema::<ThingTakeParams>()),
-                Tool::new("thing_drop", "Move a thing from your inventory to a room", generate_schema::<ThingDropParams>()),
-                Tool::new("thing_create", "Create a new thing in a container", generate_schema::<ThingCreateParams>()),
-                Tool::new("thing_destroy", "Delete a thing (must specify owner:name)", generate_schema::<ThingDestroyParams>()),
-            ];
-
             Ok(ListToolsResult {
-                tools,
+                tools: get_tool_definitions(),
                 next_cursor: None,
                 meta: None,
             })
