@@ -286,12 +286,12 @@ end
 --- Executes all hook:wrap things equipped to the room and includes their output
 local function format_wrap_hooks_layer()
     local session = tools.session()
-    if not session or not session.room_name then
+    if not session or not session.room_id then
         return layer_result("")
     end
 
     -- Get hook:wrap equipment for this room
-    local hooks = tools.get_room_equipment(session.room_name, "hook:wrap")
+    local hooks = tools.get_room_equipment(session.room_id, "hook:wrap")
     if not hooks or #hooks == 0 then
         return layer_result("")
     end

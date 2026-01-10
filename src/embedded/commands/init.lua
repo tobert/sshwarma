@@ -225,12 +225,12 @@ function M.dispatch(name, args)
 
     -- Check agent equipment first, then room equipment
     local equipped = {}
-    if session and session.username then
-        equipped = tools.get_agent_equipment(session.username, slot_name) or {}
+    if session and session.agent_id then
+        equipped = tools.get_agent_equipment(session.agent_id, slot_name) or {}
     end
 
-    if #equipped == 0 and session and session.room_name then
-        equipped = tools.get_room_equipment(session.room_name, slot_name) or {}
+    if #equipped == 0 and session and session.room_id then
+        equipped = tools.get_room_equipment(session.room_id, slot_name) or {}
     end
 
     if #equipped > 0 then

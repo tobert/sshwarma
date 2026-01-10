@@ -501,11 +501,11 @@ function background(tick)
 
     -- Run hook:background:ui things (session-tied, only when room is viewed)
     local session = tools.session and tools.session()
-    if not session or not session.room_name then
+    if not session or not session.room_id then
         return
     end
 
-    local hooks = tools.get_room_equipment and tools.get_room_equipment(session.room_name, "hook:background:ui")
+    local hooks = tools.get_room_equipment and tools.get_room_equipment(session.room_id, "hook:background:ui")
     if not hooks or #hooks == 0 then
         return
     end

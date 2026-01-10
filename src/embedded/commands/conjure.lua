@@ -17,8 +17,8 @@ local M = {}
 --------------------------------------------------------------------------------
 
 local function get_username()
-    local session = tools.session()
-    return session and session.username or "user"
+    local user = tools.current_user()
+    return user and user.name or "user"
 end
 
 --------------------------------------------------------------------------------
