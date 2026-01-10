@@ -17,32 +17,6 @@
 local fun = require("fun")
 
 --------------------------------------------------------------------------------
--- Tokyo Night color palette (hex for segment rendering)
---------------------------------------------------------------------------------
-
-local colors = {
-    dim = "#565f89",
-    fg = "#a9b1d6",
-    cyan = "#7dcfff",
-    blue = "#7aa2f7",
-    green = "#9ece6a",
-    yellow = "#e0af68",
-    orange = "#ff9e64",
-    magenta = "#bb9af7",
-    red = "#f7768e",
-}
-
--- Box drawing characters
-local box = {
-    tl = "\226\149\173",  -- ╭
-    tr = "\226\149\174",  -- ╮
-    bl = "\226\149\176",  -- ╰
-    br = "\226\149\175",  -- ╯
-    h = "\226\148\128",   -- ─
-    v = "\226\148\130",   -- │
-}
-
---------------------------------------------------------------------------------
 -- Formatting helpers (produce markdown from unified tools data)
 --------------------------------------------------------------------------------
 
@@ -66,39 +40,6 @@ local function partition_who(who)
     local models, users = fun.partition(function(p) return p.is_model end, who)
     return fun.iter(users):map(function(p) return p.name end):totable(),
            fun.iter(models):map(function(p) return p.name end):totable()
-end
-
---------------------------------------------------------------------------------
--- ANSI segment helpers (produce {Text, Fg, Bg} tables for TTY rendering)
---------------------------------------------------------------------------------
-
---- Create a segment with optional foreground color
-local function seg(text, fg, bg)
-    local s = { Text = text }
-    if fg then s.Fg = fg end
-    if bg then s.Bg = bg end
-    return s
-end
-
---- Create a box row with left border, content segments, right border
-local function box_row(inner_width, content_segments)
-    local row = { seg(box.v, colors.dim) }
-
-    -- Calculate content length and add segments
-    local content_len = 0
-    for _, s in ipairs(content_segments) do
-        table.insert(row, s)
-        content_len = content_len + #s.Text
-    end
-
-    -- Pad to inner width
-    local padding = inner_width - content_len
-    if padding > 0 then
-        table.insert(row, seg(string.rep(" ", padding)))
-    end
-
-    table.insert(row, seg(box.v, colors.dim))
-    return row
 end
 
 --- Format the global system layer (static sshwarma environment description)
@@ -338,105 +279,8 @@ local function format_wrap_hooks_layer()
 end
 
 --------------------------------------------------------------------------------
--- ANSI formatters for /look command (TTY output)
+-- Markdown formatters for /look command
 --------------------------------------------------------------------------------
-
---- Format complete room info as ANSI segments for TTY display
---- Returns array of rows, each row is array of segments
-local function format_look_ansi()
-    local look = tools.look()
-    local who = tools.who()
-    local exits = tools.exits()
-
-    -- Lobby case
-    if not look or not look.room then
-        return {
-            { seg(box.tl, colors.dim), seg(string.rep(box.h, 20), colors.dim), seg(box.tr, colors.dim) },
-            { seg(box.v, colors.dim), seg(" Lobby              ", colors.cyan), seg(box.v, colors.dim) },
-            { seg(box.bl, colors.dim), seg(string.rep(box.h, 20), colors.dim), seg(box.br, colors.dim) },
-        }
-    end
-
-    local inner = 40  -- inner width of box
-    local rows = {}
-
-    -- Top border with room name
-    local title = " " .. look.room .. " "
-    local title_len = #title
-    local left_h = math.floor((inner - title_len) / 2)
-    local right_h = inner - title_len - left_h
-    table.insert(rows, {
-        seg(box.tl, colors.dim),
-        seg(string.rep(box.h, left_h), colors.dim),
-        seg(title, colors.cyan),
-        seg(string.rep(box.h, right_h), colors.dim),
-        seg(box.tr, colors.dim),
-    })
-
-    -- Description
-    if look.description then
-        table.insert(rows, box_row(inner, { seg(" " .. look.description) }))
-    end
-
-    -- Empty line
-    table.insert(rows, box_row(inner, { seg("") }))
-
-    -- Users and models
-    local users, models = partition_who(who)
-
-    if #users > 0 then
-        table.insert(rows, box_row(inner, {
-            seg(" "),
-            seg(table.concat(users, ", "), colors.cyan),
-        }))
-    else
-        table.insert(rows, box_row(inner, { seg(" Nobody else here.", colors.dim) }))
-    end
-
-    -- Models
-    if #models > 0 then
-        table.insert(rows, box_row(inner, {
-            seg(" "),
-            seg(table.concat(models, ", "), colors.magenta),
-        }))
-    end
-
-    -- Vibe
-    if look.vibe then
-        table.insert(rows, box_row(inner, {
-            seg(" vibe: ", colors.dim),
-            seg(look.vibe, colors.green),
-        }))
-    end
-
-    -- Exits
-    if exits and next(exits) then
-        table.insert(rows, box_row(inner, { seg("") }))
-        for dir, room in pairs(exits) do
-            local arrow = "->"
-            if dir == "north" or dir == "up" then arrow = "^"
-            elseif dir == "south" or dir == "down" then arrow = "v"
-            elseif dir == "east" or dir == "in" then arrow = "->"
-            elseif dir == "west" or dir == "out" then arrow = "<-"
-            end
-            table.insert(rows, box_row(inner, {
-                seg(" " .. arrow .. " ", colors.yellow),
-                seg(dir, colors.yellow),
-                seg(" -> "),
-                seg(room, colors.blue),
-            }))
-        end
-    end
-
-    -- Bottom border
-    table.insert(rows, {
-        seg(box.bl, colors.dim),
-        seg(string.rep(box.h, inner), colors.dim),
-        seg(box.br, colors.dim),
-    })
-
-    return rows
-end
 
 --- Format complete room info as markdown for model consumption
 local function format_look_markdown()
@@ -651,8 +495,7 @@ _G.wrap = wrap
 _G.default_wrap = default_wrap
 _G.WrapBuilder = WrapBuilder
 
--- Look functions (for /look command and sshwarma_look tool)
-_G.look_ansi = format_look_ansi
+-- Look function (for /look command and sshwarma_look tool)
 _G.look_markdown = format_look_markdown
 
 -- Test helpers (for unit testing internal functions)

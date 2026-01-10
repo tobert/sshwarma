@@ -336,13 +336,14 @@ function M.reset()
 end
 
 -- ==========================================================================
--- Global Entry Point
+-- Global Entry Point (called from Rust)
 -- ==========================================================================
 
---- Main entry point for raw byte input
+--- Main entry point for raw byte input.
+--- Called from Rust ssh handler for each input event.
 ---@param bytes string Raw bytes from SSH channel
 ---@return table|nil Action to take
-function on_input(bytes)
+function _G.on_input(bytes)
     local keys = input.parse(bytes)
     local last_action = nil
 

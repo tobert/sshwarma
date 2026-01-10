@@ -118,6 +118,9 @@ const FUN_MODULE: &str = include_str!("../embedded/lib/fun.lua");
 /// Embedded str.lua string utilities (MIT license)
 const STR_MODULE: &str = include_str!("../embedded/lib/str.lua");
 
+/// Embedded util.lua shared utilities
+const UTIL_MODULE: &str = include_str!("../embedded/lib/util.lua");
+
 /// Page helper for commands - opens pages directly
 const PAGE_MODULE: &str = include_str!("../embedded/lib/page.lua");
 
@@ -184,6 +187,7 @@ impl EmbeddedModules {
         modules.insert("inspect".to_string(), INSPECT_MODULE);
         modules.insert("fun".to_string(), FUN_MODULE);
         modules.insert("str".to_string(), STR_MODULE);
+        modules.insert("util".to_string(), UTIL_MODULE);
         modules.insert("page".to_string(), PAGE_MODULE);
 
         // Help documentation modules
@@ -399,6 +403,14 @@ impl LuaRuntime {
             .eval::<Table>()
             .map_err(|e| anyhow::anyhow!("failed to load str module: {}", e))?;
         loaded.set("str", str_chunk)?;
+
+        // util.lua - shared utilities (direction tables, formatters, session helpers)
+        let util_chunk = lua
+            .load(UTIL_MODULE)
+            .set_name("embedded:lib/util.lua")
+            .eval::<Table>()
+            .map_err(|e| anyhow::anyhow!("failed to load util module: {}", e))?;
+        loaded.set("util", util_chunk)?;
 
         // Load new UI modules (require fun to be loaded first)
         let layout_chunk = lua
@@ -2485,33 +2497,6 @@ mod tests {
             "should mention lobby: {}",
             result
         );
-    }
-
-    #[test]
-    fn test_look_ansi_lobby() {
-        let runtime = LuaRuntime::new().expect("should create runtime");
-
-        runtime
-            .lua()
-            .load(
-                r#"
-            local rows = look_ansi()
-            -- Should return an array of rows (for lobby, 3 rows: top border, lobby text, bottom border)
-            assert(type(rows) == "table", "should return a table")
-            assert(#rows >= 3, "should have at least 3 rows for lobby box, got " .. #rows)
-
-            -- Each row should be an array of segments
-            for i, row in ipairs(rows) do
-                assert(type(row) == "table", "row " .. i .. " should be a table")
-                for j, seg in ipairs(row) do
-                    assert(type(seg) == "table", "segment should be a table")
-                    assert(seg.Text ~= nil, "segment should have Text field")
-                end
-            end
-        "#,
-            )
-            .exec()
-            .expect("look_ansi lobby test should pass");
     }
 
     // =========================================================================

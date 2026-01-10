@@ -20,6 +20,7 @@
 --   end)
 
 local layout = require 'ui.layout'
+local fun = require 'fun'
 
 local M = {}
 
@@ -64,11 +65,7 @@ end
 --- Get all bar definitions as array
 ---@return table array of bar defs
 function M.all()
-    local result = {}
-    for _, def in pairs(bar_defs) do
-        table.insert(result, def)
-    end
-    return result
+    return fun.iter(bar_defs):map(function(_, def) return def end):totable()
 end
 
 --- Clear all bar definitions (for testing/reset)

@@ -10,6 +10,8 @@
 -- Commands that display content use page.show() directly. Commands returning
 -- quick feedback use: {text = "...", mode = "notification"}
 
+local fun = require('fun')
+
 local M = {}
 
 -- ============================================================================
@@ -271,12 +273,9 @@ function M.exists(name)
 end
 
 --- Get list of all command names
---- @return table Array of command names
+--- @return table Array of command names (sorted)
 function M.list()
-    local names = {}
-    for name, _ in pairs(handlers) do
-        table.insert(names, name)
-    end
+    local names = fun.iter(handlers):map(function(k, _) return k end):totable()
     table.sort(names)
     return names
 end

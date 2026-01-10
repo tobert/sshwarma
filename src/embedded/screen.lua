@@ -553,5 +553,7 @@ function background(tick)
     end
 end
 
-screen = M
+-- Export to global for Rust access
+_G.screen = M
+
 return M

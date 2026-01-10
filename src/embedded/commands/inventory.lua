@@ -1,56 +1,33 @@
--- sshwarma inventory command handlers
---
--- Lua command handlers for slot-based equipment management:
---   inventory/inv - List equipment (user and room)
---   equip        - Equip things to user or room with optional slot
---   unequip      - Unequip things from user or room
---
--- Slot types:
---   nil (no slot) - General availability (visible to LLM)
---   command:*     - Slash command binding (e.g., command:fish)
---   hook:wrap     - Context composition hook
---   hook:background - Background execution hook
---
--- Commands that display content use page.show() directly.
+--- commands/inventory.lua - Inventory command handlers
+---
+--- Slot-based equipment management:
+---   inventory/inv - List equipment (user and room)
+---   equip        - Equip things to user or room with optional slot
+---   unequip      - Unequip things from user or room
+---
+--- Slot types:
+---   nil (no slot) - General availability (visible to LLM)
+---   command:*     - Slash command binding (e.g., command:fish)
+---   hook:wrap     - Context composition hook
+---   hook:background - Background execution hook
 
 local page = require('page')
 local str = require('str')
 local fun = require('fun')
+local util = require('util')
+
 local M = {}
 
 --------------------------------------------------------------------------------
--- Helper: format equipped item line
+-- Helpers
 --------------------------------------------------------------------------------
 
+--- Format equipped item line
 local function format_equipped_line(item)
     local status = item.available and "+" or "o"
     local qname = item.qualified_name or item.name
     local slot_info = item.slot and (" [" .. item.slot .. "]") or ""
     return string.format("  %s %s%s", status, qname, slot_info)
-end
-
---------------------------------------------------------------------------------
--- Helper: get current user agent ID
---------------------------------------------------------------------------------
-
-local function get_agent_id()
-    local session = tools.session()
-    if session and session.agent_id then
-        return session.agent_id  -- UUID from agents table
-    end
-    return nil
-end
-
---------------------------------------------------------------------------------
--- Helper: get current room ID
---------------------------------------------------------------------------------
-
-local function get_room_id()
-    local session = tools.session()
-    if session and session.room_id then
-        return session.room_id  -- Use actual room ID from database
-    end
-    return nil
 end
 
 --------------------------------------------------------------------------------
@@ -60,8 +37,8 @@ end
 function M.inventory(args)
     local filter = args and args:match("^%s*(%S+)") or "all"
     local lines = {}
-    local agent_id = get_agent_id()
-    local room_id = get_room_id()
+    local agent_id = util.get_agent_id()
+    local room_id = util.get_room_id()
 
     -- User equipment (if showing "me" or "all")
     if filter == "me" or filter == "all" then
@@ -69,9 +46,9 @@ function M.inventory(args)
         if agent_id then
             local user_equip = tools.get_agent_equipment(agent_id, nil) or {}
             if #user_equip > 0 then
-                for _, item in ipairs(user_equip) do
+                fun.iter(user_equip):each(function(_, item)
                     table.insert(lines, format_equipped_line(item))
-                end
+                end)
             else
                 table.insert(lines, "  (none)")
             end
@@ -87,9 +64,9 @@ function M.inventory(args)
         if room_id then
             local room_equip = tools.get_room_equipment(room_id, nil) or {}
             if #room_equip > 0 then
-                for _, item in ipairs(room_equip) do
+                fun.iter(room_equip):each(function(_, item)
                     table.insert(lines, format_equipped_line(item))
-                end
+                end)
             else
                 table.insert(lines, "  (none)")
             end
@@ -102,33 +79,31 @@ function M.inventory(args)
     -- Available (unequipped) things
     table.insert(lines, "Available to Equip:")
     local all_things = tools.things_match("*:*") or {}
-    local equipped_ids = {}
 
     -- Collect IDs of equipped things
+    local equipped_ids = {}
     if agent_id then
-        local user_equip = tools.get_agent_equipment(agent_id, nil) or {}
-        for _, item in ipairs(user_equip) do
+        fun.iter(tools.get_agent_equipment(agent_id, nil) or {}):each(function(_, item)
             equipped_ids[item.thing_id] = true
-        end
+        end)
     end
     if room_id then
-        local room_equip = tools.get_room_equipment(room_id, nil) or {}
-        for _, item in ipairs(room_equip) do
+        fun.iter(tools.get_room_equipment(room_id, nil) or {}):each(function(_, item)
             equipped_ids[item.thing_id] = true
-        end
+        end)
     end
 
     -- Filter to available, unequipped things
-    local available_count = 0
-    for _, thing in ipairs(all_things) do
-        if thing.available and not equipped_ids[thing.id] then
-            local status = "○"
+    local available = fun.iter(all_things)
+        :filter(function(_, thing) return thing.available and not equipped_ids[thing.id] end)
+        :totable()
+
+    if #available > 0 then
+        fun.iter(available):each(function(_, thing)
             local qname = thing.qualified_name or thing.name
-            table.insert(lines, string.format("  %s %s", status, qname))
-            available_count = available_count + 1
-        end
-    end
-    if available_count == 0 then
+            table.insert(lines, string.format("  o %s", qname))
+        end)
+    else
         table.insert(lines, "  (none)")
     end
 
@@ -146,7 +121,7 @@ M.inv = M.inventory
 --   /equip me sshwarma:*           - Equip all sshwarma tools to user
 --   /equip room holler:sample      - Equip tool to room
 --   /equip me command:fish atobey:fish  - Equip with specific slot
---   /equip room hook:wrap myns:wrapper  - Equip as wrap hook
+--   /equip @qwenl holler:*         - Equip holler tools to agent qwenl
 --------------------------------------------------------------------------------
 
 function M.equip(args)
@@ -179,35 +154,25 @@ Examples:
         context_type = "room"
     elseif context:match("^@") then
         context_type = "agent"
-        agent_name = context:sub(2)  -- strip @
+        agent_name = context:sub(2)
     else
-        return {
-            text = "Error: context must be 'me', 'room', or '@agent_name'",
-            mode = "notification"
-        }
+        return { text = "Error: context must be 'me', 'room', or '@agent_name'", mode = "notification" }
     end
 
     -- Parse remaining args: could be [slot] <pattern> or just <pattern>
     local slot, pattern
     if #parts >= 3 then
-        -- Check if second part looks like a slot
         local maybe_slot = parts[2]
-        if maybe_slot:match("^command:") or
-           maybe_slot:match("^hook:") or
-           maybe_slot:match("^hotkey:") then
+        if maybe_slot:match("^command:") or maybe_slot:match("^hook:") or maybe_slot:match("^hotkey:") then
             slot = maybe_slot
             pattern = parts[3]
         else
-            -- No slot, second part is the pattern
             pattern = parts[2]
         end
     elseif #parts == 2 then
         pattern = parts[2]
     else
-        return {
-            text = "Error: missing pattern argument",
-            mode = "notification"
-        }
+        return { text = "Error: missing pattern argument", mode = "notification" }
     end
 
     -- Parse slot config (e.g., hook:background:1000 -> slot=hook:background, config)
@@ -223,42 +188,37 @@ Examples:
     -- Expand pattern to matching things
     local things = tools.things_match(pattern) or {}
     if #things == 0 then
-        return {
-            text = string.format("No things match pattern: %s", pattern),
-            mode = "notification"
-        }
+        return { text = string.format("No things match pattern: %s", pattern), mode = "notification" }
     end
 
     -- Get target ID
     local target_id, display_name
     if context_type == "agent" then
         if agent_name then
-            -- Look up specific agent by name
             local agent = tools.get_agent(agent_name)
             if not agent then
-                return {text = string.format("Error: agent '%s' not found", agent_name), mode = "notification"}
+                return { text = string.format("Error: agent '%s' not found", agent_name), mode = "notification" }
             end
             target_id = agent.id
             display_name = "@" .. agent_name
         else
-            -- Use current user
-            target_id = get_agent_id()
+            target_id = util.get_agent_id()
             if not target_id then
-                return {text = "Error: not logged in", mode = "notification"}
+                return { text = "Error: not logged in", mode = "notification" }
             end
             display_name = "me"
         end
     else
-        target_id = get_room_id()
+        target_id = util.get_room_id()
         if not target_id then
-            return {text = "Error: not in a room", mode = "notification"}
+            return { text = "Error: not in a room", mode = "notification" }
         end
         display_name = "room"
     end
 
     -- Equip each matching thing
     local equipped = {}
-    for i, thing in ipairs(things) do
+    fun.iter(things):enumerate():each(function(i, thing)
         local actual_slot = slot or thing.default_slot
         local success
         if context_type == "agent" then
@@ -269,19 +229,16 @@ Examples:
         if success then
             table.insert(equipped, thing.qualified_name or thing.name)
         end
-    end
+    end)
 
     if #equipped == 0 then
-        return {
-            text = "Error: could not equip any items",
-            mode = "notification"
-        }
+        return { text = "Error: could not equip any items", mode = "notification" }
     end
 
     local lines = {string.format("Equipped %d item(s) to %s:", #equipped, display_name)}
-    for _, name in ipairs(equipped) do
+    fun.iter(equipped):each(function(_, name)
         table.insert(lines, "  " .. name)
-    end
+    end)
 
     page.show("Equip", table.concat(lines, "\n"))
     return {}
@@ -293,7 +250,7 @@ end
 -- Examples:
 --   /unequip me sshwarma:*         - Unequip all sshwarma tools from user
 --   /unequip room holler:sample    - Unequip tool from room
---   /unequip me command:fish       - Unequip by slot only
+--   /unequip @qwenl holler:*       - Unequip holler tools from agent qwenl
 --------------------------------------------------------------------------------
 
 function M.unequip(args)
@@ -314,7 +271,7 @@ Examples:
     end
 
     local parts = str.split(args, "%s+")
-    local context = parts[1]  -- 'me', 'room', or '@agent_name'
+    local context = parts[1]
 
     -- Parse context: me, room, or @agent_name
     local context_type, agent_name
@@ -324,21 +281,16 @@ Examples:
         context_type = "room"
     elseif context:match("^@") then
         context_type = "agent"
-        agent_name = context:sub(2)  -- strip @
+        agent_name = context:sub(2)
     else
-        return {
-            text = "Error: context must be 'me', 'room', or '@agent_name'",
-            mode = "notification"
-        }
+        return { text = "Error: context must be 'me', 'room', or '@agent_name'", mode = "notification" }
     end
 
     -- Parse remaining args: could be [slot] <pattern> or just <pattern>
     local slot, pattern
     if #parts >= 3 then
         local maybe_slot = parts[2]
-        if maybe_slot:match("^command:") or
-           maybe_slot:match("^hook:") or
-           maybe_slot:match("^hotkey:") then
+        if maybe_slot:match("^command:") or maybe_slot:match("^hook:") or maybe_slot:match("^hotkey:") then
             slot = maybe_slot
             pattern = parts[3]
         else
@@ -347,51 +299,43 @@ Examples:
     elseif #parts == 2 then
         pattern = parts[2]
     else
-        return {
-            text = "Error: missing pattern argument",
-            mode = "notification"
-        }
+        return { text = "Error: missing pattern argument", mode = "notification" }
     end
 
     -- Expand pattern to matching things
     local things = tools.things_match(pattern) or {}
     if #things == 0 then
-        return {
-            text = string.format("No things match pattern: %s", pattern),
-            mode = "notification"
-        }
+        return { text = string.format("No things match pattern: %s", pattern), mode = "notification" }
     end
 
     -- Get target ID
     local target_id, display_name
     if context_type == "agent" then
         if agent_name then
-            -- Look up specific agent by name
             local agent = tools.get_agent(agent_name)
             if not agent then
-                return {text = string.format("Error: agent '%s' not found", agent_name), mode = "notification"}
+                return { text = string.format("Error: agent '%s' not found", agent_name), mode = "notification" }
             end
             target_id = agent.id
             display_name = "@" .. agent_name
         else
-            -- Use current user
-            target_id = get_agent_id()
+            target_id = util.get_agent_id()
             if not target_id then
-                return {text = "Error: not logged in", mode = "notification"}
+                return { text = "Error: not logged in", mode = "notification" }
             end
             display_name = "me"
         end
     else
-        target_id = get_room_id()
+        target_id = util.get_room_id()
         if not target_id then
-            return {text = "Error: not in a room", mode = "notification"}
+            return { text = "Error: not in a room", mode = "notification" }
         end
         display_name = "room"
     end
 
     -- Unequip each matching thing
     local unequipped = {}
-    for _, thing in ipairs(things) do
+    fun.iter(things):each(function(_, thing)
         local success
         if context_type == "agent" then
             success = tools.agent_unequip(target_id, thing.id, slot)
@@ -401,19 +345,16 @@ Examples:
         if success then
             table.insert(unequipped, thing.qualified_name or thing.name)
         end
-    end
+    end)
 
     if #unequipped == 0 then
-        return {
-            text = "Error: could not unequip any items",
-            mode = "notification"
-        }
+        return { text = "Error: could not unequip any items", mode = "notification" }
     end
 
     local lines = {string.format("Unequipped %d item(s) from %s:", #unequipped, display_name)}
-    for _, name in ipairs(unequipped) do
+    fun.iter(unequipped):each(function(_, name)
         table.insert(lines, "  " .. name)
-    end
+    end)
 
     page.show("Unequip", table.concat(lines, "\n"))
     return {}

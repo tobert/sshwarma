@@ -503,6 +503,7 @@ function M.history_next()
     sync_state()
 end
 
--- Export module globally for other scripts to use
-input = M
+-- Export to global for cross-module access
+_G.input = M
+
 return M
