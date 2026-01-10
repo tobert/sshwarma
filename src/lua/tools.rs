@@ -899,6 +899,28 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("current_user", current_user_fn)?;
 
+    // tools.get_agent(name) -> {id, name} or nil
+    let get_agent_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, name: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.get_agent_by_name(&name) {
+                Ok(Some(agent)) => {
+                    let result = lua.create_table()?;
+                    result.set("id", agent.id)?;
+                    result.set("name", agent.name)?;
+                    Ok(Value::Table(result))
+                }
+                _ => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("get_agent", get_agent_fn)?;
+
     // tools.current_model() -> {name, display, ...} or nil
     let current_model_fn = {
         let state = state.clone();

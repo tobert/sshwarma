@@ -154,13 +154,14 @@ function M.equip(args)
         page.show("Equip", [[
 Usage: /equip <context> [slot] <pattern>
 
-Context: me | room
+Context: me | room | @agent_name
 Pattern: qualified name or glob (e.g., sshwarma:*, holler:sample)
 Slot (optional): command:*, hook:wrap, hook:background
 
 Examples:
   /equip me sshwarma:*              Equip all sshwarma tools to yourself
   /equip room holler:sample         Equip tool to room (for LLM)
+  /equip @qwenl holler:*            Equip holler tools to agent qwenl
   /equip me command:fish atobey:fish   Bind /fish to atobey:fish
   /equip room hook:wrap myns:wrap   Add wrap hook to room
 ]])
@@ -168,11 +169,20 @@ Examples:
     end
 
     local parts = str.split(args, "%s+")
-    local context = parts[1]  -- 'me' or 'room'
+    local context = parts[1]  -- 'me', 'room', or '@agent_name'
 
-    if context ~= "me" and context ~= "room" then
+    -- Parse context: me, room, or @agent_name
+    local context_type, agent_name
+    if context == "me" then
+        context_type = "agent"
+    elseif context == "room" then
+        context_type = "room"
+    elseif context:match("^@") then
+        context_type = "agent"
+        agent_name = context:sub(2)  -- strip @
+    else
         return {
-            text = "Error: context must be 'me' or 'room'",
+            text = "Error: context must be 'me', 'room', or '@agent_name'",
             mode = "notification"
         }
     end
@@ -220,17 +230,30 @@ Examples:
     end
 
     -- Get target ID
-    local target_id
-    if context == "me" then
-        target_id = get_agent_id()
-        if not target_id then
-            return {text = "Error: not logged in", mode = "notification"}
+    local target_id, display_name
+    if context_type == "agent" then
+        if agent_name then
+            -- Look up specific agent by name
+            local agent = tools.get_agent(agent_name)
+            if not agent then
+                return {text = string.format("Error: agent '%s' not found", agent_name), mode = "notification"}
+            end
+            target_id = agent.id
+            display_name = "@" .. agent_name
+        else
+            -- Use current user
+            target_id = get_agent_id()
+            if not target_id then
+                return {text = "Error: not logged in", mode = "notification"}
+            end
+            display_name = "me"
         end
     else
         target_id = get_room_id()
         if not target_id then
             return {text = "Error: not in a room", mode = "notification"}
         end
+        display_name = "room"
     end
 
     -- Equip each matching thing
@@ -238,7 +261,7 @@ Examples:
     for i, thing in ipairs(things) do
         local actual_slot = slot or thing.default_slot
         local success
-        if context == "me" then
+        if context_type == "agent" then
             success = tools.agent_equip(target_id, thing.id, actual_slot, config, i)
         else
             success = tools.room_equip(target_id, thing.id, actual_slot, i)
@@ -255,7 +278,7 @@ Examples:
         }
     end
 
-    local lines = {string.format("Equipped %d item(s) to %s:", #equipped, context)}
+    local lines = {string.format("Equipped %d item(s) to %s:", #equipped, display_name)}
     for _, name in ipairs(equipped) do
         table.insert(lines, "  " .. name)
     end
@@ -278,23 +301,33 @@ function M.unequip(args)
         page.show("Unequip", [[
 Usage: /unequip <context> [slot] <pattern>
 
-Context: me | room
+Context: me | room | @agent_name
 Pattern: qualified name or glob
 Slot (optional): command:*, hook:wrap, hook:background
 
 Examples:
   /unequip me sshwarma:*            Unequip all sshwarma tools
   /unequip room holler:sample       Unequip from room
+  /unequip @qwenl holler:*          Unequip holler tools from agent qwenl
 ]])
         return {}
     end
 
     local parts = str.split(args, "%s+")
-    local context = parts[1]  -- 'me' or 'room'
+    local context = parts[1]  -- 'me', 'room', or '@agent_name'
 
-    if context ~= "me" and context ~= "room" then
+    -- Parse context: me, room, or @agent_name
+    local context_type, agent_name
+    if context == "me" then
+        context_type = "agent"
+    elseif context == "room" then
+        context_type = "room"
+    elseif context:match("^@") then
+        context_type = "agent"
+        agent_name = context:sub(2)  -- strip @
+    else
         return {
-            text = "Error: context must be 'me' or 'room'",
+            text = "Error: context must be 'me', 'room', or '@agent_name'",
             mode = "notification"
         }
     end
@@ -330,24 +363,37 @@ Examples:
     end
 
     -- Get target ID
-    local target_id
-    if context == "me" then
-        target_id = get_agent_id()
-        if not target_id then
-            return {text = "Error: not logged in", mode = "notification"}
+    local target_id, display_name
+    if context_type == "agent" then
+        if agent_name then
+            -- Look up specific agent by name
+            local agent = tools.get_agent(agent_name)
+            if not agent then
+                return {text = string.format("Error: agent '%s' not found", agent_name), mode = "notification"}
+            end
+            target_id = agent.id
+            display_name = "@" .. agent_name
+        else
+            -- Use current user
+            target_id = get_agent_id()
+            if not target_id then
+                return {text = "Error: not logged in", mode = "notification"}
+            end
+            display_name = "me"
         end
     else
         target_id = get_room_id()
         if not target_id then
             return {text = "Error: not in a room", mode = "notification"}
         end
+        display_name = "room"
     end
 
     -- Unequip each matching thing
     local unequipped = {}
     for _, thing in ipairs(things) do
         local success
-        if context == "me" then
+        if context_type == "agent" then
             success = tools.agent_unequip(target_id, thing.id, slot)
         else
             success = tools.room_unequip(target_id, thing.id, slot)
@@ -364,7 +410,7 @@ Examples:
         }
     end
 
-    local lines = {string.format("Unequipped %d item(s) from %s:", #unequipped, context)}
+    local lines = {string.format("Unequipped %d item(s) from %s:", #unequipped, display_name)}
     for _, name in ipairs(unequipped) do
         table.insert(lines, "  " .. name)
     end
