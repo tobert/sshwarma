@@ -5,14 +5,19 @@
 
 use anyhow::Result;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    ErrorData as McpError,
+    model::{
+        CallToolRequestParam, CallToolResult, Content, ListToolsResult, PaginatedRequestParam,
+        ServerCapabilities, ServerInfo, Tool,
+    },
+    schemars,
+    service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService,
     },
     ServerHandler,
 };
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -25,6 +30,20 @@ use crate::model::{ModelBackend, ModelHandle, ModelRegistry};
 use crate::state::SharedState;
 use crate::world::World;
 use tokio::sync::{Mutex, RwLock};
+
+use rmcp::model::JsonObject;
+
+/// Helper to generate schema without the $schema field
+fn generate_schema<T: schemars::JsonSchema>() -> Arc<JsonObject> {
+    let root = rmcp::schemars::schema_for!(T);
+    let mut value = serde_json::to_value(root).unwrap_or(Value::Null);
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("$schema");
+        Arc::new(obj.clone())
+    } else {
+        Arc::new(JsonObject::new())
+    }
+}
 
 /// Shared state for the MCP server
 pub struct McpServerState {
@@ -40,7 +59,6 @@ pub struct McpServerState {
 #[derive(Clone)]
 pub struct SshwarmaMcpServer {
     state: Arc<McpServerState>,
-    tool_router: ToolRouter<Self>,
 }
 
 /// Parameters for list_rooms
@@ -272,17 +290,14 @@ pub struct ThingDestroyParams {
     pub target: String,
 }
 
-#[tool_router]
 impl SshwarmaMcpServer {
     pub fn new(state: Arc<McpServerState>) -> Self {
         Self {
             state,
-            tool_router: Self::tool_router(),
         }
     }
 
-    #[tool(description = "List all available rooms")]
-    async fn list_rooms(&self, Parameters(_params): Parameters<ListRoomsParams>) -> String {
+    async fn list_rooms(&self, _params: ListRoomsParams) -> String {
         let world = self.state.world.read().await;
         let rooms = world.list_rooms();
 
@@ -297,8 +312,7 @@ impl SshwarmaMcpServer {
         output
     }
 
-    #[tool(description = "Get recent message history from a room")]
-    async fn get_history(&self, Parameters(params): Parameters<GetHistoryParams>) -> String {
+    async fn get_history(&self, params: GetHistoryParams) -> String {
         let limit = params.limit.unwrap_or(50).min(200);
 
         match self.state.db.recent_messages(&params.room, limit) {
@@ -332,8 +346,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Send a message to a room")]
-    async fn say(&self, Parameters(params): Parameters<SayParams>) -> String {
+    async fn say(&self, params: SayParams) -> String {
         let sender = params.sender.unwrap_or_else(|| "claude".to_string());
 
         // Check if room exists
@@ -367,8 +380,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Ask a model a question, optionally with room context")]
-    async fn ask_model(&self, Parameters(params): Parameters<AskModelParams>) -> String {
+    async fn ask_model(&self, params: AskModelParams) -> String {
         // Look up the model
         let model = match self.state.models.get(&params.model) {
             Some(m) => m.clone(),
@@ -455,8 +467,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "List available AI models")]
-    async fn list_models(&self, Parameters(_params): Parameters<ListModelsParams>) -> String {
+    async fn list_models(&self, _params: ListModelsParams) -> String {
         let models = self.state.models.available();
 
         if models.is_empty() {
@@ -473,8 +484,7 @@ impl SshwarmaMcpServer {
         output
     }
 
-    #[tool(description = "Get help docs. No topic = list available.")]
-    async fn help(&self, Parameters(params): Parameters<HelpParams>) -> String {
+    async fn help(&self, params: HelpParams) -> String {
         use crate::lua::EmbeddedModules;
 
         let embedded = EmbeddedModules::new();
@@ -524,8 +534,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Create a new room")]
-    async fn create_room(&self, Parameters(params): Parameters<CreateRoomParams>) -> String {
+    async fn create_room(&self, params: CreateRoomParams) -> String {
         // Validate room name
         if !params
             .name
@@ -564,10 +573,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(
-        description = "Get full room context for agent onboarding - vibe, assets, exits"
-    )]
-    async fn room_context(&self, Parameters(params): Parameters<RoomContextParams>) -> String {
+    async fn room_context(&self, params: RoomContextParams) -> String {
         let mut output = String::new();
 
         // Get vibe
@@ -624,16 +630,14 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Set the vibe/atmosphere for a room")]
-    async fn set_vibe(&self, Parameters(params): Parameters<SetVibeParams>) -> String {
+    async fn set_vibe(&self, params: SetVibeParams) -> String {
         match self.state.db.set_vibe(&params.room, Some(&params.vibe)) {
             Ok(_) => format!("Set vibe for '{}': {}", params.room, params.vibe),
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(description = "Create an exit from one room to another")]
-    async fn add_exit(&self, Parameters(params): Parameters<AddExitParams>) -> String {
+    async fn add_exit(&self, params: AddExitParams) -> String {
         let bidirectional = params.bidirectional.unwrap_or(true);
 
         // Add forward exit
@@ -687,8 +691,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Fork a room, inheriting its context")]
-    async fn fork_room(&self, Parameters(params): Parameters<ForkRoomParams>) -> String {
+    async fn fork_room(&self, params: ForkRoomParams) -> String {
         // Validate new room name
         if !params
             .new_name
@@ -730,8 +733,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Preview what context would be composed for an LLM interaction")]
-    async fn preview_wrap(&self, Parameters(params): Parameters<PreviewWrapParams>) -> String {
+    async fn preview_wrap(&self, params: PreviewWrapParams) -> String {
         let username = params.username.unwrap_or_else(|| "claude".to_string());
 
         // Get model from params or use a preview mock
@@ -829,8 +831,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "List available Lua scripts")]
-    async fn list_scripts(&self, Parameters(_params): Parameters<ListScriptsParams>) -> String {
+    async fn list_scripts(&self, _params: ListScriptsParams) -> String {
         use crate::db::scripts::ScriptScope;
 
         // List system scripts for now (room scripts require a room context)
@@ -851,8 +852,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Create a new Lua script")]
-    async fn create_script(&self, Parameters(params): Parameters<CreateScriptParams>) -> String {
+    async fn create_script(&self, params: CreateScriptParams) -> String {
         use crate::db::scripts::ScriptScope;
 
         // Parse kind to determine scope (for backwards compatibility)
@@ -884,8 +884,7 @@ impl SshwarmaMcpServer {
     // These tools operate on user-scoped scripts for UI customization
     // =========================================================================
 
-    #[tool(description = "Read a user's Lua UI script by module path")]
-    async fn read_script(&self, Parameters(params): Parameters<ReadScriptParams>) -> String {
+    async fn read_script(&self, params: ReadScriptParams) -> String {
         use crate::db::scripts::ScriptScope;
 
         // For now, read scripts from the "claude" user scope
@@ -908,8 +907,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Update a user's Lua UI script (creates new version via copy-on-write)")]
-    async fn update_script(&self, Parameters(params): Parameters<UpdateScriptParams>) -> String {
+    async fn update_script(&self, params: UpdateScriptParams) -> String {
         use crate::db::scripts::ScriptScope;
 
         let username = "claude";
@@ -945,8 +943,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Delete a user's Lua UI script (removes all versions)")]
-    async fn delete_script(&self, Parameters(params): Parameters<DeleteScriptParams>) -> String {
+    async fn delete_script(&self, params: DeleteScriptParams) -> String {
         use crate::db::scripts::ScriptScope;
 
         let username = "claude";
@@ -963,8 +960,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Set the main UI script entrypoint for a user")]
-    async fn set_entrypoint(&self, Parameters(params): Parameters<SetEntrypointParams>) -> String {
+    async fn set_entrypoint(&self, params: SetEntrypointParams) -> String {
         let username = "claude";
 
         // Empty string treated as None (reset to default)
@@ -986,8 +982,7 @@ impl SshwarmaMcpServer {
     // Inventory tools (things system)
     // =========================================================================
 
-    #[tool(description = "List equipped tools in a room's inventory")]
-    async fn inventory_list(&self, Parameters(params): Parameters<InventoryListParams>) -> String {
+    async fn inventory_list(&self, params: InventoryListParams) -> String {
         use crate::db::things::ThingKind;
 
         // Ensure world is bootstrapped
@@ -1091,10 +1086,9 @@ impl SshwarmaMcpServer {
         output
     }
 
-    #[tool(description = "Equip a tool in a room")]
     async fn inventory_equip(
         &self,
-        Parameters(params): Parameters<InventoryEquipParams>,
+        params: InventoryEquipParams,
     ) -> String {
         // Ensure world is bootstrapped
         if let Err(e) = self.state.db.bootstrap_world() {
@@ -1158,10 +1152,9 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Unequip a tool from a room")]
     async fn inventory_unequip(
         &self,
-        Parameters(params): Parameters<InventoryUnequipParams>,
+        params: InventoryUnequipParams,
     ) -> String {
         // Get the room ID from the rooms table
         let room = match self.state.db.get_room_by_name(&params.room) {
@@ -1253,8 +1246,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "List contents of a container (things inside rooms, agents, or shared)")]
-    async fn thing_contents(&self, Parameters(params): Parameters<ThingContentsParams>) -> String {
+    async fn thing_contents(&self, params: ThingContentsParams) -> String {
         let parent_id = match self.resolve_containment_target(&params.target) {
             Ok(id) => id,
             Err(e) => return e,
@@ -1294,8 +1286,7 @@ impl SshwarmaMcpServer {
         output
     }
 
-    #[tool(description = "Copy a thing into your inventory (copy-on-write)")]
-    async fn thing_take(&self, Parameters(params): Parameters<ThingTakeParams>) -> String {
+    async fn thing_take(&self, params: ThingTakeParams) -> String {
         // MCP agent is always "claude"
         let agent_thing_id = "agent_claude".to_string();
 
@@ -1330,8 +1321,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Move a thing from your inventory to a room")]
-    async fn thing_drop(&self, Parameters(params): Parameters<ThingDropParams>) -> String {
+    async fn thing_drop(&self, params: ThingDropParams) -> String {
         let agent_thing_id = "agent_claude".to_string();
         let room_name = params.room.as_deref().unwrap_or("lobby");
 
@@ -1368,8 +1358,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Create a new thing in a container")]
-    async fn thing_create(&self, Parameters(params): Parameters<ThingCreateParams>) -> String {
+    async fn thing_create(&self, params: ThingCreateParams) -> String {
         use crate::db::things::{Thing, ThingKind};
 
         // Resolve target to parent_id
@@ -1416,8 +1405,7 @@ impl SshwarmaMcpServer {
         }
     }
 
-    #[tool(description = "Delete a thing (must specify owner:name)")]
-    async fn thing_destroy(&self, Parameters(params): Parameters<ThingDestroyParams>) -> String {
+    async fn thing_destroy(&self, params: ThingDestroyParams) -> String {
         // Parse owner:thing format
         let parts: Vec<&str> = params.target.splitn(2, ':').collect();
         if parts.len() != 2 {
@@ -1456,7 +1444,6 @@ impl SshwarmaMcpServer {
     }
 }
 
-#[tool_handler]
 impl ServerHandler for SshwarmaMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -1468,6 +1455,198 @@ impl ServerHandler for SshwarmaMcpServer {
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
+        }
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        async move {
+            let tools = vec![
+                Tool::new("list_rooms", "List all available rooms", generate_schema::<ListRoomsParams>()),
+                Tool::new("get_history", "Get recent message history from a room", generate_schema::<GetHistoryParams>()),
+                Tool::new("say", "Send a message to a room", generate_schema::<SayParams>()),
+                Tool::new("ask_model", "Ask a model a question, optionally with room context", generate_schema::<AskModelParams>()),
+                Tool::new("list_models", "List available AI models", generate_schema::<ListModelsParams>()),
+                Tool::new("help", "Get help docs. No topic = list available.", generate_schema::<HelpParams>()),
+                Tool::new("create_room", "Create a new room", generate_schema::<CreateRoomParams>()),
+                Tool::new("room_context", "Get full room context for agent onboarding - vibe, assets, exits", generate_schema::<RoomContextParams>()),
+                Tool::new("set_vibe", "Set the vibe/atmosphere for a room", generate_schema::<SetVibeParams>()),
+                Tool::new("add_exit", "Create an exit from one room to another", generate_schema::<AddExitParams>()),
+                Tool::new("fork_room", "Fork a room, inheriting its context", generate_schema::<ForkRoomParams>()),
+                Tool::new("preview_wrap", "Preview what context would be composed for an LLM interaction", generate_schema::<PreviewWrapParams>()),
+                Tool::new("list_scripts", "List available Lua scripts", generate_schema::<ListScriptsParams>()),
+                Tool::new("create_script", "Create a new Lua script", generate_schema::<CreateScriptParams>()),
+                Tool::new("read_script", "Read a user's Lua UI script by module path", generate_schema::<ReadScriptParams>()),
+                Tool::new("update_script", "Update a user's Lua UI script (creates new version via copy-on-write)", generate_schema::<UpdateScriptParams>()),
+                Tool::new("delete_script", "Delete a user's Lua UI script (removes all versions)", generate_schema::<DeleteScriptParams>()),
+                Tool::new("set_entrypoint", "Set the main UI script entrypoint for a user", generate_schema::<SetEntrypointParams>()),
+                Tool::new("inventory_list", "List equipped tools in a room's inventory", generate_schema::<InventoryListParams>()),
+                Tool::new("inventory_equip", "Equip a tool in a room", generate_schema::<InventoryEquipParams>()),
+                Tool::new("inventory_unequip", "Unequip a tool from a room", generate_schema::<InventoryUnequipParams>()),
+                Tool::new("thing_contents", "List contents of a container (things inside rooms, agents, or shared)", generate_schema::<ThingContentsParams>()),
+                Tool::new("thing_take", "Copy a thing into your inventory (copy-on-write)", generate_schema::<ThingTakeParams>()),
+                Tool::new("thing_drop", "Move a thing from your inventory to a room", generate_schema::<ThingDropParams>()),
+                Tool::new("thing_create", "Create a new thing in a container", generate_schema::<ThingCreateParams>()),
+                Tool::new("thing_destroy", "Delete a thing (must specify owner:name)", generate_schema::<ThingDestroyParams>()),
+            ];
+
+            Ok(ListToolsResult {
+                tools,
+                next_cursor: None,
+                meta: None,
+            })
+        }
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        async move {
+            let name = request.name.as_ref();
+            let params_value = request.arguments
+                .map(|obj| Value::Object(obj))
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+
+            let output = match name {
+                "list_rooms" => {
+                    let p: ListRoomsParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.list_rooms(p).await
+                }
+                "get_history" => {
+                    let p: GetHistoryParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.get_history(p).await
+                }
+                "say" => {
+                    let p: SayParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.say(p).await
+                }
+                "ask_model" => {
+                    let p: AskModelParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.ask_model(p).await
+                }
+                "list_models" => {
+                    let p: ListModelsParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.list_models(p).await
+                }
+                "help" => {
+                    let p: HelpParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.help(p).await
+                }
+                "create_room" => {
+                    let p: CreateRoomParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.create_room(p).await
+                }
+                "room_context" => {
+                    let p: RoomContextParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.room_context(p).await
+                }
+                "set_vibe" => {
+                    let p: SetVibeParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.set_vibe(p).await
+                }
+                "add_exit" => {
+                    let p: AddExitParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.add_exit(p).await
+                }
+                "fork_room" => {
+                    let p: ForkRoomParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.fork_room(p).await
+                }
+                "preview_wrap" => {
+                    let p: PreviewWrapParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.preview_wrap(p).await
+                }
+                "list_scripts" => {
+                    let p: ListScriptsParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.list_scripts(p).await
+                }
+                "create_script" => {
+                    let p: CreateScriptParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.create_script(p).await
+                }
+                "read_script" => {
+                    let p: ReadScriptParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.read_script(p).await
+                }
+                "update_script" => {
+                    let p: UpdateScriptParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.update_script(p).await
+                }
+                "delete_script" => {
+                    let p: DeleteScriptParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.delete_script(p).await
+                }
+                "set_entrypoint" => {
+                    let p: SetEntrypointParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.set_entrypoint(p).await
+                }
+                "inventory_list" => {
+                    let p: InventoryListParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.inventory_list(p).await
+                }
+                "inventory_equip" => {
+                    let p: InventoryEquipParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.inventory_equip(p).await
+                }
+                "inventory_unequip" => {
+                    let p: InventoryUnequipParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.inventory_unequip(p).await
+                }
+                "thing_contents" => {
+                    let p: ThingContentsParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.thing_contents(p).await
+                }
+                "thing_take" => {
+                    let p: ThingTakeParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.thing_take(p).await
+                }
+                "thing_drop" => {
+                    let p: ThingDropParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.thing_drop(p).await
+                }
+                "thing_create" => {
+                    let p: ThingCreateParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.thing_create(p).await
+                }
+                "thing_destroy" => {
+                    let p: ThingDestroyParams = serde_json::from_value(params_value)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    self.thing_destroy(p).await
+                }
+                _ => return Err(McpError::invalid_params(format!("Unknown tool: {}", name), None)),
+            };
+
+            Ok(CallToolResult::success(vec![Content::text(output)]))
         }
     }
 }
