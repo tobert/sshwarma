@@ -1,15 +1,17 @@
 -- sshwarma conjure command
 --
--- Create new things (tools, hooks, commands) from scratch or wrap MCP tools.
+-- Create new things (tools, hooks, commands) in a specific container.
 --
 -- Examples:
---   /conjure fish                       Create new thing with stub code
---   /conjure fish --code 'return ...'   Create with inline code
---   /conjure myns:fish                  Create with explicit namespace
---   /conjure fish holler:sample         Wrap MCP tool with custom name
+--   /conjure me fish                    Create thing in my inventory
+--   /conjure room welcome               Create thing in current room
+--   /conjure me memories/               Create container (trailing /)
+--   /conjure me fish --code 'return {}' Create with inline code
+--   /conjure @agent fish                Create in another agent's inventory
 
 local page = require('page')
 local str = require('str')
+local util = require('util')
 local M = {}
 
 --------------------------------------------------------------------------------
@@ -39,30 +41,58 @@ local function parse_code_arg(args)
 end
 
 --------------------------------------------------------------------------------
--- /conjure <name> [source] [--code 'code']
+-- Helper: resolve target to parent_id
+--------------------------------------------------------------------------------
+
+local function resolve_target(target)
+    if target == "me" then
+        local id = tools.get_agent_thing_id()
+        if id then return id, nil end
+        return nil, "Not logged in"
+    elseif target == "room" then
+        local id = util.get_room_id()
+        if id then return id, nil end
+        return nil, "Not in a room"
+    elseif target == "shared" or target == "world" then
+        return "shared", nil
+    elseif target:match("^@") then
+        local agent_name = target:sub(2)
+        return "agent_" .. agent_name, nil
+    else
+        return nil, "Invalid target: use me, room, shared, or @agent"
+    end
+end
+
+--------------------------------------------------------------------------------
+-- /conjure <target> <name> [--code 'code']
+--
+-- target: me | room | shared | @agent
+-- name:   Thing name (use trailing / for container)
 --
 -- Examples:
---   /conjure fish                  -> username:fish with stub code
---   /conjure myns:fish             -> myns:fish with stub code
---   /conjure fish --code 'return "hello"'  -> username:fish with inline code
---   /conjure fish holler:sample    -> username:fish wrapping MCP tool (future)
+--   /conjure me fish                    -> thing under agents/me
+--   /conjure room welcome-prompt        -> thing under current room
+--   /conjure me memories/               -> create container under me
+--   /conjure me fish --code 'return {}' -> create with inline code
 --------------------------------------------------------------------------------
 
 function M.conjure(args)
     if not args or args:match("^%s*$") then
         page.show("Conjure", [[
-Usage: /conjure <name> [--code 'code']
+Usage: /conjure <target> <name> [--code 'code']
 
-Create a new thing (tool, hook, or command).
+Create a new thing in a container.
 
-Arguments:
-  name        Thing name (e.g., fish or myns:fish)
-  --code      Inline Lua code for the thing
+Target: me | room | shared | @agent
+Name:   Thing name (use trailing / for container)
 
 Examples:
-  /conjure fish                     Create thing with stub code
-  /conjure fish --code 'return "hello"'   Create with inline code
-  /conjure myns:fish                Create in specific namespace
+  /conjure me fish                    Create thing in my inventory
+  /conjure room welcome               Create thing in room
+  /conjure me memories/               Create container (note trailing /)
+  /conjure me fish --code 'return {}' Create with inline code
+  /conjure shared utils               Create in shared resources
+  /conjure @qwenl note                Create in another agent's inventory
 
 The created thing can then be equipped:
   /equip me command:fish username:fish
@@ -71,25 +101,47 @@ The created thing can then be equipped:
         return {}
     end
 
-    -- Parse arguments
+    -- Parse arguments (target and name, plus optional --code)
     local parts = str.split(args, "%s+")
-    local name_arg = parts[1]
+    local target = parts[1]
+    local name_arg = parts[2]
+
+    if not name_arg then
+        return { text = "Usage: /conjure <target> <name>", mode = "notification" }
+    end
+
+    -- Resolve target to parent_id
+    local parent_id, err = resolve_target(target)
+    if not parent_id then
+        return { text = "Error: " .. err, mode = "notification" }
+    end
+
+    -- Detect container creation (trailing /)
+    local is_container = name_arg:match("/$")
+    local short_name = is_container and name_arg:sub(1, -2) or name_arg
 
     -- Check for --code
     local code = parse_code_arg(args)
 
-    -- Parse name: could be "fish" or "myns:fish"
-    local qualified_name, short_name
-    if name_arg:match(":") then
-        qualified_name = name_arg
-        short_name = name_arg:match(":(.+)$")
-    else
-        short_name = name_arg
-        qualified_name = get_username() .. ":" .. name_arg
+    -- Determine kind
+    local kind = "data"
+    if is_container then
+        kind = "container"
+    elseif code then
+        kind = "tool"
     end
 
-    -- Default code if not provided
-    if not code then
+    -- Parse name: could be "fish" or "myns:fish"
+    local qualified_name
+    if short_name:match(":") then
+        qualified_name = short_name
+        short_name = short_name:match(":(.+)$")
+    else
+        qualified_name = get_username() .. ":" .. short_name
+    end
+
+    -- Default code if not provided and it's a tool
+    if kind == "tool" and not code then
         code = string.format([[
 -- %s
 -- TODO: implement this thing
@@ -103,6 +155,8 @@ end
     local result = tools.thing_create({
         qualified_name = qualified_name,
         name = short_name,
+        kind = kind,
+        parent_id = parent_id,
         description = "Created by /conjure",
         code = code,
         created_by = get_username(),
@@ -115,16 +169,37 @@ end
         }
     end
 
+    -- Build success message
+    local target_desc
+    if target == "me" then
+        target_desc = "your inventory"
+    elseif target == "room" then
+        target_desc = "the room"
+    elseif target == "shared" then
+        target_desc = "shared resources"
+    else
+        target_desc = target .. "'s inventory"
+    end
+
     local lines = {
         string.format("Created: %s", qualified_name),
+        string.format("   Kind: %s", kind),
+        string.format("     In: %s", target_desc),
         "",
-        "To use this thing:",
-        string.format("  /equip me command:%s %s", short_name, qualified_name),
-        string.format("  /%s", short_name),
-        "",
-        "Or equip to room for LLM access:",
-        string.format("  /equip room %s", qualified_name),
     }
+
+    if kind == "tool" then
+        table.insert(lines, "To use as a command:")
+        table.insert(lines, string.format("  /equip me command:%s %s", short_name, qualified_name))
+        table.insert(lines, string.format("  /%s", short_name))
+        table.insert(lines, "")
+        table.insert(lines, "Or equip to room for LLM access:")
+        table.insert(lines, string.format("  /equip room %s", qualified_name))
+    elseif kind == "container" then
+        table.insert(lines, string.format("View contents with: /inv %s", target))
+    else
+        table.insert(lines, string.format("View with: /inv %s", target))
+    end
 
     page.show("Conjure", table.concat(lines, "\n"))
     return {}

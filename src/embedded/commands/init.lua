@@ -94,6 +94,8 @@ Inventory:
   /take <thing>       Copy thing into your inventory
   /drop <thing>       Move thing to current room
   /destroy owner:name Delete a thing
+  /conjure <t> <name> Create thing (t=me,room,shared,@agent)
+  /unconjure <qname>  Delete a thing
 
 Equipment:
   /equip <ctx> <thing>    Equip tool (me, room, @agent)

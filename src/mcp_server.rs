@@ -225,6 +225,53 @@ pub struct InventoryUnequipParams {
     pub qualified_name: String,
 }
 
+/// Parameters for thing_contents
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ThingContentsParams {
+    #[schemars(description = "Target container: 'shared', room name, or @agent_name")]
+    pub target: String,
+}
+
+/// Parameters for thing_take
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ThingTakeParams {
+    #[schemars(description = "Qualified name or pattern of thing to copy (e.g., 'holler:sample')")]
+    pub thing: String,
+}
+
+/// Parameters for thing_drop
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ThingDropParams {
+    #[schemars(description = "Name of thing in your inventory to drop")]
+    pub thing: String,
+    #[schemars(description = "Room to drop into (defaults to 'lobby')")]
+    pub room: Option<String>,
+}
+
+/// Parameters for thing_create
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ThingCreateParams {
+    #[schemars(description = "Target container: 'me', room name, 'shared', or @agent_name")]
+    pub target: String,
+    #[schemars(description = "Name for the new thing")]
+    pub name: String,
+    #[schemars(description = "Kind: 'data', 'container', or 'tool' (default: 'data')")]
+    pub kind: Option<String>,
+    #[schemars(description = "Content for data things")]
+    pub content: Option<String>,
+    #[schemars(description = "Lua code for tool things")]
+    pub code: Option<String>,
+    #[schemars(description = "Description of the thing")]
+    pub description: Option<String>,
+}
+
+/// Parameters for thing_destroy
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ThingDestroyParams {
+    #[schemars(description = "Owner and thing name: 'me:thing', 'room:thing', '@agent:thing'")]
+    pub target: String,
+}
+
 #[tool_router]
 impl SshwarmaMcpServer {
     pub fn new(state: Arc<McpServerState>) -> Self {
@@ -1169,6 +1216,233 @@ impl SshwarmaMcpServer {
                 "Unequipped {} things matching '{}' from {}",
                 unequipped_count, params.qualified_name, params.room
             )
+        }
+    }
+
+    // =========================================================================
+    // Containment tools (things hierarchy)
+    // =========================================================================
+
+    /// Resolve target string to parent_id for containment operations
+    fn resolve_containment_target(&self, target: &str) -> Result<String, String> {
+        use crate::db::things::ids;
+
+        if target == "me" {
+            // For MCP, "me" = agent_claude
+            Ok("agent_claude".to_string())
+        } else if target == "shared" || target == "world" {
+            Ok(ids::SHARED.to_string())
+        } else if let Some(agent_name) = target.strip_prefix('@') {
+            Ok(format!("agent_{}", agent_name))
+        } else {
+            // Assume it's a room name - look up the room
+            match self.state.db.get_room_by_name(target) {
+                Ok(Some(room)) => Ok(room.id),
+                Ok(None) => Err(format!("Room '{}' not found", target)),
+                Err(e) => Err(format!("Error looking up room: {}", e)),
+            }
+        }
+    }
+
+    #[tool(description = "List contents of a container (things inside rooms, agents, or shared)")]
+    async fn thing_contents(&self, Parameters(params): Parameters<ThingContentsParams>) -> String {
+        let parent_id = match self.resolve_containment_target(&params.target) {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+        let children = match self.state.db.get_thing_children(&parent_id) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let title = if params.target == "me" {
+            "Your Inventory".to_string()
+        } else if params.target == "shared" || params.target == "world" {
+            "Shared Resources".to_string()
+        } else if params.target.starts_with('@') {
+            format!("{}'s Inventory", params.target)
+        } else {
+            format!("Contents of room '{}'", params.target)
+        };
+
+        let mut output = format!("{}:\n", title);
+
+        if children.is_empty() {
+            output.push_str("  (empty)\n");
+        } else {
+            for thing in children {
+                let icon = match thing.kind {
+                    crate::db::things::ThingKind::Container => "[+]",
+                    crate::db::things::ThingKind::Tool => " ⚙ ",
+                    _ => " - ",
+                };
+                let name = thing.qualified_name.as_deref().unwrap_or(&thing.name);
+                output.push_str(&format!("  {} {}\n", icon, name));
+            }
+        }
+
+        output
+    }
+
+    #[tool(description = "Copy a thing into your inventory (copy-on-write)")]
+    async fn thing_take(&self, Parameters(params): Parameters<ThingTakeParams>) -> String {
+        // MCP agent is always "claude"
+        let agent_thing_id = "agent_claude".to_string();
+
+        // Ensure agent thing exists
+        if let Err(e) = self.state.db.ensure_agent_thing("claude") {
+            return format!("Error ensuring agent: {}", e);
+        }
+
+        // Find the thing to take
+        let thing = match self.state.db.get_thing_by_qualified_name(&params.thing) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                // Try pattern search
+                match self.state.db.find_things_by_qualified_name(&params.thing) {
+                    Ok(things) if things.len() == 1 => things.into_iter().next().unwrap(),
+                    Ok(things) if things.len() > 1 => {
+                        return format!("Ambiguous: {} matches for '{}'", things.len(), params.thing)
+                    }
+                    _ => return format!("Thing '{}' not found", params.thing),
+                }
+            }
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        // Copy the thing
+        match self.state.db.copy_thing(&thing.id, &agent_thing_id) {
+            Ok(copy) => {
+                let name = thing.qualified_name.as_deref().unwrap_or(&thing.name);
+                format!("Took {} (copy id: {})", name, &copy.id[..8])
+            }
+            Err(e) => format!("Error taking thing: {}", e),
+        }
+    }
+
+    #[tool(description = "Move a thing from your inventory to a room")]
+    async fn thing_drop(&self, Parameters(params): Parameters<ThingDropParams>) -> String {
+        let agent_thing_id = "agent_claude".to_string();
+        let room_name = params.room.as_deref().unwrap_or("lobby");
+
+        // Get room ID
+        let room_id = match self.state.db.get_room_by_name(room_name) {
+            Ok(Some(r)) => r.id,
+            Ok(None) => return format!("Room '{}' not found", room_name),
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        // Find thing in agent's inventory
+        let children = match self.state.db.get_thing_children(&agent_thing_id) {
+            Ok(c) => c,
+            Err(e) => return format!("Error listing inventory: {}", e),
+        };
+
+        let thing = children.into_iter().find(|t| {
+            t.name == params.thing
+                || t.qualified_name.as_deref() == Some(&params.thing)
+        });
+
+        let thing = match thing {
+            Some(t) => t,
+            None => return format!("'{}' not in your inventory", params.thing),
+        };
+
+        // Move it
+        match self.state.db.move_thing(&thing.id, &room_id) {
+            Ok(()) => {
+                let name = thing.qualified_name.as_deref().unwrap_or(&thing.name);
+                format!("Dropped {} into {}", name, room_name)
+            }
+            Err(e) => format!("Error dropping: {}", e),
+        }
+    }
+
+    #[tool(description = "Create a new thing in a container")]
+    async fn thing_create(&self, Parameters(params): Parameters<ThingCreateParams>) -> String {
+        use crate::db::things::{Thing, ThingKind};
+
+        // Resolve target to parent_id
+        let parent_id = match self.resolve_containment_target(&params.target) {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+        // Parse kind
+        let kind = match params.kind.as_deref().unwrap_or("data") {
+            "data" => ThingKind::Data,
+            "container" => ThingKind::Container,
+            "tool" => ThingKind::Tool,
+            other => return format!("Invalid kind '{}'. Use: data, container, tool", other),
+        };
+
+        // Generate qualified name
+        let qualified_name = if params.name.contains(':') {
+            params.name.clone()
+        } else {
+            format!("claude:{}", params.name)
+        };
+
+        // Create the thing
+        let mut thing = Thing::new(&params.name, kind);
+        thing.parent_id = Some(parent_id);
+        thing.qualified_name = Some(qualified_name.clone());
+        thing.description = params.description.clone();
+        thing.content = params.content.clone();
+        thing.code = params.code.clone();
+
+        match self.state.db.insert_thing(&thing) {
+            Ok(()) => {
+                let target_desc = if params.target == "me" {
+                    "your inventory".to_string()
+                } else if params.target.starts_with('@') {
+                    format!("{}'s inventory", params.target)
+                } else {
+                    params.target.clone()
+                };
+                format!("Created {} in {} (id: {})", qualified_name, target_desc, &thing.id[..8])
+            }
+            Err(e) => format!("Error creating thing: {}", e),
+        }
+    }
+
+    #[tool(description = "Delete a thing (must specify owner:name)")]
+    async fn thing_destroy(&self, Parameters(params): Parameters<ThingDestroyParams>) -> String {
+        // Parse owner:thing format
+        let parts: Vec<&str> = params.target.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return "Must specify owner:thing (e.g., 'me:old-note', '@claude:test')".to_string();
+        }
+
+        let owner = parts[0];
+        let thing_name = parts[1];
+
+        // Resolve owner to parent_id
+        let parent_id = match self.resolve_containment_target(owner) {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+        // Find thing under owner
+        let children = match self.state.db.get_thing_children(&parent_id) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let thing = children.into_iter().find(|t| {
+            t.name == thing_name || t.qualified_name.as_deref() == Some(thing_name)
+        });
+
+        let thing = match thing {
+            Some(t) => t,
+            None => return format!("'{}' not found under '{}'", thing_name, owner),
+        };
+
+        // Soft-delete it
+        match self.state.db.soft_delete_thing(&thing.id) {
+            Ok(()) => format!("Destroyed {}", thing_name),
+            Err(e) => format!("Error destroying: {}", e),
         }
     }
 }
