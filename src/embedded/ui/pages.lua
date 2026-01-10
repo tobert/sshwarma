@@ -10,7 +10,7 @@
 --
 -- Pages vs Rooms:
 --   - Rooms are places (MUD metaphor) - shared state, you /join them
---   - Pages are local views - help, journal, search results, etc.
+--   - Pages are local views - help, search results, etc.
 
 local M = {}
 

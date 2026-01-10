@@ -6,7 +6,7 @@ Rooms are shared spaces where users and models collaborate. Think MUD meets work
 
 ### The Metaphor
 - **Lobby**: Landing zone on connect, list and join rooms
-- **Rooms**: Named spaces with vibes, journals, assets, and exits
+- **Rooms**: Named spaces with vibes, assets, and exits
 - **Exits**: Connections between rooms (like MUD directions)
 - **Vibes**: Atmosphere description that shapes interactions
 
@@ -35,9 +35,8 @@ add_exit(room, direction, target, bidirectional)
 When entering a room, get oriented:
 1. **Vibe** — What's the atmosphere?
 2. **Participants** — Who's here? (users + models)
-3. **Journal** — What's been decided/noted?
-4. **Assets** — What artifacts are bound?
-5. **Exits** — Where can we go?
+3. **Assets** — What artifacts are bound?
+4. **Exits** — Where can we go?
 
 ```json
 // MCP: Get everything at once
@@ -91,7 +90,6 @@ Directions can be anything: `north`, `studio`, `archive`, `upstairs`.
 
 Fork creates a new room inheriting:
 - Vibe
-- Journal entries (as inspirations)
 - Asset bindings
 
 ```
@@ -141,5 +139,4 @@ By default, models can navigate between rooms when @mentioned. Control this per-
 
 ## See Also
 
-- `/help journal` — Recording decisions and notes
 - `/help tools` — Full MCP reference

@@ -64,72 +64,14 @@ pub enum ArtifactType {
 pub struct RoomContext {
     /// The vibe - atmosphere, mood, creative direction
     pub vibe: Option<String>,
-    /// Journal entries - intentional notes, not chat noise
-    pub journal: Vec<JournalEntry>,
     /// Named asset bindings - semantic roles like "drums", "main_theme"
     pub assets: HashMap<String, AssetBinding>,
-    /// Inspiration board - references, links, ideas, moods
-    pub inspirations: Vec<Inspiration>,
     /// Exits to other rooms (direction -> room_name)
     pub exits: HashMap<String, String>,
     /// Freeform tags for categorization
     pub tags: HashSet<String>,
     /// Parent room for fork DAG
     pub parent: Option<String>,
-}
-
-/// A journal entry - intentional documentation of the creative process
-#[derive(Debug, Clone)]
-pub struct JournalEntry {
-    pub id: String,
-    pub timestamp: DateTime<Utc>,
-    pub author: String,
-    pub content: String,
-    pub kind: JournalKind,
-}
-
-/// Types of journal entries
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JournalKind {
-    /// General observation
-    Note,
-    /// "We decided to..."
-    Decision,
-    /// "We finished..."
-    Milestone,
-    /// "What if..."
-    Idea,
-    /// Open thread to explore
-    Question,
-}
-
-impl JournalKind {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "note" => Some(Self::Note),
-            "decision" | "decide" => Some(Self::Decision),
-            "milestone" => Some(Self::Milestone),
-            "idea" => Some(Self::Idea),
-            "question" => Some(Self::Question),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Note => "note",
-            Self::Decision => "decision",
-            Self::Milestone => "milestone",
-            Self::Idea => "idea",
-            Self::Question => "question",
-        }
-    }
-}
-
-impl std::fmt::Display for JournalKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
 }
 
 /// An asset bound to a room with a semantic role
@@ -140,15 +82,6 @@ pub struct AssetBinding {
     pub notes: Option<String>,
     pub bound_by: String,
     pub bound_at: DateTime<Utc>,
-}
-
-/// An inspiration on the room's mood board
-#[derive(Debug, Clone)]
-pub struct Inspiration {
-    pub id: String,
-    pub content: String,
-    pub added_by: String,
-    pub added_at: DateTime<Utc>,
 }
 
 impl Room {

@@ -57,7 +57,7 @@ Create a new room.
 - `description`: Optional description
 
 ### fork_room
-Fork a room, inheriting its context (vibe, assets, journal).
+Fork a room, inheriting its context (vibe, assets).
 
 ```json
 {
@@ -75,7 +75,7 @@ Get full room context for agent onboarding.
 }
 ```
 
-Returns vibe, assets, journal entries, and exits.
+Returns vibe, assets, and exits.
 
 ### set_vibe
 Set the room's vibe/atmosphere.
@@ -122,42 +122,6 @@ Ask a model a question, optionally with room context.
 - `model`: Short name (required)
 - `message`: Question (required)
 - `room`: Optional room for context
-
-## Journal Tools
-
-### journal_read
-Read journal entries from a room.
-
-```json
-{
-  "room": "workshop",
-  "kind": "decision",
-  "limit": 20
-}
-```
-
-- `room`: Room name (required)
-- `kind`: Filter by type (note, decision, milestone, idea, question)
-- `limit`: Max entries (default 20)
-
-### journal_write
-Write a journal entry.
-
-```json
-{
-  "room": "workshop",
-  "kind": "decision",
-  "content": "Using PostgreSQL for persistence",
-  "author": "claude"
-}
-```
-
-Entry kinds:
-- `note`: General notes
-- `decision`: Architectural/design decisions
-- `milestone`: Progress markers
-- `idea`: Ideas for exploration
-- `question`: Open questions
 
 ## Asset Tools
 
@@ -338,14 +302,8 @@ Useful for debugging context composition.
 ### Agent Onboarding
 ```
 1. list_rooms() → find relevant room
-2. room_context(room) → get vibe, assets, journal
+2. room_context(room) → get vibe, assets
 3. get_history(room, limit=20) → recent conversation
-```
-
-### Recording Decisions
-```
-1. journal_write(room, kind="decision", content="...")
-2. journal_read(room, kind="decision") → verify
 ```
 
 ### Tool Discovery

@@ -85,7 +85,7 @@ pub struct ListModelsParams {}
 /// Parameters for help
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct HelpParams {
-    #[schemars(description = "Topic (fun, str, inspect, tools, room, journal). Omit for list.")]
+    #[schemars(description = "Topic (fun, str, inspect, tools, room). Omit for list.")]
     pub topic: Option<String>,
 }
 
@@ -464,7 +464,6 @@ impl SshwarmaMcpServer {
                     ("inspect", "Pretty-print tables for debugging"),
                     ("tools", "MCP tool reference and patterns"),
                     ("room", "Room navigation, vibes, exits"),
-                    ("journal", "Notes, decisions, milestones, ideas"),
                 ];
 
                 for (name, desc) in topics {
@@ -519,7 +518,7 @@ impl SshwarmaMcpServer {
     }
 
     #[tool(
-        description = "Get full room context for agent onboarding - vibe, assets, journal, exits"
+        description = "Get full room context for agent onboarding - vibe, assets, exits"
     )]
     async fn room_context(&self, Parameters(params): Parameters<RoomContextParams>) -> String {
         let mut output = String::new();
@@ -568,30 +567,6 @@ impl SshwarmaMcpServer {
                     output.push_str(&format!("- {} → {}\n", direction, target));
                 }
                 output.push('\n');
-            }
-        }
-
-        // Get recent journal entries
-        if let Ok(entries) = self.state.db.get_journal_entries(&params.room, None, 5) {
-            if !entries.is_empty() {
-                output.push_str("## Recent Journal\n");
-                for entry in entries {
-                    output.push_str(&format!(
-                        "- [{}] {}: {}\n",
-                        entry.kind, entry.author, entry.content
-                    ));
-                }
-                output.push('\n');
-            }
-        }
-
-        // Get inspirations
-        if let Ok(inspirations) = self.state.db.get_inspirations(&params.room) {
-            if !inspirations.is_empty() {
-                output.push_str("## Inspirations\n");
-                for insp in inspirations {
-                    output.push_str(&format!("- {}\n", insp.content));
-                }
             }
         }
 
@@ -701,7 +676,7 @@ impl SshwarmaMcpServer {
         // Report success
         match self.state.db.get_parent(&params.new_name) {
             Ok(_) => format!(
-                "Forked '{}' from '{}'. Inherited: vibe, tags, assets, inspirations.",
+                "Forked '{}' from '{}'. Inherited: vibe, tags, assets.",
                 params.new_name, params.source
             ),
             Err(e) => format!("Error forking context: {}", e),

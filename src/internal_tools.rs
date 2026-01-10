@@ -731,7 +731,7 @@ impl ToolDyn for SshwarmaFork {
             ToolDefinition {
                 name: "sshwarma_fork".to_string(),
                 description:
-                    "Fork the current room (copies vibe, assets, inspirations) and join it"
+                    "Fork the current room (copies vibe, assets) and join it"
                         .to_string(),
                 parameters: json!({
                     "type": "object",

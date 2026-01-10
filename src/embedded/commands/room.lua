@@ -54,7 +54,7 @@ function M.create(args)
     end
 end
 
--- /fork [name] - Fork current room (inherits vibe, assets, inspirations)
+-- /fork [name] - Fork current room (inherits vibe, assets)
 function M.fork(args)
     local new_name = args:match("^%s*(.-)%s*$")
 
@@ -70,7 +70,7 @@ function M.fork(args)
     if result.success then
         local lines = {
             string.format("Forked room as '%s'.\r\n", new_name),
-            "Inherited: vibe, tags, assets, inspirations.\r\n\r\n"
+            "Inherited: vibe, tags, assets.\r\n\r\n"
         }
 
         if result.room then

@@ -137,18 +137,6 @@ pub struct MessageRow {
     pub timestamp: String,
 }
 
-/// Legacy journal entry type - replaced by Row with tags
-#[derive(Debug, Clone)]
-pub struct JournalEntry {
-    pub id: i64,
-    pub room: String,
-    pub kind: crate::world::JournalKind,
-    pub content: String,
-    pub author: String,
-    pub created_at: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-}
-
 /// Legacy asset binding type - replaced by room_kv
 #[derive(Debug, Clone)]
 pub struct AssetBinding {
@@ -170,12 +158,6 @@ pub struct RoomPrompt {
     pub content: String, // Alias for prompt
     pub created_at: String,
     pub created_by: Option<String>,
-}
-
-/// Legacy inspiration type
-#[derive(Debug, Clone)]
-pub struct Inspiration {
-    pub content: String,
 }
 
 pub struct UserInfo {
@@ -324,112 +306,6 @@ impl Database {
         Ok(())
     }
 
-    /// Add a journal entry (as Row with tag)
-    pub fn add_journal_entry(
-        &self,
-        room: &str,
-        author: &str,
-        content: &str,
-        kind: crate::world::JournalKind,
-    ) -> Result<()> {
-        use rows::Row;
-
-        // Get room and buffer
-        let room_obj = match self.get_room_by_name(room)? {
-            Some(r) => r,
-            None => return Ok(()),
-        };
-        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
-
-        // Get author's agent ID if they exist
-        let source_agent_id = self.get_agent_by_name(author)?.map(|a| a.id);
-
-        // Create row with journal content_method
-        let mut row = Row::new(&buffer.id, "note.user");
-        row.source_agent_id = source_agent_id;
-        row.content = Some(content.to_string());
-        self.append_row(&mut row)?;
-
-        // Add tag for the journal kind
-        let tag = format!("#{}", kind.as_str());
-        self.add_row_tag(&row.id, &tag)?;
-
-        Ok(())
-    }
-
-    /// Get journal entries (Rows with journal tags)
-    pub fn get_journal_entries(
-        &self,
-        room: &str,
-        kind: Option<crate::world::JournalKind>,
-        limit: usize,
-    ) -> Result<Vec<JournalEntry>> {
-        use crate::world::JournalKind;
-
-        // Get room and buffer
-        let room_obj = match self.get_room_by_name(room)? {
-            Some(r) => r,
-            None => return Ok(vec![]),
-        };
-        let buffer = self.get_or_create_room_chat_buffer(&room_obj.id)?;
-
-        // Get rows that are journal entries
-        let rows = self.list_recent_buffer_rows(&buffer.id, limit * 4)?; // Fetch more to filter
-
-        let mut entries = Vec::new();
-        for row in rows {
-            // Check if this row has a journal tag
-            let tags = self.get_row_tags(&row.id)?;
-            let journal_tag = tags.iter().find(|t| {
-                t.starts_with("#note")
-                    || t.starts_with("#decision")
-                    || t.starts_with("#idea")
-                    || t.starts_with("#milestone")
-                    || t.starts_with("#question")
-            });
-
-            if let Some(tag) = journal_tag {
-                // Parse the kind from the tag
-                let tag_kind = match tag.as_str() {
-                    "#note" => JournalKind::Note,
-                    "#decision" => JournalKind::Decision,
-                    "#idea" => JournalKind::Idea,
-                    "#milestone" => JournalKind::Milestone,
-                    "#question" => JournalKind::Question,
-                    _ => continue,
-                };
-
-                // Filter by kind if specified
-                if let Some(ref k) = kind {
-                    if std::mem::discriminant(&tag_kind) != std::mem::discriminant(k) {
-                        continue;
-                    }
-                }
-
-                use chrono::{TimeZone, Utc};
-                let timestamp = Utc
-                    .timestamp_millis_opt(row.created_at)
-                    .single()
-                    .unwrap_or_else(Utc::now);
-                entries.push(JournalEntry {
-                    id: 0, // Legacy, use row id if needed
-                    room: room.to_string(),
-                    kind: tag_kind,
-                    content: row.content.unwrap_or_default(),
-                    author: "unknown".to_string(), // Would need to look up agent
-                    created_at: format_timestamp(row.created_at),
-                    timestamp,
-                });
-
-                if entries.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        Ok(entries)
-    }
-
     /// Get asset binding by role
     pub fn get_asset_binding(&self, room: &str, role: &str) -> Result<Option<AssetBinding>> {
         use chrono::{TimeZone, Utc};
@@ -484,31 +360,6 @@ impl Database {
         if let Some(room_obj) = self.get_room_by_name(room)? {
             let key = format!("asset.{}", role);
             self.delete_room_kv(&room_obj.id, &key)?;
-        }
-        Ok(())
-    }
-
-    /// Get room inspirations
-    pub fn get_inspirations(&self, room: &str) -> Result<Vec<Inspiration>> {
-        if let Some(room_obj) = self.get_room_by_name(room)? {
-            let all_kv = self.get_all_room_kv(&room_obj.id)?;
-            let inspirations = all_kv
-                .iter()
-                .filter(|(k, _)| k.starts_with("inspiration."))
-                .map(|(_, v)| Inspiration { content: v.clone() })
-                .collect();
-            Ok(inspirations)
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    /// Add an inspiration
-    pub fn add_inspiration(&self, room: &str, content: &str, _added_by: &str) -> Result<()> {
-        if let Some(room_obj) = self.get_room_by_name(room)? {
-            // Generate unique key
-            let key = format!("inspiration.{}", new_id());
-            self.set_room_kv(&room_obj.id, &key, Some(content))?;
         }
         Ok(())
     }

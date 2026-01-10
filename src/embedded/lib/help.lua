@@ -16,7 +16,6 @@ local topics = {
     tools   = { doc = "help.tools",   desc = "MCP tool reference and patterns" },
     -- Features
     room    = { doc = "help.room",    desc = "Room navigation, vibes, exits" },
-    journal = { doc = "help.journal", desc = "Notes, decisions, milestones, ideas" },
 }
 
 --- Get help for a topic
