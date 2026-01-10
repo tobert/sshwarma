@@ -506,7 +506,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("mcp_connections", mcp_connections_fn)?;
 
-    // tools.session() -> session info
+    // tools.session() -> session info including username and room_name
     let session_fn = {
         let state = state.clone();
         lua.create_function(move |lua, ()| {
@@ -521,6 +521,15 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 .as_millis();
             let spinner_frame = ((now / 100) % 10) as u8;
             result.set("spinner_frame", spinner_frame)?;
+
+            // Add session context (username, room_name)
+            if let Some(ctx) = state.session_context() {
+                result.set("username", ctx.username)?;
+                if let Some(ref room) = ctx.room_name {
+                    result.set("room_name", room.clone())?;
+                }
+            }
+
             Ok(result)
         })?
     };
@@ -3212,8 +3221,7 @@ mod tests {
     use crate::mcp::McpManager;
     use crate::model::{ModelBackend, ModelRegistry};
     use crate::state::SharedState;
-    use crate::world::{Inspiration, JournalEntry, JournalKind, World};
-    use chrono::Utc;
+    use crate::world::World;
     use mlua::Function;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -3284,33 +3292,6 @@ mod tests {
                     let mut row = Row::message(&buffer.id, &agent.id, content, false);
                     let _ = self.db.append_row(&mut row);
                 }
-            }
-        }
-
-        /// Add journal entry
-        async fn add_journal(&self, room: &str, kind: JournalKind, content: &str) {
-            let mut world = self.world.write().await;
-            if let Some(r) = world.get_room_mut(room) {
-                r.context.journal.push(JournalEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    timestamp: Utc::now(),
-                    author: "test".to_string(),
-                    content: content.to_string(),
-                    kind,
-                });
-            }
-        }
-
-        /// Add inspiration
-        async fn add_inspiration(&self, room: &str, content: &str) {
-            let mut world = self.world.write().await;
-            if let Some(r) = world.get_room_mut(room) {
-                r.context.inspirations.push(Inspiration {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    content: content.to_string(),
-                    added_by: "test".to_string(),
-                    added_at: Utc::now(),
-                });
             }
         }
 
