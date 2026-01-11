@@ -244,6 +244,8 @@ Pattern: qualified name or glob (e.g., sshwarma:*, holler:sample)
 Slot (optional): command:*, hook:wrap, hook:background
 
 Examples:
+  /equip me                         Show your current equipment
+  /equip @qwenl                     Show agent qwenl's equipment
   /equip me sshwarma:*              Equip all sshwarma tools to yourself
   /equip room holler:sample         Equip tool to room (for LLM)
   /equip @qwenl holler:*            Equip holler tools to agent qwenl
@@ -269,6 +271,55 @@ Examples:
         return { text = "Error: context must be 'me', 'room', or '@agent_name'", mode = "notification" }
     end
 
+    -- If only context provided, show current equipment
+    if #parts == 1 then
+        local target_id, display_name
+        if context_type == "agent" then
+            if agent_name then
+                local agent = tools.get_agent(agent_name)
+                if not agent then
+                    return { text = string.format("Error: agent '%s' not found", agent_name), mode = "notification" }
+                end
+                target_id = agent.id
+                display_name = "@" .. agent_name
+            else
+                target_id = util.get_agent_id()
+                if not target_id then
+                    return { text = "Error: not logged in", mode = "notification" }
+                end
+                display_name = "me"
+            end
+            local equipment = tools.get_agent_equipment(target_id) or {}
+            local lines = {string.format("Equipment for %s:", display_name)}
+            if #equipment == 0 then
+                table.insert(lines, "  (none)")
+            else
+                for _, item in ipairs(equipment) do
+                    table.insert(lines, format_equipped_line(item))
+                end
+            end
+            page.show("Equipment", table.concat(lines, "\n"))
+            return {}
+        else
+            target_id = util.get_room_id()
+            if not target_id then
+                return { text = "Error: not in a room", mode = "notification" }
+            end
+            display_name = "room"
+            local equipment = tools.get_room_equipment(target_id) or {}
+            local lines = {string.format("Equipment for %s:", display_name)}
+            if #equipment == 0 then
+                table.insert(lines, "  (none)")
+            else
+                for _, item in ipairs(equipment) do
+                    table.insert(lines, format_equipped_line(item))
+                end
+            end
+            page.show("Equipment", table.concat(lines, "\n"))
+            return {}
+        end
+    end
+
     -- Parse remaining args: could be [slot] <pattern> or just <pattern>
     local slot, pattern
     if #parts >= 3 then
@@ -281,8 +332,6 @@ Examples:
         end
     elseif #parts == 2 then
         pattern = parts[2]
-    else
-        return { text = "Error: missing pattern argument", mode = "notification" }
     end
 
     -- Parse slot config (e.g., hook:background:1000 -> slot=hook:background, config)
