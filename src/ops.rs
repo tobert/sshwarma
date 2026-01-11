@@ -8,7 +8,108 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
+use crate::db::rows::Row;
+use crate::model::ModelHandle;
 use crate::state::SharedState;
+
+// =============================================================================
+// MentionSession trait - shared abstraction for @mention handling
+// =============================================================================
+
+/// Result of initiating a @mention
+#[derive(Debug, Clone)]
+pub struct MentionResult {
+    /// Row ID of the user's message
+    pub message_row_id: String,
+    /// Row ID of the placeholder for model response
+    pub response_row_id: String,
+}
+
+/// Trait for session context needed by @mention operations
+///
+/// This trait abstracts over SSH sessions and MCP sessions, allowing
+/// the same @mention handling logic to work for both.
+pub trait MentionSession: Send + Sync {
+    /// Get the session's agent ID (UUID from agents table)
+    fn agent_id(&self) -> &str;
+
+    /// Get the display name/username for this session
+    fn username(&self) -> &str;
+
+    /// Get the current room name (None if not in a room)
+    fn current_room(&self) -> Option<String>;
+}
+
+/// Handle an @mention - create rows in buffer
+///
+/// Creates user message row and placeholder for model response.
+/// Does NOT spawn the model task - caller is responsible for that.
+///
+/// # Arguments
+/// * `state` - Shared application state
+/// * `session` - Session context implementing MentionSession
+/// * `model_name` - Short name of the model to mention (e.g., "qwen-8b")
+/// * `message` - The message content to send to the model
+///
+/// # Returns
+/// A tuple of (MentionResult, ModelHandle) on success
+pub async fn handle_mention_create_rows(
+    state: &SharedState,
+    session: &dyn MentionSession,
+    model_name: &str,
+    message: &str,
+) -> Result<(MentionResult, ModelHandle)> {
+    let room_name = session
+        .current_room()
+        .ok_or_else(|| anyhow!("Not in a room"))?;
+
+    if message.trim().is_empty() {
+        return Err(anyhow!("Message cannot be empty"));
+    }
+
+    // Look up model
+    let model = state
+        .models
+        .get(model_name)
+        .ok_or_else(|| {
+            let available: Vec<_> = state
+                .models
+                .available()
+                .iter()
+                .map(|m| m.short_name.as_str())
+                .collect();
+            anyhow!(
+                "Unknown model '{}'. Available: {}",
+                model_name,
+                available.join(", ")
+            )
+        })?
+        .clone();
+
+    // Add user's message to buffer
+    let buffer = state.db.get_or_create_room_buffer(&room_name)?;
+    let agent = state.db.get_or_create_human_agent(session.username())?;
+    let mut user_row = Row::message(
+        &buffer.id,
+        &agent.id,
+        format!("@{}: {}", model_name, message),
+        false,
+    );
+    state.db.append_row(&mut user_row)?;
+
+    // Create placeholder for model response
+    let model_agent = state.db.get_or_create_model_agent(&model.short_name)?;
+    let mut thinking_row = Row::thinking(&buffer.id, &model_agent.id);
+    state.db.append_row(&mut thinking_row)?;
+
+    Ok((
+        MentionResult {
+            message_row_id: user_row.id,
+            response_row_id: thinking_row.id,
+        },
+        model,
+    ))
+}
 
 /// Room summary for /look
 #[derive(Debug, Clone, Serialize)]

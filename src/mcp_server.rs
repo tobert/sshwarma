@@ -295,6 +295,20 @@ impl McpSession {
     }
 }
 
+impl crate::ops::MentionSession for McpSession {
+    fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    fn username(&self) -> &str {
+        &self.display_name
+    }
+
+    fn current_room(&self) -> Option<String> {
+        self.current_room.clone()
+    }
+}
+
 /// MCP server for sshwarma
 #[derive(Clone)]
 pub struct SshwarmaMcpServer {
