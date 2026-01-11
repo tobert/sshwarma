@@ -14,7 +14,7 @@ use crate::status::{Status, StatusTracker};
 use crate::ui::{LuaDrawContext, RenderBuffer};
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 use std::sync::Arc;
-use unicode_width::UnicodeWidthStr;
+// unicode-display-width handles PUA and grapheme clusters correctly
 
 /// Session context for wrap operations
 ///
@@ -947,9 +947,14 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // Utility tools
 
     // tools.display_width(text) -> int
-    // Returns terminal display width of text (handles wide CJK chars, zero-width, etc.)
-    // Uses Unicode UAX#11 East Asian Width property
-    let display_width_fn = lua.create_function(|_, text: String| Ok(text.width()))?;
+    // Returns terminal display width of text
+    // Uses unicode-display-width which correctly handles:
+    // - Private Use Area (powerline glyphs) -> 1
+    // - Grapheme clusters (emoji with skin tones, ZWJ sequences)
+    // - East Asian wide characters -> 2
+    let display_width_fn = lua.create_function(|_, text: String| {
+        Ok(unicode_display_width::width(&text))
+    })?;
     tools.set("display_width", display_width_fn)?;
 
     // tools.estimate_tokens(text) -> int
@@ -3759,6 +3764,49 @@ mod tests {
         )
         .exec()
         .expect("display_width should work");
+    }
+
+    #[test]
+    fn test_bar_character_widths() {
+        let lua = Lua::new();
+        let state = LuaToolState::new();
+        register_tools(&lua, state).expect("should register tools");
+
+        let result: String = lua
+            .load(
+                r#"
+            local w = tools.display_width
+            local chars = {
+                {"👤", "person"},
+                {"🤖", "robot"},
+                {"⚡", "lightning"},
+                {"⚙", "gear"},
+                {"⏱", "timer"},
+                {"🌐", "globe"},
+                {"⬢", "hexagon"},
+                {"⚑", "flag"},
+                {"◈", "diamond"},
+                {"│", "pipe"},
+                {"\u{E0B0}", "powerline_r"},  --
+                {"\u{E0B2}", "powerline_l"},  --
+                {"⠋", "braille"},
+                {"↑", "arrow"},
+                {" NOR ", "mode_text"},
+                {"@atobey", "username"},
+                {"⚡2/14", "mcp_status"},
+            }
+            local out = {}
+            for _, pair in ipairs(chars) do
+                local char, name = pair[1], pair[2]
+                table.insert(out, string.format("%s: %q = %d", name, char, w(char)))
+            end
+            return table.concat(out, "\n")
+        "#,
+            )
+            .eval()
+            .expect("should get widths");
+
+        println!("\n=== Bar Character Widths ===\n{}\n", result);
     }
 
     #[test]

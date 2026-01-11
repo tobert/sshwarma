@@ -3684,7 +3684,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tui-input",
- "unicode-width",
+ "unicode-display-width",
  "uuid",
  "whoami",
 ]
@@ -4214,6 +4214,15 @@ name = "unicase"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b844d17643ee918803943289730bec8aac480150456169e647ed0b576ba539"
+
+[[package]]
+name = "unicode-display-width"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a43273b656140aa2bb8e65351fe87c255f0eca706b2538a9bd4a590a3490bf3"
+dependencies = [
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "unicode-ident"

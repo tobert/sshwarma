@@ -12,37 +12,87 @@ local input = require 'ui.input'
 
 local M = {}
 
--- Colors
+-- Powerline / Nerd Font glyphs via Unicode escapes
+local ARROW_RIGHT = "\u{E0B0}"  --
+local ARROW_LEFT  = "\u{E0B2}"  --
+
+-- Colors - vibrant palette with dark purple chrome
 M.colors = {
+    -- Base
     fg       = "#c0caf5",
     dim      = "#565f89",
+    bg       = "#1a1b26",
+
+    -- Nicks & identities
     nick     = "#7aa2f7",
     model    = "#bb9af7",
     self     = "#9ece6a",
     system   = "#7dcfff",
-    error    = "#f7768e",
-    status   = "#1a1b26",
+
+    -- Bar backgrounds - dark purple gradient
+    topbar   = "#1e1528",    -- darkest purple (top edge)
+    topbar2  = "#241a30",    -- slightly lighter for sections
+    status   = "#2a1f38",    -- medium purple (bottom bar)
+    status2  = "#352845",    -- lighter purple for accents
     statusfg = "#a9b1d6",
+
+    -- Accents
+    error    = "#f7768e",
+    warning  = "#e0af68",
+    success  = "#9ece6a",
+    info     = "#7dcfff",
+
+    -- Vibrant highlights
+    cyan     = "#7dcfff",
+    magenta  = "#bb9af7",
+    orange   = "#ff9e64",
+    pink     = "#ff007c",
+    green    = "#9ece6a",
+    yellow   = "#e0af68",
+    blue     = "#7aa2f7",
+    red      = "#f7768e",
+    teal     = "#1abc9c",
+    purple   = "#9d7cd8",
+
+    -- Input/mode
     cursor   = "#ff9e64",
-    normal   = "#565f89",
-    insert   = "#9ece6a",
+    normal   = "#414868",
+    insert   = "#73daca",
+
+    -- MCP/tools
+    mcp      = "#1abc9c",
+    tools    = "#e0af68",
+
+    -- Navigation
+    exits    = "#bb9af7",
+    vibe     = "#7dcfff",
 }
 
 -- ==========================================================================
 -- Bar Definitions
 -- ==========================================================================
 
+-- Top bar: room context, vibe, navigation
+bars.define("topbar", {
+    position = "top",
+    priority = 100,
+    height = 1,
+    items = {"room_badge", "vibe_snippet", "spacer", "exits_compass", "world_stats"},
+    style = {bg = M.colors.topbar},
+})
+
+-- Bottom status: identity, tools, activity, participants, time, mode
 bars.define("status", {
     position = "bottom",
-    priority = 50,  -- above input but at bottom
+    priority = 50,
     height = 1,
-    items = {"room_name", "spacer", "participants", "duration", "mode_indicator"},
+    items = {"username", "mcp_status", "tool_stats", "spacer", "participants", "spinner", "duration", "mode_indicator"},
     style = {bg = M.colors.status},
 })
 
 bars.define("input", {
     position = "bottom",
-    priority = 100,  -- closest to bottom edge
+    priority = 100,
     height = 1,
     items = {"prompt", "input_text"},
 })
@@ -60,8 +110,198 @@ bars.item("room_name", function(state, _width)
     }
 end)
 
+-- ==========================================================================
+-- Top Bar Items (dark purple: topbar -> topbar2)
+-- ==========================================================================
+
+-- Room badge with accent background
+bars.item("room_badge", function(state, _width)
+    local room = state.room or {}
+    local name = room.name or "lobby"
+    local C = M.colors
+    return {
+        {text = " ⬢ ", style = {fg = C.cyan, bg = C.topbar2}},
+        {text = name, style = {fg = C.cyan, bg = C.topbar2, bold = true}},
+        {text = " ", style = {bg = C.topbar2}},
+        {text = ARROW_RIGHT, style = {fg = C.topbar2, bg = C.topbar}},
+    }
+end)
+
+-- Vibe snippet - first ~30 chars of room vibe
+bars.item("vibe_snippet", function(state, _width)
+    local room = state.room or {}
+    local vibe = room.vibe or ""
+    local C = M.colors
+
+    if vibe == "" then
+        return {}
+    end
+
+    -- Truncate to ~35 chars with ellipsis
+    local snippet = vibe
+    if #snippet > 35 then
+        snippet = snippet:sub(1, 32) .. "..."
+    end
+
+    return {
+        {text = " ", style = {bg = C.topbar}},
+        {text = snippet, style = {fg = C.vibe, bg = C.topbar, italic = true}},
+        {text = " ", style = {bg = C.topbar}},
+    }
+end)
+
+-- Exits compass - show available directions with glyphs
+bars.item("exits_compass", function(state, _width)
+    local C = M.colors
+    local segs = {}
+
+    -- Get exits from state (populated by status call)
+    local exits = state.exits or {}
+    if #exits == 0 then
+        return {}
+    end
+
+    -- Direction glyphs mapping
+    local glyphs = {
+        north = "↑", south = "↓", east = "→", west = "←",
+        up = "⬆", down = "⬇",
+        n = "↑", s = "↓", e = "→", w = "←",
+    }
+
+    table.insert(segs, {text = ARROW_LEFT, style = {fg = C.topbar2, bg = C.topbar}})
+    table.insert(segs, {text = " ⚑ ", style = {fg = C.exits, bg = C.topbar2}})
+
+    local exit_parts = {}
+    for _, exit in ipairs(exits) do
+        local dir = exit.direction or exit
+        local glyph = glyphs[dir:lower()] or dir:sub(1,1)
+        table.insert(exit_parts, glyph)
+    end
+
+    table.insert(segs, {text = table.concat(exit_parts, ""), style = {fg = C.exits, bg = C.topbar2}})
+    table.insert(segs, {text = " ", style = {bg = C.topbar2}})
+
+    return segs
+end)
+
+-- World stats - total rooms
+bars.item("world_stats", function(_state, _width)
+    local C = M.colors
+    local rooms_list = tools and tools.rooms and tools.rooms() or {}
+    local room_count = #rooms_list
+
+    if room_count == 0 then
+        return {{text = " ", style = {bg = C.topbar2}}}
+    end
+
+    return {
+        {text = "🌐", style = {fg = C.purple, bg = C.topbar2}},
+        {text = tostring(room_count), style = {fg = C.purple, bg = C.topbar2}},
+        {text = " ", style = {bg = C.topbar2}},
+    }
+end)
+
+-- ==========================================================================
+-- Bottom Status Bar Items (medium purple: status -> status2)
+-- ==========================================================================
+
+-- Username with @ prefix - accented section
+bars.item("username", function(_state, _width)
+    local C = M.colors
+    local user = tools and tools.current_user and tools.current_user()
+    local name = user and user.name or "?"
+
+    return {
+        {text = " @", style = {fg = C.dim, bg = C.status2}},
+        {text = name, style = {fg = C.self, bg = C.status2, bold = true}},
+        {text = " ", style = {bg = C.status2}},
+        {text = ARROW_RIGHT, style = {fg = C.status2, bg = C.status}},
+    }
+end)
+
+-- MCP status - connected servers / total tools
+bars.item("mcp_status", function(_state, _width)
+    local C = M.colors
+    local servers = tools and tools.mcp_list and tools.mcp_list() or {}
+
+    local connected = 0
+    local total_tools = 0
+    local has_error = false
+
+    for _, srv in ipairs(servers) do
+        if srv.state == "connected" then
+            connected = connected + 1
+            total_tools = total_tools + (srv.tools or 0)
+        elseif srv.error then
+            has_error = true
+        end
+    end
+
+    if #servers == 0 then
+        return {}
+    end
+
+    local icon_color = has_error and C.warning or C.mcp
+    return {
+        {text = " ⚡", style = {fg = icon_color, bg = C.status}},
+        {text = string.format("%d/%d", connected, total_tools), style = {fg = C.mcp, bg = C.status}},
+        {text = " ", style = {bg = C.status}},
+    }
+end)
+
+-- Tool call stats for current room
+bars.item("tool_stats", function(_state, _width)
+    local C = M.colors
+    local stats = tools and tools.history_stats and tools.history_stats() or {}
+    local total = stats.total or 0
+
+    if total == 0 then
+        return {}
+    end
+
+    return {
+        {text = "⚙", style = {fg = C.tools, bg = C.status}},
+        {text = tostring(total), style = {fg = C.tools, bg = C.status}},
+        {text = " ", style = {bg = C.status}},
+    }
+end)
+
+-- Activity spinner - animated when model is working
+bars.item("spinner", function(state, _width)
+    local C = M.colors
+    local session = state.session or {}
+    local participants = state.participants or {}
+
+    -- Check if any model is active
+    local model_active = false
+    for _, p in ipairs(participants) do
+        if p.kind == "model" and p.active then
+            model_active = true
+            break
+        end
+    end
+
+    if not model_active then
+        return {}
+    end
+
+    -- Spinner frames - braille dots animation
+    local frames = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+    local frame_idx = (session.spinner_frame or 0) % #frames + 1
+    local spinner = frames[frame_idx]
+
+    -- Cycle through colors for extra flair
+    local spinner_colors = {C.cyan, C.magenta, C.orange, C.green, C.pink}
+    local color_idx = math.floor((session.spinner_frame or 0) / 2) % #spinner_colors + 1
+
+    return {
+        {text = spinner .. " ", style = {fg = spinner_colors[color_idx], bg = C.status}},
+    }
+end)
+
 bars.item("participants", function(state, _width)
     local participants = state.participants or {}
+    local C = M.colors
     local segs = {}
 
     local users = 0
@@ -71,7 +311,7 @@ bars.item("participants", function(state, _width)
     for _, p in ipairs(participants) do
         if p.kind == "model" then
             models = models + 1
-            if p.status ~= "idle" then
+            if p.active then
                 active_model = p.name
             end
         else
@@ -79,26 +319,54 @@ bars.item("participants", function(state, _width)
         end
     end
 
-    table.insert(segs, {text = string.format("%d/%d ", users, models), style = {fg = M.colors.statusfg, bg = M.colors.status}})
+    -- Transition to accent section for participant counts
+    table.insert(segs, {text = ARROW_LEFT, style = {fg = C.status2, bg = C.status}})
+    table.insert(segs, {text = " 👤", style = {fg = C.blue, bg = C.status2}})
+    table.insert(segs, {text = tostring(users), style = {fg = C.blue, bg = C.status2}})
+    table.insert(segs, {text = " ", style = {bg = C.status2}})
 
+    -- Model count with icon
+    table.insert(segs, {text = "🤖", style = {fg = C.magenta, bg = C.status2}})
+    table.insert(segs, {text = tostring(models), style = {fg = C.magenta, bg = C.status2}})
+    table.insert(segs, {text = " ", style = {bg = C.status2}})
+
+    -- Active model name if working
     if active_model then
-        table.insert(segs, {text = "◈ ", style = {fg = M.colors.model, bg = M.colors.status}})
-        table.insert(segs, {text = active_model .. " ", style = {fg = M.colors.model, bg = M.colors.status}})
+        table.insert(segs, {text = "◈", style = {fg = C.orange, bg = C.status2}})
+        table.insert(segs, {text = active_model, style = {fg = C.orange, bg = C.status2, bold = true}})
+        table.insert(segs, {text = " ", style = {bg = C.status2}})
     end
+
+    -- Transition back
+    table.insert(segs, {text = ARROW_RIGHT, style = {fg = C.status2, bg = C.status}})
 
     return segs
 end)
 
 bars.item("duration", function(state, _width)
+    local C = M.colors
     local session = state.session or {}
     local dur = session.duration or "0:00"
-    return {{text = dur .. " ", style = {fg = M.colors.dim, bg = M.colors.status}}}
+    return {
+        {text = " ⏱", style = {fg = C.dim, bg = C.status}},
+        {text = dur, style = {fg = C.yellow, bg = C.status}},
+        {text = " ", style = {bg = C.status}},
+    }
 end)
 
 bars.item("mode_indicator", function(_state, _width)
-    local m = mode.indicator()
-    local color = mode.is_normal() and M.colors.normal or M.colors.insert
-    return {{text = " " .. m .. " ", style = {fg = color, bg = M.colors.status, bold = true}}}
+    local C = M.colors
+
+    -- No trailing space - this is the rightmost item
+    if mode.is_normal() then
+        return {
+            {text = " NOR", style = {fg = "#1a1b26", bg = C.normal, bold = true}},
+        }
+    else
+        return {
+            {text = " INS", style = {fg = "#1a1b26", bg = C.insert, bold = true}},
+        }
+    end
 end)
 
 bars.item("prompt", function(state, _width)
@@ -403,6 +671,7 @@ function M.fetch_state()
         participants = {},
         session = {},
         history = {},
+        exits = {},
     }
 
     local ok, status = pcall(function()
@@ -413,6 +682,17 @@ function M.fetch_state()
         state.room = status.room or {}
         state.participants = status.participants or {}
         state.session = status.session or {}
+        state.exits = status.exits or {}
+    end
+
+    -- Merge session data from tools.session() for spinner_frame etc
+    local session_ok, session_data = pcall(function()
+        return tools and tools.session and tools.session()
+    end)
+    if session_ok and session_data then
+        for k, v in pairs(session_data) do
+            state.session[k] = v
+        end
     end
 
     state.history = (tools and tools.history and tools.history(100)) or {}
@@ -435,6 +715,13 @@ function on_tick(dirty_tags, tick, ctx)
         if name ~= "content" then
             local bar_def = bars.get(name)
             if bar_def then
+                -- Debug: log bar positions
+                if tools and tools.log_info then
+                    tools.log_info(string.format(
+                        "render bar %s: row=%d (0-idx=%d) h=%d ctx.h=%d",
+                        name, info.row, info.row - 1, info.height, ctx.h
+                    ))
+                end
                 local bar_ctx = ctx:sub(0, info.row - 1, ctx.w, info.height)
                 bars.render(bar_ctx, bar_def, state)
             end

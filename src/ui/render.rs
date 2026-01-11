@@ -5,7 +5,6 @@
 
 use crossterm::style::{Attribute, Color};
 use mlua::prelude::*;
-use unicode_width::UnicodeWidthChar;
 
 /// A single cell in the render buffer
 #[derive(Debug, Clone, Default)]
@@ -235,20 +234,64 @@ impl RenderBuffer {
         }
     }
 
+    /// Marker for "wide char continuation" - this cell is covered by the previous wide char
+    /// Uses Unicode REPLACEMENT CHARACTER which is never legitimately rendered
+    /// Marker for "wide char continuation" - this cell is covered by the previous wide char
+    pub const WIDE_CHAR_SPACER: char = '\u{FFFF}';  // Noncharacter, safe to use as marker
+
+    /// Check if a character is zero-width (combining marks, joiners, etc.)
+    fn is_zero_width(c: char) -> bool {
+        matches!(c,
+            '\u{200B}'..='\u{200D}' |  // ZWSP, ZWNJ, ZWJ
+            '\u{2060}'..='\u{206F}' |  // Word joiners, invisible operators
+            '\u{FE00}'..='\u{FE0F}' |  // Variation selectors 1-16
+            '\u{E0100}'..='\u{E01EF}' |  // Variation selectors supplement
+            '\u{034F}' |  // Combining grapheme joiner
+            '\u{0300}'..='\u{036F}' |  // Combining diacritical marks
+            '\u{1AB0}'..='\u{1AFF}' |  // Combining diacritical marks extended
+            '\u{1DC0}'..='\u{1DFF}' |  // Combining diacritical marks supplement
+            '\u{20D0}'..='\u{20FF}' |  // Combining diacritical marks for symbols
+            '\u{FE20}'..='\u{FE2F}'    // Combining half marks
+        )
+    }
+
+    /// Calculate display width for a character
+    /// Uses unicode-display-width for wide char detection, with explicit zero-width handling
+    fn char_display_width(c: char) -> u16 {
+        // Zero-width characters should be skipped
+        if Self::is_zero_width(c) {
+            return 0;
+        }
+        // Double-width characters (CJK, emoji, etc.)
+        if unicode_display_width::is_double_width(c) {
+            2
+        } else {
+            // Normal chars, PUA, everything else
+            1
+        }
+    }
+
     /// Print text at position with style.
     /// Handles wide characters (emoji, CJK) by advancing cursor by display width.
+    /// Wide chars (width 2) mark the following cell as a "spacer" that won't be output.
     pub fn print(&mut self, x: u16, y: u16, text: &str, style: &Style) {
         let mut cx = x;
         for c in text.chars() {
             if cx >= self.width {
                 break;
             }
-            let char_width = c.width().unwrap_or(1) as u16;
+            let char_width = Self::char_display_width(c);
             // Skip zero-width chars (combining marks, etc.)
             if char_width == 0 {
                 continue;
             }
             self.set(cx, y, c, style);
+            // For wide characters, mark following cell(s) as spacers (won't be output)
+            for i in 1..char_width {
+                if cx + i < self.width {
+                    self.set(cx + i, y, Self::WIDE_CHAR_SPACER, style);
+                }
+            }
             cx += char_width;
         }
     }
@@ -415,7 +458,9 @@ impl RenderBuffer {
         let mut output = String::new();
 
         // Position cursor for this row (convert 0-indexed to terminal's 1-indexed)
-        output.push_str(&format!("\x1b[{};1H", screen_row + 1));
+        let ansi_row = screen_row + 1;
+        tracing::info!("row_to_ansi: buf_y={} screen_row={} ansi_row={}", y, screen_row, ansi_row);
+        output.push_str(&format!("\x1b[{};1H", ansi_row));
 
         let mut last_fg: Option<Color> = None;
         let mut last_bg: Option<Color> = None;
@@ -459,7 +504,11 @@ impl RenderBuffer {
                 last_bg = cell.bg;
             }
 
-            // Output character
+            // Output character (skip wide char spacers - they're covered by previous wide char)
+            if cell.char == Self::WIDE_CHAR_SPACER {
+                // Don't output anything - this cell is covered by previous wide char
+                continue;
+            }
             output.push(if cell.char == '\0' { ' ' } else { cell.char });
         }
 
@@ -650,9 +699,28 @@ impl LuaUserData for LuaDrawContext {
             |_lua, this, (x, y, text, style): (u16, u16, String, Option<LuaTable>)| {
                 let style = style.map(|t| Style::from_lua_table(&t)).unwrap_or_default();
                 if let Some((bx, by)) = this.translate(x, y) {
-                    // Clip text to region width
-                    let max_len = this.width.saturating_sub(x) as usize;
-                    let text: String = text.chars().take(max_len).collect();
+                    // Clip text to region width by DISPLAY WIDTH, not char count
+                    let max_width = this.width.saturating_sub(x) as usize;
+                    let mut current_width = 0usize;
+                    let text: String = text
+                        .chars()
+                        .take_while(|c| {
+                            // Use same width calculation as RenderBuffer::char_display_width
+                            let w = if RenderBuffer::is_zero_width(*c) {
+                                0
+                            } else if unicode_display_width::is_double_width(*c) {
+                                2
+                            } else {
+                                1
+                            };
+                            if current_width + w > max_width {
+                                false
+                            } else {
+                                current_width += w;
+                                true
+                            }
+                        })
+                        .collect();
                     this.with_buffer(|buf| buf.print(bx, by, &text, &style));
                 }
                 Ok(())
@@ -1419,8 +1487,8 @@ mod tests {
         assert_eq!(buf.get(0, 0).unwrap().char, 'A');
         assert_eq!(buf.get(1, 0).unwrap().char, '🎵');
         assert_eq!(buf.get(3, 0).unwrap().char, 'B');
-        // Position 2 should still be empty (the emoji visually covers it)
-        assert_eq!(buf.get(2, 0).unwrap().char, '\0');
+        // Position 2 is marked as WIDE_CHAR_SPACER (covered by emoji)
+        assert_eq!(buf.get(2, 0).unwrap().char, RenderBuffer::WIDE_CHAR_SPACER);
     }
 
     #[test]
@@ -1447,8 +1515,8 @@ mod tests {
         assert_eq!(buf.get(1, 0).unwrap().char, 'B');
         assert_eq!(buf.get(2, 0).unwrap().char, 'C');
         assert_eq!(buf.get(3, 0).unwrap().char, '🎵');
-        // col 4 is empty
-        assert_eq!(buf.get(4, 0).unwrap().char, '\0');
+        // col 4 is marked as WIDE_CHAR_SPACER (covered by emoji)
+        assert_eq!(buf.get(4, 0).unwrap().char, RenderBuffer::WIDE_CHAR_SPACER);
     }
 
     #[test]
@@ -1460,9 +1528,9 @@ mod tests {
         // '日' at 0 (width 2), '本' at 2 (width 2)
         assert_eq!(buf.get(0, 0).unwrap().char, '日');
         assert_eq!(buf.get(2, 0).unwrap().char, '本');
-        // Positions 1 and 3 are continuation space
-        assert_eq!(buf.get(1, 0).unwrap().char, '\0');
-        assert_eq!(buf.get(3, 0).unwrap().char, '\0');
+        // Positions 1 and 3 are WIDE_CHAR_SPACER (continuation cells)
+        assert_eq!(buf.get(1, 0).unwrap().char, RenderBuffer::WIDE_CHAR_SPACER);
+        assert_eq!(buf.get(3, 0).unwrap().char, RenderBuffer::WIDE_CHAR_SPACER);
     }
 
     #[test]

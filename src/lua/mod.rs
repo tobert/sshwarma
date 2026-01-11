@@ -3003,11 +3003,12 @@ mod debug_tests {
             line2.trim()
         );
 
-        // Status should be at y=22
+        // Status should be at y=22 (now starts with @username, not [room])
         let status = get_line(&buf, 22);
         assert!(
-            status.contains("[") || status.contains("─"),
-            "status line (y=22) should have status content"
+            status.contains("@") || status.contains("│") || status.contains("NOR") || status.contains("INS"),
+            "status line (y=22) should have status content, got: '{}'",
+            status.trim()
         );
 
         // Input should be at y=23 (may be empty prompt or have content)

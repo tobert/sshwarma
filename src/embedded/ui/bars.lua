@@ -24,6 +24,51 @@ local fun = require 'fun'
 
 local M = {}
 
+-- ==========================================================================
+-- Width Calculation (Unicode-aware)
+-- ==========================================================================
+
+--- Calculate display width of text (handles emoji, CJK, etc.)
+---@param str string
+---@return number
+local function display_width(str)
+    if not str or str == "" then return 0 end
+    -- tools.display_width MUST be available - no fallback
+    assert(tools and tools.display_width,
+        "tools.display_width not available - check Lua init order")
+    return tools.display_width(str)
+end
+
+--- Truncate string to fit within max_width display cells
+---@param str string
+---@param max_width number
+---@return string truncated string
+local function truncate_to_width(str, max_width)
+    if not str or str == "" then return "" end
+    if max_width <= 0 then return "" end
+
+    local width = display_width(str)
+    if width <= max_width then return str end
+
+    -- Walk through characters, accumulating width
+    local result = {}
+    local current_width = 0
+
+    for _, code in utf8.codes(str) do
+        local char = utf8.char(code)
+        local char_width = display_width(char)
+
+        if current_width + char_width > max_width then
+            break
+        end
+
+        table.insert(result, char)
+        current_width = current_width + char_width
+    end
+
+    return table.concat(result)
+end
+
 -- Bar definitions registry {[name] = def}
 local bar_defs = {}
 
@@ -137,12 +182,29 @@ function M.render_items(bar_def, width, state)
                         table.insert(spacer_indices, #raw_segments)
                     else
                         local text = seg.text or ""
-                        total_fixed_width = total_fixed_width + #text
+                        -- Use display_width for proper Unicode width
+                        local text_width = display_width(text)
+                        seg._width = text_width  -- cache for later
+                        total_fixed_width = total_fixed_width + text_width
                         table.insert(raw_segments, seg)
                     end
                 end
             end
         end
+    end
+
+    -- Always log bar width calculation for debugging
+    if tools and tools.log_info then
+        local item_widths = {}
+        for _, seg in ipairs(raw_segments) do
+            if not seg.spacer then
+                table.insert(item_widths, string.format("%q=%d", seg.text:sub(1,8), seg._width or 0))
+            end
+        end
+        tools.log_info(string.format(
+            "bar %s: total=%d width=%d | %s",
+            bar_def.name, total_fixed_width, width, table.concat(item_widths, ", ")
+        ))
     end
 
     -- Distribute remaining space among spacers
@@ -157,29 +219,48 @@ function M.render_items(bar_def, width, state)
         raw_segments[idx].width = w
     end
 
-    -- Build final segments with x positions
+    -- Build final segments with x positions, truncating at width boundary
     local result = {}
     local x = 0
     for _, seg in ipairs(raw_segments) do
+        if x >= width then break end  -- Stop if we've filled the bar
+
         if seg.spacer then
-            -- Spacer becomes empty space (could render with style for background)
-            if seg.width and seg.width > 0 then
+            -- Spacer becomes empty space
+            local sw = seg.width or 0
+            -- Clamp spacer to remaining width
+            sw = math.min(sw, width - x)
+            if sw > 0 then
                 table.insert(result, {
-                    text = string.rep(" ", seg.width),
+                    text = string.rep(" ", sw),
                     style = bar_def.style,
                     x = x,
                 })
-                x = x + seg.width
+                x = x + sw
             end
         else
             local text = seg.text or ""
-            if #text > 0 then
+            local text_width = seg._width or display_width(text)
+
+            -- Truncate if would overflow
+            if x + text_width > width then
+                local available = width - x
+                if available > 0 then
+                    text = truncate_to_width(text, available)
+                    text_width = display_width(text)
+                else
+                    text = ""
+                    text_width = 0
+                end
+            end
+
+            if text_width > 0 then
                 table.insert(result, {
                     text = text,
                     style = seg.style or bar_def.style,
                     x = x,
                 })
-                x = x + #text
+                x = x + text_width
             end
         end
     end
@@ -202,6 +283,18 @@ function M.render(ctx, bar_def, state)
 
     -- Get rendered segments
     local segments = M.render_items(bar_def, ctx.w, state)
+
+    -- Debug: calculate total rendered width
+    local total_width = 0
+    for _, seg in ipairs(segments) do
+        total_width = total_width + display_width(seg.text)
+    end
+    if total_width > ctx.w and tools and tools.log_warn then
+        tools.log_warn(string.format(
+            "bar %s overflow: %d > %d (ctx.w)",
+            bar_def.name, total_width, ctx.w
+        ))
+    end
 
     -- Draw each segment
     for _, seg in ipairs(segments) do
