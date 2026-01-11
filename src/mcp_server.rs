@@ -44,7 +44,7 @@ use rmcp::model::JsonObject;
 ///
 /// The handler function is NOT stored here since each MCP session has its own
 /// Lua runtime. Instead, we store the module_path and call the handler via:
-/// `require(module_path).handler(params)`
+/// `require(module_path).handler(params)` or `require(module_path).handler_name(params)`
 #[derive(Debug, Clone)]
 pub struct LuaTool {
     /// Tool name exposed via MCP
@@ -55,6 +55,9 @@ pub struct LuaTool {
     pub schema: Arc<JsonObject>,
     /// Module path to require (e.g., "mcp.echo_test")
     pub module_path: String,
+    /// Optional handler function name (defaults to "handler")
+    /// For multi-tool modules, each tool can specify its own handler function
+    pub handler_name: Option<String>,
 }
 
 /// Registry of Lua-defined MCP tools
@@ -106,7 +109,7 @@ impl McpToolRegistry {
     /// Dispatch a tool call to Lua
     ///
     /// This loads the handler from the per-session Lua runtime:
-    /// `require(module_path).handler(params)`
+    /// `require(module_path).handler(params)` or `require(module_path).handler_name(params)`
     pub fn dispatch(
         &self,
         name: &str,
@@ -131,10 +134,11 @@ impl McpToolRegistry {
             .call(tool.module_path.as_str())
             .with_context(|| format!("Failed to require module '{}'", tool.module_path))?;
 
-        // Get the handler function
+        // Get the handler function - use handler_name if specified, otherwise "handler"
+        let handler_name = tool.handler_name.as_deref().unwrap_or("handler");
         let handler: mlua::Function = module
-            .get("handler")
-            .with_context(|| format!("Module '{}' does not have a handler function", tool.module_path))?;
+            .get(handler_name)
+            .with_context(|| format!("Module '{}' does not have a '{}' function", tool.module_path, handler_name))?;
 
         // Convert params to Lua
         let lua_params = json_to_lua(lua, &params)
@@ -143,7 +147,7 @@ impl McpToolRegistry {
         // Call the handler
         let result: mlua::Value = handler
             .call(lua_params)
-            .with_context(|| format!("Handler for '{}' failed", name))?;
+            .with_context(|| format!("Handler '{}' for '{}' failed", handler_name, name))?;
 
         // Convert result back to JSON
         let json_result = lua_to_json(&result)

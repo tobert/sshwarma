@@ -4074,12 +4074,16 @@ pub fn register_mcp_tool_registration(
             _ => JsonObject::new(),
         };
 
+        // Extract optional handler_name (for multi-tool modules)
+        let handler_name: Option<String> = params.get("handler_name").ok();
+
         // Create and register the tool
         let tool = crate::mcp_server::LuaTool {
             name: name.clone(),
             description,
             schema: std::sync::Arc::new(schema),
             module_path,
+            handler_name,
         };
 
         registry.register(tool);
