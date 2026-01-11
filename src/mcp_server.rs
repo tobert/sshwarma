@@ -19,9 +19,10 @@ use rmcp::{
     ServerHandler,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // ScriptScope is imported locally where needed
@@ -34,6 +35,130 @@ use crate::world::World;
 use tokio::sync::{Mutex, RwLock};
 
 use rmcp::model::JsonObject;
+
+// =============================================================================
+// Lua Tool Registry for MCP Server
+// =============================================================================
+
+/// Metadata for a Lua-defined MCP tool
+///
+/// The handler function is NOT stored here since each MCP session has its own
+/// Lua runtime. Instead, we store the module_path and call the handler via:
+/// `require(module_path).handler(params)`
+#[derive(Debug, Clone)]
+pub struct LuaTool {
+    /// Tool name exposed via MCP
+    pub name: String,
+    /// Human-readable description
+    pub description: String,
+    /// JSON Schema for the tool's parameters
+    pub schema: Arc<JsonObject>,
+    /// Module path to require (e.g., "mcp.echo_test")
+    pub module_path: String,
+}
+
+/// Registry of Lua-defined MCP tools
+///
+/// Thread-safe registry that stores tool metadata. When dispatching,
+/// the handler is loaded from the per-session Lua runtime.
+pub struct McpToolRegistry {
+    lua_tools: std::sync::RwLock<HashMap<String, LuaTool>>,
+}
+
+impl McpToolRegistry {
+    /// Create a new empty registry
+    pub fn new() -> Self {
+        Self {
+            lua_tools: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a Lua tool
+    pub fn register(&self, tool: LuaTool) {
+        let name = tool.name.clone();
+        if let Ok(mut tools) = self.lua_tools.write() {
+            debug!(name = %name, module_path = %tool.module_path, "Registering Lua MCP tool");
+            tools.insert(name, tool);
+        }
+    }
+
+    /// Check if a tool is registered
+    pub fn has(&self, name: &str) -> bool {
+        self.lua_tools
+            .read()
+            .map(|tools| tools.contains_key(name))
+            .unwrap_or(false)
+    }
+
+    /// Get a tool by name
+    pub fn get(&self, name: &str) -> Option<LuaTool> {
+        self.lua_tools.read().ok()?.get(name).cloned()
+    }
+
+    /// List all registered Lua tools
+    pub fn list(&self) -> Vec<LuaTool> {
+        self.lua_tools
+            .read()
+            .map(|tools| tools.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Dispatch a tool call to Lua
+    ///
+    /// This loads the handler from the per-session Lua runtime:
+    /// `require(module_path).handler(params)`
+    pub fn dispatch(
+        &self,
+        name: &str,
+        params: Value,
+        lua_runtime: &LuaRuntime,
+    ) -> Result<String> {
+        use crate::lua::tools::{json_to_lua, lua_to_json};
+
+        let tool = self
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found in registry", name))?;
+
+        let lua = lua_runtime.lua();
+
+        // Load the module: require(module_path)
+        let require: mlua::Function = lua
+            .globals()
+            .get("require")
+            .context("Failed to get require function")?;
+
+        let module: mlua::Table = require
+            .call(tool.module_path.as_str())
+            .with_context(|| format!("Failed to require module '{}'", tool.module_path))?;
+
+        // Get the handler function
+        let handler: mlua::Function = module
+            .get("handler")
+            .with_context(|| format!("Module '{}' does not have a handler function", tool.module_path))?;
+
+        // Convert params to Lua
+        let lua_params = json_to_lua(lua, &params)
+            .context("Failed to convert params to Lua")?;
+
+        // Call the handler
+        let result: mlua::Value = handler
+            .call(lua_params)
+            .with_context(|| format!("Handler for '{}' failed", name))?;
+
+        // Convert result back to JSON
+        let json_result = lua_to_json(&result)
+            .context("Failed to convert Lua result to JSON")?;
+
+        // Return as JSON string
+        Ok(serde_json::to_string_pretty(&json_result)?)
+    }
+}
+
+impl Default for McpToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Helper to generate schema without the $schema field
 pub fn generate_schema<T: schemars::JsonSchema>() -> Arc<JsonObject> {
@@ -96,6 +221,8 @@ pub struct McpServerState {
     pub models: Arc<ModelRegistry>,
     pub lua_runtime: Arc<Mutex<LuaRuntime>>,
     pub shared_state: Arc<SharedState>,
+    /// Registry of Lua-defined MCP tools
+    pub tool_registry: Arc<McpToolRegistry>,
 }
 
 /// Per-connection MCP session state
@@ -1674,8 +1801,20 @@ impl ServerHandler for SshwarmaMcpServer {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        // Get built-in tools
+        let mut tools = get_tool_definitions();
+
+        // Add Lua-registered tools from the registry
+        for lua_tool in self.state.tool_registry.list() {
+            tools.push(Tool::new(
+                lua_tool.name,
+                lua_tool.description,
+                lua_tool.schema,
+            ));
+        }
+
         Ok(ListToolsResult {
-            tools: get_tool_definitions(),
+            tools,
             next_cursor: None,
             meta: None,
         })
@@ -1690,6 +1829,33 @@ impl ServerHandler for SshwarmaMcpServer {
         let params_value = request.arguments
             .map(Value::Object)
             .unwrap_or(Value::Object(serde_json::Map::new()));
+
+        // Check if this is a Lua-registered tool first
+        if self.state.tool_registry.has(name) {
+            debug!(tool = %name, "Dispatching Lua MCP tool");
+
+            // Get the per-session Lua runtime
+            let session = self.session.read().await;
+            let lua_runtime = session.lua_runtime.clone();
+
+            // Dispatch using block_in_place since Lua is not async
+            let registry = self.state.tool_registry.clone();
+            let tool_name = name.to_string();
+            let params = params_value.clone();
+
+            let result = tokio::task::block_in_place(|| {
+                let runtime = lua_runtime.blocking_lock();
+                registry.dispatch(&tool_name, params, &runtime)
+            });
+
+            return match result {
+                Ok(output) => Ok(CallToolResult::success(vec![Content::text(output)])),
+                Err(e) => {
+                    warn!(tool = %name, error = %e, "Lua tool dispatch failed");
+                    Ok(CallToolResult::error(vec![Content::text(format!("Error: {}", e))]))
+                }
+            };
+        }
 
         let output = match name {
             "list_rooms" => {

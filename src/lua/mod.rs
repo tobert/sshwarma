@@ -24,14 +24,14 @@ pub use registry::ToolRegistry;
 pub use reload::{LuaReloadEvent, LuaReloadReceiver, LuaReloadSender};
 pub use render::parse_lua_rows;
 pub use tool_middleware::{ToolContext, ToolMiddleware};
-pub use tools::{register_mcp_tools, InputState, LuaToolState, SessionContext};
+pub use tools::{register_mcp_tools, register_mcp_tool_registration, InputState, LuaToolState, SessionContext, json_to_lua, lua_to_json};
 pub use watcher::{start_watcher, WatcherHandle};
 pub use wrap::{WrapResult, WrapState};
 
 // Re-export startup script path for main.rs
 pub use self::startup_script_path as get_startup_script_path;
 
-use crate::lua::tools::{json_to_lua, lua_to_json, register_tools};
+use crate::lua::tools::register_tools;
 use crate::paths;
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
@@ -670,6 +670,54 @@ impl LuaRuntime {
             info!("Startup script completed successfully");
         } else {
             info!("Startup script executed (no startup() function defined)");
+        }
+
+        Ok(true)
+    }
+
+    /// Run the MCP init script if it exists
+    ///
+    /// This script can register Lua MCP tools via `tools.register_mcp_tool()`.
+    /// Located at ~/.config/sshwarma/lua/mcp/init.lua
+    ///
+    /// Returns true if script was found and executed.
+    pub fn run_mcp_init_script(&self) -> Result<bool> {
+        let script_path = paths::config_dir().join("lua").join("mcp").join("init.lua");
+
+        if !script_path.exists() {
+            debug!("No MCP init script at {:?}", script_path);
+            return Ok(false);
+        }
+
+        let script = fs::read_to_string(&script_path)
+            .with_context(|| format!("failed to read MCP init script {:?}", script_path))?;
+
+        info!("Running MCP init script from {:?}", script_path);
+
+        self.lua
+            .load(&script)
+            .set_name(script_path.to_string_lossy())
+            .exec()
+            .map_err(|e| anyhow::anyhow!("MCP init script failed: {}", e))?;
+
+        // Check if there's an init() function and call it
+        let globals = self.lua.globals();
+        let init_fn: Value = globals
+            .get("mcp_init")
+            .map_err(|e| anyhow::anyhow!("failed to get mcp_init: {}", e))?;
+
+        if init_fn != Value::Nil {
+            let func: mlua::Function = init_fn
+                .as_function()
+                .ok_or_else(|| anyhow::anyhow!("mcp_init is not a function"))?
+                .clone();
+
+            func.call::<()>(())
+                .map_err(|e| anyhow::anyhow!("mcp_init() failed: {}", e))?;
+
+            info!("MCP init script completed successfully");
+        } else {
+            info!("MCP init script executed (no mcp_init() function defined)");
         }
 
         Ok(true)

@@ -132,11 +132,24 @@ async fn main() -> Result<()> {
 
     // Start MCP server for Claude Code
     if config.mcp_server_port > 0 {
-        use sshwarma::lua::LuaRuntime;
+        use sshwarma::lua::{LuaRuntime, register_mcp_tool_registration};
+        use sshwarma::mcp_server::McpToolRegistry;
+
+        // Create the shared Lua tool registry
+        let tool_registry = Arc::new(McpToolRegistry::new());
 
         // Create a LuaRuntime for the MCP server with full tool state
         let mcp_lua = LuaRuntime::new().context("failed to create Lua runtime for MCP server")?;
         mcp_lua.tool_state().set_shared_state(Some(state.clone()));
+
+        // Register the MCP tool registration function so Lua can register tools
+        register_mcp_tool_registration(mcp_lua.lua(), tool_registry.clone())
+            .context("failed to register MCP tool registration function")?;
+
+        // Run MCP init script if it exists (to register Lua tools)
+        if let Err(e) = mcp_lua.run_mcp_init_script() {
+            warn!("MCP init script failed: {}", e);
+        }
 
         let mcp_state = Arc::new(McpServerState {
             world: world.clone(),
@@ -145,6 +158,7 @@ async fn main() -> Result<()> {
             models: models.clone(),
             lua_runtime: Arc::new(Mutex::new(mcp_lua)),
             shared_state: state.clone(),
+            tool_registry,
         });
         let _mcp_handle = mcp_server::start_mcp_server(config.mcp_server_port, mcp_state).await?;
         info!(port = config.mcp_server_port, "MCP server started");

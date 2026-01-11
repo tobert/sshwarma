@@ -22,7 +22,7 @@ use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
 use sshwarma::lua::{LuaReloadSender, LuaRuntime};
 use sshwarma::mcp::McpManager;
-use sshwarma::mcp_server::{self, McpServerState};
+use sshwarma::mcp_server::{self, McpServerState, McpToolRegistry};
 use sshwarma::model::{ModelBackend, ModelHandle, ModelRegistry};
 use sshwarma::state::SharedState;
 use sshwarma::world::World;
@@ -456,6 +456,7 @@ async fn start_sshwarma_mcp_server() -> Result<(String, tokio::task::JoinHandle<
         models,
         lua_runtime: Arc::new(Mutex::new(lua_runtime)),
         shared_state,
+        tool_registry: Arc::new(McpToolRegistry::new()),
     });
 
     // Find a free port

@@ -3307,8 +3307,75 @@ impl UserData for LuaToolStateWrapper {
     }
 }
 
+/// Register the MCP tool registration function
+///
+/// This adds `tools.register_mcp_tool()` which allows Lua code to register
+/// tools that will be exposed via the MCP server.
+///
+/// Usage from Lua:
+/// ```lua
+/// tools.register_mcp_tool({
+///     name = "echo_test",
+///     description = "Test tool that echoes params",
+///     schema = { type = "object", properties = {} },
+///     module_path = "mcp.echo_test"
+/// })
+/// ```
+pub fn register_mcp_tool_registration(
+    lua: &Lua,
+    registry: std::sync::Arc<crate::mcp_server::McpToolRegistry>,
+) -> LuaResult<()> {
+    use rmcp::model::JsonObject;
+
+    let tools: Table = lua.globals().get("tools")?;
+
+    let register_mcp_tool_fn = lua.create_function(move |_lua, params: Table| {
+        // Extract required fields
+        let name: String = params.get("name").map_err(|_| {
+            mlua::Error::RuntimeError("register_mcp_tool: 'name' is required".to_string())
+        })?;
+
+        let description: String = params.get("description").map_err(|_| {
+            mlua::Error::RuntimeError("register_mcp_tool: 'description' is required".to_string())
+        })?;
+
+        let module_path: String = params.get("module_path").map_err(|_| {
+            mlua::Error::RuntimeError("register_mcp_tool: 'module_path' is required".to_string())
+        })?;
+
+        // Extract schema (optional, defaults to empty object)
+        let schema_value: Value = params.get("schema").unwrap_or(Value::Nil);
+        let schema_json = lua_to_json(&schema_value).map_err(|e| {
+            mlua::Error::RuntimeError(format!("register_mcp_tool: invalid schema: {}", e))
+        })?;
+
+        // Convert to JsonObject
+        let schema: JsonObject = match schema_json {
+            serde_json::Value::Object(obj) => obj,
+            _ => JsonObject::new(),
+        };
+
+        // Create and register the tool
+        let tool = crate::mcp_server::LuaTool {
+            name: name.clone(),
+            description,
+            schema: std::sync::Arc::new(schema),
+            module_path,
+        };
+
+        registry.register(tool);
+        tracing::info!(name = %name, "Registered Lua MCP tool");
+
+        Ok(())
+    })?;
+
+    tools.set("register_mcp_tool", register_mcp_tool_fn)?;
+
+    Ok(())
+}
+
 /// Convert serde_json::Value to mlua::Value
-pub(crate) fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<Value> {
+pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<Value> {
     match value {
         serde_json::Value::Null => Ok(Value::Nil),
         serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
@@ -3338,7 +3405,7 @@ pub(crate) fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<Val
 }
 
 /// Convert mlua::Value to serde_json::Value
-pub(crate) fn lua_to_json(value: &Value) -> LuaResult<serde_json::Value> {
+pub fn lua_to_json(value: &Value) -> LuaResult<serde_json::Value> {
     match value {
         Value::Nil => Ok(serde_json::Value::Null),
         Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
