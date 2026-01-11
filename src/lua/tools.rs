@@ -2908,6 +2908,92 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("say", say_fn)?;
 
+    // tools.trigger_mention(model_name, message, room) -> {message_row_id, response_row_id} or {error}
+    // Triggers an @mention flow: creates message rows and spawns model response task
+    let trigger_mention_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (model_name, message, room): (String, String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("error", "No shared state available")?;
+                    return Ok(result);
+                }
+            };
+
+            // Create a simple session adapter for MentionSession trait
+            struct LuaMentionSession {
+                agent_id: String,
+                username: String,
+                room: String,
+            }
+            impl crate::ops::MentionSession for LuaMentionSession {
+                fn agent_id(&self) -> &str {
+                    &self.agent_id
+                }
+                fn username(&self) -> &str {
+                    &self.username
+                }
+                fn current_room(&self) -> Option<String> {
+                    Some(self.room.clone())
+                }
+            }
+
+            // Get agent info from session context or default to "claude"
+            let username = state.current_agent_name().unwrap_or_else(|| "claude".to_string());
+            let agent = match shared.db.get_or_create_human_agent(&username) {
+                Ok(a) => a,
+                Err(e) => {
+                    result.set("error", format!("Failed to get agent: {}", e))?;
+                    return Ok(result);
+                }
+            };
+
+            let session = LuaMentionSession {
+                agent_id: agent.id,
+                username: username.clone(),
+                room: room.clone(),
+            };
+
+            // Call ops::handle_mention_create_rows synchronously
+            let rt = tokio::runtime::Handle::current();
+            let mention_result = rt.block_on(async {
+                crate::ops::handle_mention_create_rows(&shared, &session, &model_name, &message)
+                    .await
+            });
+
+            match mention_result {
+                Ok((mention, model)) => {
+                    // Spawn the model response (fire and forget - no update channel)
+                    let config = crate::ops::ModelResponseConfig {
+                        model,
+                        message: message.clone(),
+                        username,
+                        room_name: Some(room),
+                        placeholder_row_id: Some(mention.response_row_id.clone()),
+                    };
+
+                    // Spawn without Lua runtime or update channel (MCP fire-and-forget)
+                    let shared_clone = shared.clone();
+                    let _ = rt.block_on(async {
+                        crate::ops::spawn_model_response(shared_clone, config, None, None).await
+                    });
+
+                    result.set("message_row_id", mention.message_row_id)?;
+                    result.set("response_row_id", mention.response_row_id)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
+            }
+        })?
+    };
+    tools.set("trigger_mention", trigger_mention_fn)?;
+
     // tools.mcp_servers() -> {servers = [{name, connected, tool_count}, ...]}
     let mcp_servers_fn = {
         let state = state.clone();
