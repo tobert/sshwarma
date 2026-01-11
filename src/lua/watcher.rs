@@ -23,7 +23,7 @@ fn path_to_module_name(path: &Path, base: &Path) -> Option<String> {
     let rel = path.strip_prefix(base).ok()?;
 
     // Must be a .lua file
-    if rel.extension().map_or(true, |ext| ext != "lua") {
+    if rel.extension().is_none_or(|ext| ext != "lua") {
         return None;
     }
 

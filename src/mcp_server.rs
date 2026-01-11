@@ -57,7 +57,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         Tool::new("list_rooms", "List all available rooms", generate_schema::<ListRoomsParams>()),
         Tool::new("get_history", "Get recent message history from a room", generate_schema::<GetHistoryParams>()),
         Tool::new("say", "Send a message to a room", generate_schema::<SayParams>()),
-        Tool::new("ask_model", "Ask a model a question, optionally with room context", generate_schema::<AskModelParams>()),
+        Tool::new("ask_model", "Ask a model a question (simple completion, no tools - for full @mention-style interaction with tools, SSH users should type @model in chat)", generate_schema::<AskModelParams>()),
         Tool::new("list_models", "List available AI models", generate_schema::<ListModelsParams>()),
         Tool::new("help", "Get help docs. No topic = list available.", generate_schema::<HelpParams>()),
         Tool::new("create_room", "Create a new room", generate_schema::<CreateRoomParams>()),
@@ -1496,167 +1496,163 @@ impl ServerHandler for SshwarmaMcpServer {
         }
     }
 
-    fn list_tools(
+    async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        async move {
-            Ok(ListToolsResult {
-                tools: get_tool_definitions(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: get_tool_definitions(),
+            next_cursor: None,
+            meta: None,
+        })
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        async move {
-            let name = request.name.as_ref();
-            let params_value = request.arguments
-                .map(|obj| Value::Object(obj))
-                .unwrap_or(Value::Object(serde_json::Map::new()));
+    ) -> Result<CallToolResult, McpError> {
+        let name = request.name.as_ref();
+        let params_value = request.arguments
+            .map(Value::Object)
+            .unwrap_or(Value::Object(serde_json::Map::new()));
 
-            let output = match name {
-                "list_rooms" => {
-                    let p: ListRoomsParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.list_rooms(p).await
-                }
-                "get_history" => {
-                    let p: GetHistoryParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.get_history(p).await
-                }
-                "say" => {
-                    let p: SayParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.say(p).await
-                }
-                "ask_model" => {
-                    let p: AskModelParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.ask_model(p).await
-                }
-                "list_models" => {
-                    let p: ListModelsParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.list_models(p).await
-                }
-                "help" => {
-                    let p: HelpParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.help(p).await
-                }
-                "create_room" => {
-                    let p: CreateRoomParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.create_room(p).await
-                }
-                "room_context" => {
-                    let p: RoomContextParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.room_context(p).await
-                }
-                "set_vibe" => {
-                    let p: SetVibeParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.set_vibe(p).await
-                }
-                "add_exit" => {
-                    let p: AddExitParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.add_exit(p).await
-                }
-                "fork_room" => {
-                    let p: ForkRoomParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.fork_room(p).await
-                }
-                "preview_wrap" => {
-                    let p: PreviewWrapParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.preview_wrap(p).await
-                }
-                "list_scripts" => {
-                    let p: ListScriptsParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.list_scripts(p).await
-                }
-                "create_script" => {
-                    let p: CreateScriptParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.create_script(p).await
-                }
-                "read_script" => {
-                    let p: ReadScriptParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.read_script(p).await
-                }
-                "update_script" => {
-                    let p: UpdateScriptParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.update_script(p).await
-                }
-                "delete_script" => {
-                    let p: DeleteScriptParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.delete_script(p).await
-                }
-                "set_entrypoint" => {
-                    let p: SetEntrypointParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.set_entrypoint(p).await
-                }
-                "inventory_list" => {
-                    let p: InventoryListParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.inventory_list(p).await
-                }
-                "inventory_equip" => {
-                    let p: InventoryEquipParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.inventory_equip(p).await
-                }
-                "inventory_unequip" => {
-                    let p: InventoryUnequipParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.inventory_unequip(p).await
-                }
-                "thing_contents" => {
-                    let p: ThingContentsParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.thing_contents(p).await
-                }
-                "thing_take" => {
-                    let p: ThingTakeParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.thing_take(p).await
-                }
-                "thing_drop" => {
-                    let p: ThingDropParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.thing_drop(p).await
-                }
-                "thing_create" => {
-                    let p: ThingCreateParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.thing_create(p).await
-                }
-                "thing_destroy" => {
-                    let p: ThingDestroyParams = serde_json::from_value(params_value)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-                    self.thing_destroy(p).await
-                }
-                _ => return Err(McpError::invalid_params(format!("Unknown tool: {}", name), None)),
-            };
+        let output = match name {
+            "list_rooms" => {
+                let p: ListRoomsParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.list_rooms(p).await
+            }
+            "get_history" => {
+                let p: GetHistoryParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.get_history(p).await
+            }
+            "say" => {
+                let p: SayParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.say(p).await
+            }
+            "ask_model" => {
+                let p: AskModelParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.ask_model(p).await
+            }
+            "list_models" => {
+                let p: ListModelsParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.list_models(p).await
+            }
+            "help" => {
+                let p: HelpParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.help(p).await
+            }
+            "create_room" => {
+                let p: CreateRoomParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.create_room(p).await
+            }
+            "room_context" => {
+                let p: RoomContextParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.room_context(p).await
+            }
+            "set_vibe" => {
+                let p: SetVibeParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.set_vibe(p).await
+            }
+            "add_exit" => {
+                let p: AddExitParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.add_exit(p).await
+            }
+            "fork_room" => {
+                let p: ForkRoomParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.fork_room(p).await
+            }
+            "preview_wrap" => {
+                let p: PreviewWrapParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.preview_wrap(p).await
+            }
+            "list_scripts" => {
+                let p: ListScriptsParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.list_scripts(p).await
+            }
+            "create_script" => {
+                let p: CreateScriptParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.create_script(p).await
+            }
+            "read_script" => {
+                let p: ReadScriptParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.read_script(p).await
+            }
+            "update_script" => {
+                let p: UpdateScriptParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.update_script(p).await
+            }
+            "delete_script" => {
+                let p: DeleteScriptParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.delete_script(p).await
+            }
+            "set_entrypoint" => {
+                let p: SetEntrypointParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.set_entrypoint(p).await
+            }
+            "inventory_list" => {
+                let p: InventoryListParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.inventory_list(p).await
+            }
+            "inventory_equip" => {
+                let p: InventoryEquipParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.inventory_equip(p).await
+            }
+            "inventory_unequip" => {
+                let p: InventoryUnequipParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.inventory_unequip(p).await
+            }
+            "thing_contents" => {
+                let p: ThingContentsParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.thing_contents(p).await
+            }
+            "thing_take" => {
+                let p: ThingTakeParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.thing_take(p).await
+            }
+            "thing_drop" => {
+                let p: ThingDropParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.thing_drop(p).await
+            }
+            "thing_create" => {
+                let p: ThingCreateParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.thing_create(p).await
+            }
+            "thing_destroy" => {
+                let p: ThingDestroyParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.thing_destroy(p).await
+            }
+            _ => return Err(McpError::invalid_params(format!("Unknown tool: {}", name), None)),
+        };
 
-            Ok(CallToolResult::success(vec![Content::text(output)]))
-        }
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 }
 
