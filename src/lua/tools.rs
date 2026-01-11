@@ -3640,6 +3640,316 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     tools.set("db_append_row", db_append_row_fn)?;
 
     // =========================================================================
+    // Room mutation primitives (for MCP tools)
+    // =========================================================================
+
+    // tools.db_create_room(name, description?) -> {success, error}
+    let db_create_room_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |lua, (name, description): (String, Option<String>)| {
+                let result = lua.create_table()?;
+
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no shared state")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Validate name
+                if !name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
+                    result.set("success", false)?;
+                    result.set(
+                        "error",
+                        "Room name can only contain letters, numbers, dashes, and underscores",
+                    )?;
+                    return Ok(result);
+                }
+
+                // Check if room already exists
+                match shared.db.get_room_by_name(&name) {
+                    Ok(Some(_)) => {
+                        result.set("success", false)?;
+                        result.set("error", format!("Room '{}' already exists", name))?;
+                        return Ok(result);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        return Ok(result);
+                    }
+                }
+
+                // Create room in DB
+                match shared.db.create_room(&name, description.as_deref()) {
+                    Ok(()) => {
+                        // Also create in memory
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                let mut world = shared.world.write().await;
+                                world.create_room(name.clone());
+                                if let Some(room) = world.get_room_mut(&name) {
+                                    room.description = description.clone();
+                                }
+                            });
+                        });
+
+                        result.set("success", true)?;
+                        result.set("room", name)?;
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                    }
+                }
+
+                Ok(result)
+            },
+        )?
+    };
+    tools.set("db_create_room", db_create_room_fn)?;
+
+    // tools.db_set_vibe(room, vibe) -> {success, error}
+    let db_set_vibe_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (room, vibe): (String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            // Verify room exists
+            match shared.db.get_room_by_name(&room) {
+                Ok(None) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Room '{}' not found", room))?;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+                Ok(Some(_)) => {}
+            }
+
+            // Set vibe
+            match shared.db.set_vibe(&room, Some(&vibe)) {
+                Ok(()) => {
+                    // Update in-memory state
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            let mut world = shared.world.write().await;
+                            if let Some(room_obj) = world.get_room_mut(&room) {
+                                room_obj.context.vibe = Some(vibe.clone());
+                            }
+                        });
+                    });
+
+                    result.set("success", true)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("db_set_vibe", db_set_vibe_fn)?;
+
+    // tools.db_add_exit(room, direction, target, bidirectional?) -> {success, reverse?, error}
+    let db_add_exit_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |lua, (room, direction, target, bidirectional): (String, String, String, Option<bool>)| {
+                let result = lua.create_table()?;
+                let bidirectional = bidirectional.unwrap_or(true);
+
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("success", false)?;
+                        result.set("error", "no shared state")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Verify source room exists
+                match shared.db.get_room_by_name(&room) {
+                    Ok(None) => {
+                        result.set("success", false)?;
+                        result.set("error", format!("Source room '{}' not found", room))?;
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        return Ok(result);
+                    }
+                    Ok(Some(_)) => {}
+                }
+
+                // Verify target room exists
+                match shared.db.get_room_by_name(&target) {
+                    Ok(None) => {
+                        result.set("success", false)?;
+                        result.set("error", format!("Target room '{}' not found", target))?;
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        return Ok(result);
+                    }
+                    Ok(Some(_)) => {}
+                }
+
+                // Add forward exit
+                if let Err(e) = shared.db.add_exit(&room, &direction, &target) {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+
+                // Add reverse exit if bidirectional
+                let reverse = if bidirectional {
+                    let reverse_dir = match direction.as_str() {
+                        "north" => "south",
+                        "south" => "north",
+                        "east" => "west",
+                        "west" => "east",
+                        "up" => "down",
+                        "down" => "up",
+                        "in" => "out",
+                        "out" => "in",
+                        _ => "back",
+                    };
+
+                    if let Err(e) = shared.db.add_exit(&target, reverse_dir, &room) {
+                        result.set("success", true)?;
+                        result.set(
+                            "warning",
+                            format!("Forward exit created but reverse failed: {}", e),
+                        )?;
+                        return Ok(result);
+                    }
+
+                    Some(reverse_dir.to_string())
+                } else {
+                    None
+                };
+
+                result.set("success", true)?;
+                if let Some(rev) = reverse {
+                    result.set("reverse", rev)?;
+                }
+
+                Ok(result)
+            },
+        )?
+    };
+    tools.set("db_add_exit", db_add_exit_fn)?;
+
+    // tools.db_fork_room(source, new_name) -> {success, room?, error}
+    let db_fork_room_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (source, new_name): (String, String)| {
+            let result = lua.create_table()?;
+
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
+                    result.set("success", false)?;
+                    result.set("error", "no shared state")?;
+                    return Ok(result);
+                }
+            };
+
+            // Validate new name
+            if !new_name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                result.set("success", false)?;
+                result.set(
+                    "error",
+                    "Room name can only contain letters, numbers, dashes, and underscores",
+                )?;
+                return Ok(result);
+            }
+
+            // Check source exists
+            match shared.db.get_room_by_name(&source) {
+                Ok(None) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Source room '{}' not found", source))?;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+                Ok(Some(_)) => {}
+            }
+
+            // Check new room doesn't exist
+            match shared.db.get_room_by_name(&new_name) {
+                Ok(Some(_)) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Room '{}' already exists", new_name))?;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+                Ok(None) => {}
+            }
+
+            // Fork room
+            match shared.db.fork_room(&source, &new_name) {
+                Ok(()) => {
+                    // Create in memory
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            let mut world = shared.world.write().await;
+                            world.create_room(new_name.clone());
+                        });
+                    });
+
+                    result.set("success", true)?;
+                    result.set("room", new_name)?;
+                    result.set("source", source)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
+
+            Ok(result)
+        })?
+    };
+    tools.set("db_fork_room", db_fork_room_fn)?;
+
+    // =========================================================================
     // Help system
     // =========================================================================
 
