@@ -3231,6 +3231,307 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     tools.set("bootstrap_world", bootstrap_world_fn)?;
 
     // =========================================================================
+    // DB Primitives (Phase 3) - Direct database access for Lua
+    // =========================================================================
+
+    // tools.db_rows(room, opts) -> array of row tables
+    // opts = { limit?: number, since_id?: string }
+    let db_rows_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, (room_name, opts): (String, Option<Table>)| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            let limit = opts
+                .as_ref()
+                .and_then(|t| t.get::<u32>("limit").ok())
+                .unwrap_or(50) as usize;
+
+            // Get buffer for room
+            let buffer = match shared.db.get_or_create_room_buffer(&room_name) {
+                Ok(b) => b,
+                Err(_) => return lua.create_table(),
+            };
+
+            // Get rows
+            let rows = match shared.db.list_recent_buffer_rows(&buffer.id, limit) {
+                Ok(r) => r,
+                Err(_) => return lua.create_table(),
+            };
+
+            // Convert to Lua tables
+            let result = lua.create_table()?;
+            for (i, row) in rows.iter().enumerate() {
+                let row_table = lua.create_table()?;
+                row_table.set("id", row.id.clone())?;
+                row_table.set("buffer_id", row.buffer_id.clone())?;
+                row_table.set("parent_row_id", row.parent_row_id.clone())?;
+                row_table.set("position", row.position)?;
+                row_table.set("source_agent_id", row.source_agent_id.clone())?;
+                row_table.set("source_session_id", row.source_session_id.clone())?;
+                row_table.set("content_method", row.content_method.clone())?;
+                row_table.set("content_format", row.content_format.clone())?;
+                row_table.set("content_meta", row.content_meta.clone())?;
+                row_table.set("content", row.content.clone())?;
+                row_table.set("collapsed", row.collapsed)?;
+                row_table.set("ephemeral", row.ephemeral)?;
+                row_table.set("mutable", row.mutable)?;
+                row_table.set("pinned", row.pinned)?;
+                row_table.set("hidden", row.hidden)?;
+                row_table.set("token_count", row.token_count)?;
+                row_table.set("cost_usd", row.cost_usd)?;
+                row_table.set("latency_ms", row.latency_ms)?;
+                row_table.set("created_at", row.created_at)?;
+                row_table.set("updated_at", row.updated_at)?;
+                row_table.set("finalized_at", row.finalized_at)?;
+                result.set(i + 1, row_table)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("db_rows", db_rows_fn)?;
+
+    // tools.db_row(id) -> single row table or nil
+    let db_row_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, id: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.get_row(&id) {
+                Ok(Some(row)) => {
+                    let row_table = lua.create_table()?;
+                    row_table.set("id", row.id.clone())?;
+                    row_table.set("buffer_id", row.buffer_id.clone())?;
+                    row_table.set("parent_row_id", row.parent_row_id.clone())?;
+                    row_table.set("position", row.position)?;
+                    row_table.set("source_agent_id", row.source_agent_id.clone())?;
+                    row_table.set("source_session_id", row.source_session_id.clone())?;
+                    row_table.set("content_method", row.content_method.clone())?;
+                    row_table.set("content_format", row.content_format.clone())?;
+                    row_table.set("content_meta", row.content_meta.clone())?;
+                    row_table.set("content", row.content.clone())?;
+                    row_table.set("collapsed", row.collapsed)?;
+                    row_table.set("ephemeral", row.ephemeral)?;
+                    row_table.set("mutable", row.mutable)?;
+                    row_table.set("pinned", row.pinned)?;
+                    row_table.set("hidden", row.hidden)?;
+                    row_table.set("token_count", row.token_count)?;
+                    row_table.set("cost_usd", row.cost_usd)?;
+                    row_table.set("latency_ms", row.latency_ms)?;
+                    row_table.set("created_at", row.created_at)?;
+                    row_table.set("updated_at", row.updated_at)?;
+                    row_table.set("finalized_at", row.finalized_at)?;
+                    Ok(Value::Table(row_table))
+                }
+                _ => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("db_row", db_row_fn)?;
+
+    // tools.db_rooms() -> array of room tables
+    let db_rooms_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            let rooms = match shared.db.list_rooms() {
+                Ok(r) => r,
+                Err(_) => return lua.create_table(),
+            };
+
+            let result = lua.create_table()?;
+            for (i, room) in rooms.iter().enumerate() {
+                let room_table = lua.create_table()?;
+                room_table.set("id", room.id.clone())?;
+                room_table.set("name", room.name.clone())?;
+                room_table.set("created_at", room.created_at)?;
+
+                // Also fetch vibe and description from room_kv
+                if let Ok(Some(vibe)) = shared.db.get_room_kv(&room.id, "vibe") {
+                    room_table.set("vibe", vibe)?;
+                }
+                if let Ok(Some(desc)) = shared.db.get_room_kv(&room.id, "description") {
+                    room_table.set("description", desc)?;
+                }
+
+                result.set(i + 1, room_table)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("db_rooms", db_rooms_fn)?;
+
+    // tools.db_room(name) -> single room table or nil
+    let db_room_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, name: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.get_room_by_name(&name) {
+                Ok(Some(room)) => {
+                    let room_table = lua.create_table()?;
+                    room_table.set("id", room.id.clone())?;
+                    room_table.set("name", room.name.clone())?;
+                    room_table.set("created_at", room.created_at)?;
+
+                    // Also fetch vibe and description from room_kv
+                    if let Ok(Some(vibe)) = shared.db.get_room_kv(&room.id, "vibe") {
+                        room_table.set("vibe", vibe)?;
+                    }
+                    if let Ok(Some(desc)) = shared.db.get_room_kv(&room.id, "description") {
+                        room_table.set("description", desc)?;
+                    }
+
+                    Ok(Value::Table(room_table))
+                }
+                _ => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("db_room", db_room_fn)?;
+
+    // tools.db_agents() -> array of agent tables
+    let db_agents_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            let agents = match shared.db.list_agents(None) {
+                Ok(a) => a,
+                Err(_) => return lua.create_table(),
+            };
+
+            let result = lua.create_table()?;
+            for (i, agent) in agents.iter().enumerate() {
+                let agent_table = lua.create_table()?;
+                agent_table.set("id", agent.id.clone())?;
+                agent_table.set("name", agent.name.clone())?;
+                agent_table.set("display_name", agent.display_name.clone())?;
+                agent_table.set("kind", agent.kind.as_str())?;
+                agent_table.set("created_at", agent.created_at)?;
+                result.set(i + 1, agent_table)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("db_agents", db_agents_fn)?;
+
+    // tools.db_exits(room) -> array of exit tables
+    let db_exits_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, room_name: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return lua.create_table(),
+            };
+
+            // Get room by name
+            let room = match shared.db.get_room_by_name(&room_name) {
+                Ok(Some(r)) => r,
+                _ => return lua.create_table(),
+            };
+
+            // Get exits from room_kv
+            let exits = match shared.db.get_room_exits(&room.id) {
+                Ok(e) => e,
+                Err(_) => return lua.create_table(),
+            };
+
+            let result = lua.create_table()?;
+            for (i, (direction, target)) in exits.iter().enumerate() {
+                let exit_table = lua.create_table()?;
+                exit_table.set("direction", direction.clone())?;
+                exit_table.set("target", target.clone())?;
+                result.set(i + 1, exit_table)?;
+            }
+            Ok(result)
+        })?
+    };
+    tools.set("db_exits", db_exits_fn)?;
+
+    // tools.db_buffer(room) -> buffer table or nil
+    let db_buffer_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, room_name: String| {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => return Ok(Value::Nil),
+            };
+
+            match shared.db.get_or_create_room_buffer(&room_name) {
+                Ok(buffer) => {
+                    let buffer_table = lua.create_table()?;
+                    buffer_table.set("id", buffer.id.clone())?;
+                    buffer_table.set("room_id", buffer.room_id.clone())?;
+                    buffer_table.set("owner_agent_id", buffer.owner_agent_id.clone())?;
+                    buffer_table.set("buffer_type", buffer.buffer_type.as_str())?;
+                    buffer_table.set("created_at", buffer.created_at)?;
+                    buffer_table.set("tombstoned", buffer.tombstoned)?;
+                    buffer_table.set("include_in_wrap", buffer.include_in_wrap)?;
+                    buffer_table.set("wrap_priority", buffer.wrap_priority)?;
+                    Ok(Value::Table(buffer_table))
+                }
+                Err(_) => Ok(Value::Nil),
+            }
+        })?
+    };
+    tools.set("db_buffer", db_buffer_fn)?;
+
+    // tools.db_append_row(buffer_id, agent_id, content, is_tool) -> row id or nil
+    let db_append_row_fn = {
+        let state = state.clone();
+        lua.create_function(
+            move |_lua, (buffer_id, agent_id, content, is_tool): (String, String, String, Option<bool>)| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return Ok(Value::Nil),
+                };
+
+                // Check if agent exists and what kind it is
+                let agent = match shared.db.get_agent(&agent_id) {
+                    Ok(Some(a)) => a,
+                    _ => return Ok(Value::Nil),
+                };
+
+                let is_tool = is_tool.unwrap_or(false);
+                let is_model = agent.kind == crate::db::agents::AgentKind::Model;
+
+                // Create the row
+                let mut row = if is_tool {
+                    crate::db::rows::Row::tool_call(&buffer_id, &agent_id, &content, None::<String>)
+                } else {
+                    crate::db::rows::Row::message(&buffer_id, &agent_id, &content, is_model)
+                };
+
+                // Append to buffer
+                match shared.db.append_row(&mut row) {
+                    Ok(()) => Ok(Value::String(_lua.create_string(&row.id)?)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "db_append_row failed");
+                        Ok(Value::Nil)
+                    }
+                }
+            },
+        )?
+    };
+    tools.set("db_append_row", db_append_row_fn)?;
+
+    // =========================================================================
     // Help system
     // =========================================================================
 
