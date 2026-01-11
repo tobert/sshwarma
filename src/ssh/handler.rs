@@ -1,17 +1,15 @@
 //! SSH connection handler
 
 use crate::db::rows::Row;
-use crate::internal_tools::{InternalToolConfig, ToolContext};
-use crate::llm::StreamChunk;
-use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge, WrapState};
+use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge};
 use crate::model::ModelHandle;
+use crate::ops::{ModelResponseConfig, spawn_model_response};
 use crate::player::PlayerSession;
 use crate::ssh::screen::spawn_screen_refresh;
 use crate::ssh::session::SessionState;
 use crate::ssh::streaming::{push_updates_task, RowUpdate};
 use crate::state::SharedState;
 use anyhow::Result;
-use rig::tool::server::ToolServer;
 use russh::server::{self, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::sync::Arc;
@@ -121,31 +119,6 @@ impl SshHandler {
     // =========================================================================
     // Other Methods
     // =========================================================================
-
-    /// Get set of equipped tool qualified names for a room
-    ///
-    /// Returns empty set if room has no equipped tools or things system not initialized.
-    /// This is used to filter which MCP/internal tools are available during @mention.
-    fn get_equipped_tool_names(&self, room_name: &str) -> std::collections::HashSet<String> {
-        // Look up room by name to get its UUID
-        let room_id = match self.state.db.get_room_by_name(room_name) {
-            Ok(Some(room)) => room.id,
-            _ => return std::collections::HashSet::new(),
-        };
-
-        // Get equipped tools for this room
-        let equipped = self
-            .state
-            .db
-            .get_room_equipment_tools(&room_id)
-            .unwrap_or_default();
-
-        // Build set of qualified names
-        equipped
-            .into_iter()
-            .filter_map(|eq| eq.thing.qualified_name)
-            .collect()
-    }
 
     /// Initialize session after authentication
     pub async fn init_session(&mut self, username: &str) {
@@ -306,6 +279,9 @@ impl SshHandler {
     }
 
     /// Spawn background task for model response with tool support
+    ///
+    /// This is a thin wrapper around `ops::spawn_model_response` that passes
+    /// the SSH session's update channel for streaming updates.
     pub async fn spawn_model_response(
         &self,
         model: ModelHandle,
@@ -314,270 +290,22 @@ impl SshHandler {
         room_name: Option<String>,
         placeholder_row_id: Option<String>,
     ) -> Result<()> {
-        let llm = self.state.llm.clone();
-        let update_tx = self.update_tx.clone();
-        let state = self.state.clone();
-        let lua_runtime = self.lua_runtime.clone();
-
-        // Get MCP tools for rig agent
-        let mcp_context = self.state.mcp.rig_tools().await;
-
-        // Get equipped tools for this room to filter available tools
-        let room_for_tools = room_name.clone().unwrap_or_else(|| "lobby".to_string());
-        let equipped_tools = self.get_equipped_tool_names(&room_for_tools);
-
-        // Build ToolServer with MCP + internal tools (filtered by equipped)
-        let tool_server_handle = {
-            let mut server = ToolServer::new();
-
-            // Add MCP tools if available (only if equipped to room)
-            if let Some(ref ctx) = mcp_context {
-                for (tool, peer) in ctx.tools.iter() {
-                    // Convert MCP tool name to qualified format: server__tool -> server:tool
-                    let qualified = tool.name.replace("__", ":");
-
-                    // Only include tools that are equipped to this room
-                    if equipped_tools.contains(&qualified) {
-                        server = server.rmcp_tool(tool.clone(), peer.clone());
-                    } else {
-                        tracing::debug!("skipping MCP tool {} (not equipped)", qualified);
-                    }
-                }
-            }
-
-            server.run()
+        let config = ModelResponseConfig {
+            model,
+            message,
+            username,
+            room_name,
+            placeholder_row_id,
         };
 
-        // Register internal sshwarma tools (filtered by equipment status)
-        let room_for_tools = room_name.clone().unwrap_or_else(|| "lobby".to_string());
-        let in_room = room_name.is_some();
-
-        if let Some(ref lua_rt) = lua_runtime {
-            let tool_ctx = ToolContext {
-                state: state.clone(),
-                room: room_for_tools.clone(),
-                username: username.clone(),
-                lua_runtime: lua_rt.clone(),
-            };
-            let config = InternalToolConfig::for_room(&state, &room_for_tools).await;
-            match crate::internal_tools::register_tools(
-                &tool_server_handle,
-                tool_ctx,
-                &config,
-                in_room,
-                &equipped_tools,
-            )
-            .await
-            {
-                Ok(count) => tracing::info!("registered {} internal tools for @mention", count),
-                Err(e) => tracing::error!("failed to register internal tools: {}", e),
-            }
-        }
-
-        // Build tool guide for system prompt
-        let tool_guide = match tool_server_handle.get_tool_defs(None).await {
-            Ok(tool_defs) if !tool_defs.is_empty() => {
-                let mut guide = String::from("\n\n## Your Functions\n");
-                guide.push_str("You have these built-in functions:\n\n");
-                for tool in &tool_defs {
-                    let display_name = tool.name.strip_prefix("sshwarma_").unwrap_or(&tool.name);
-                    guide.push_str(&format!("- **{}**: {}\n", display_name, tool.description));
-                }
-                tracing::info!("injecting {} tool definitions into prompt", tool_defs.len());
-                guide
-            }
-            Ok(_) => {
-                tracing::warn!("no tools available for @mention");
-                String::new()
-            }
-            Err(e) => {
-                tracing::error!("failed to get tool definitions: {}", e);
-                String::new()
-            }
-        };
-
-        // Build context via wrap() system
-        let target_tokens = model.context_window.unwrap_or(8000);
-        let (system_prompt, full_message) = if let Some(ref lua_rt) = lua_runtime {
-            let wrap_state = WrapState {
-                room_name: room_name.clone(),
-                username: username.clone(),
-                model: model.clone(),
-                shared_state: state.clone(),
-            };
-
-            let lua = lua_rt.lock().await;
-            match lua.wrap(wrap_state, target_tokens) {
-                Ok(result) => {
-                    // Log token counts before moving values
-                    let system_tokens = result.system_prompt.len() / 4;
-                    let context_tokens = result.context.len() / 4;
-
-                    // Combine wrap system_prompt with tool guide
-                    let prompt = if tool_guide.is_empty() {
-                        result.system_prompt
-                    } else {
-                        format!("{}{}", result.system_prompt, tool_guide)
-                    };
-
-                    // Prepend context to user message
-                    let msg = if result.context.is_empty() {
-                        message.clone()
-                    } else {
-                        format!("{}\n\n---\n\n{}", result.context, message)
-                    };
-
-                    tracing::info!(
-                        "wrap() composed {} system tokens, {} context tokens",
-                        system_tokens,
-                        context_tokens
-                    );
-
-                    (prompt, msg)
-                }
-                Err(e) => {
-                    // Fail visibly - notify user and abort
-                    tracing::error!("wrap() failed: {}", e);
-                    lua.tool_state().push_notification_with_level(
-                        format!("Context composition failed: {}", e),
-                        5000,
-                        crate::lua::NotificationLevel::Error,
-                    );
-                    return Ok(());
-                }
-            }
-        } else {
-            // No Lua runtime - use basic fallback
-            let prompt = format!(
-                "You are {} in a collaborative chat room. Be helpful and concise.{}",
-                model.display_name, tool_guide
-            );
-            (prompt, message.clone())
-        };
-
-        let model_short = model.short_name.clone();
-        let row_id = placeholder_row_id.clone();
-        let room_for_tracking = room_name.clone();
-
-        tokio::spawn(async move {
-            tracing::info!("spawn_model_response: background task started");
-
-            // Get buffer_id and agent_id for tool call tracking
-            let (buffer_id, agent_id) = if let Some(ref room) = room_for_tracking {
-                let buf_id = state
-                    .db
-                    .get_or_create_room_buffer(room)
-                    .map(|b| b.id)
-                    .unwrap_or_default();
-                let agt_id = state
-                    .db
-                    .get_or_create_model_agent(&model_short)
-                    .map(|a| a.id)
-                    .unwrap_or_default();
-                (buf_id, agt_id)
-            } else {
-                (String::new(), String::new())
-            };
-
-            // Track last tool name for result matching
-            let mut last_tool_name = String::new();
-
-            // Create channel for streaming chunks
-            let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamChunk>(32);
-
-            // Spawn the streaming LLM call
-            tracing::info!("spawn_model_response: starting LLM stream");
-            let stream_handle = tokio::spawn({
-                let llm = llm.clone();
-                let model = model.clone();
-                let system_prompt = system_prompt.clone();
-                let full_message = full_message.clone();
-                async move {
-                    tracing::info!("spawn_model_response: calling stream_with_tool_server");
-                    let result = llm.stream_with_tool_server(
-                        &model,
-                        &system_prompt,
-                        &full_message,
-                        tool_server_handle,
-                        chunk_tx,
-                        100, // max tool turns
-                    )
-                    .await;
-                    tracing::info!("spawn_model_response: stream_with_tool_server returned: {:?}", result.is_ok());
-                    result
-                }
-            });
-
-            // Process streaming chunks
-            let mut full_response = String::new();
-            tracing::info!("spawn_model_response: waiting for chunks");
-
-            while let Some(chunk) = chunk_rx.recv().await {
-                tracing::info!("spawn_model_response: received chunk: {:?}", std::mem::discriminant(&chunk));
-                match chunk {
-                    StreamChunk::Text(text) => {
-                        tracing::info!("spawn_model_response: text chunk len={}", text.len());
-                        full_response.push_str(&text);
-                        if let Some(ref row_id) = row_id {
-                            let _ = update_tx
-                                .send(RowUpdate::Chunk {
-                                    row_id: row_id.clone(),
-                                    text,
-                                })
-                                .await;
-                        }
-                    }
-                    StreamChunk::ToolCall { name, arguments } => {
-                        last_tool_name = name.clone();
-                        if let Some(ref row_id) = row_id {
-                            let _ = update_tx
-                                .send(RowUpdate::ToolCall {
-                                    row_id: row_id.clone(),
-                                    tool_name: name,
-                                    tool_args: arguments,
-                                    model_name: model_short.clone(),
-                                    buffer_id: buffer_id.clone(),
-                                    agent_id: agent_id.clone(),
-                                })
-                                .await;
-                        }
-                    }
-                    StreamChunk::ToolResult(summary) => {
-                        if let Some(ref row_id) = row_id {
-                            let _ = update_tx
-                                .send(RowUpdate::ToolResult {
-                                    row_id: row_id.clone(),
-                                    tool_name: last_tool_name.clone(),
-                                    summary,
-                                    success: true, // rig tool calls that reach here succeeded
-                                    buffer_id: buffer_id.clone(),
-                                })
-                                .await;
-                        }
-                    }
-                    StreamChunk::Done => {
-                        break;
-                    }
-                    StreamChunk::Error(e) => {
-                        tracing::error!("stream error: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            // Wait for stream task to complete
-            let _ = stream_handle.await;
-
-            // Send completion to finalize the row
-            if let Some(row_id) = row_id {
-                let _ = update_tx
-                    .send(RowUpdate::Complete {
-                        row_id,
-                        model_name: model_short,
-                    })
-                    .await;
-            }
-        });
+        // Spawn via ops with SSH's update channel for streaming
+        let _handle = spawn_model_response(
+            self.state.clone(),
+            config,
+            self.lua_runtime.clone(),
+            Some(self.update_tx.clone()),
+        )
+        .await?;
 
         Ok(())
     }
