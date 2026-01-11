@@ -939,6 +939,28 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     };
     tools.set("current_user", current_user_fn)?;
 
+    // tools.list_models() -> array of model tables
+    let list_models_fn = {
+        let state = state.clone();
+        lua.create_function(move |lua, ()| {
+            let list = lua.create_table()?;
+
+            if let Some(shared) = state.shared_state() {
+                for (i, model) in shared.models.available().iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("short_name", model.short_name.clone())?;
+                    row.set("display_name", model.display_name.clone())?;
+                    row.set("backend", format!("{:?}", model.backend))?;
+                    row.set("context_window", model.context_window)?;
+                    list.set(i + 1, row)?;
+                }
+            }
+
+            Ok(list)
+        })?
+    };
+    tools.set("list_models", list_models_fn)?;
+
     // tools.get_agent(name) -> {id, name} or nil
     let get_agent_fn = {
         let state = state.clone();
