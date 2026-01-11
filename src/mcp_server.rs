@@ -3,7 +3,8 @@
 //! This module provides an MCP server that allows Claude Code to interact
 //! with sshwarma rooms - listing rooms, viewing history, sending messages.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData as McpError,
     model::{
@@ -21,6 +22,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
+use uuid::Uuid;
 
 // ScriptScope is imported locally where needed
 use crate::db::Database;
@@ -80,6 +82,9 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         Tool::new("thing_drop", "Move a thing from your inventory to a room", generate_schema::<ThingDropParams>()),
         Tool::new("thing_create", "Create a new thing in a container", generate_schema::<ThingCreateParams>()),
         Tool::new("thing_destroy", "Delete a thing (must specify owner:name)", generate_schema::<ThingDestroyParams>()),
+        // Session identity tools
+        Tool::new("identify", "Set your display name for this session. Auto-joins matching room if it exists.", generate_schema::<IdentifyParams>()),
+        Tool::new("whoami", "Get current session identity and status", generate_schema::<WhoamiParams>()),
     ]
 }
 
@@ -93,10 +98,81 @@ pub struct McpServerState {
     pub shared_state: Arc<SharedState>,
 }
 
+/// Per-connection MCP session state
+pub struct McpSession {
+    /// Session UUID
+    pub id: String,
+    /// DB agent record ID
+    pub agent_id: String,
+    /// Display name - "claude" by default, or set via identify()
+    pub display_name: String,
+    /// Current room - auto-joins room matching display_name on identify()
+    pub current_room: Option<String>,
+    /// Per-session Lua runtime
+    pub lua_runtime: Arc<Mutex<LuaRuntime>>,
+    /// When this session was created
+    pub created_at: DateTime<Utc>,
+}
+
+impl McpSession {
+    /// Create a new MCP session with default "claude" identity
+    pub fn new(db: &Database, shared_state: Arc<SharedState>) -> Result<Self> {
+        let session_id = Uuid::now_v7().to_string();
+        let display_name = "claude".to_string();
+
+        // Get or create the agent record for this session
+        let agent = db
+            .get_or_create_human_agent(&display_name)
+            .context("Failed to get or create agent for MCP session")?;
+
+        // Create a per-session Lua runtime
+        let lua_runtime = LuaRuntime::new()
+            .context("Failed to create Lua runtime for MCP session")?;
+
+        // Set up the shared state in the Lua tool state
+        lua_runtime.tool_state().set_shared_state(Some(shared_state));
+
+        Ok(Self {
+            id: session_id,
+            agent_id: agent.id,
+            display_name,
+            current_room: None,
+            lua_runtime: Arc::new(Mutex::new(lua_runtime)),
+            created_at: Utc::now(),
+        })
+    }
+
+    /// Update the session identity - returns the old name
+    pub fn update_identity(&mut self, db: &Database, new_name: &str) -> Result<String> {
+        let old_name = std::mem::replace(&mut self.display_name, new_name.to_string());
+
+        // Get or create agent for the new identity
+        let agent = db
+            .get_or_create_human_agent(new_name)
+            .context("Failed to get or create agent for new identity")?;
+        self.agent_id = agent.id;
+
+        Ok(old_name)
+    }
+
+    /// Join a room by name
+    pub fn join_room(&mut self, db: &Database, room_name: &str) -> Result<()> {
+        // Verify the room exists (or could be created)
+        let _room = db
+            .get_room_by_name(room_name)
+            .context("Failed to look up room")?
+            .ok_or_else(|| anyhow::anyhow!("Room '{}' does not exist", room_name))?;
+
+        self.current_room = Some(room_name.to_string());
+        Ok(())
+    }
+}
+
 /// MCP server for sshwarma
 #[derive(Clone)]
 pub struct SshwarmaMcpServer {
     state: Arc<McpServerState>,
+    session: Arc<RwLock<McpSession>>,
 }
 
 /// Parameters for list_rooms
@@ -328,11 +404,29 @@ pub struct ThingDestroyParams {
     pub target: String,
 }
 
+/// Parameters for identify - set the session's display name
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct IdentifyParams {
+    #[schemars(description = "Display name for this session (e.g., 'claude-code', 'research-agent')")]
+    pub name: String,
+    #[schemars(description = "Optional context about this agent's purpose or capabilities")]
+    pub context: Option<String>,
+}
+
+/// Parameters for whoami - get current session identity
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WhoamiParams {}
+
 impl SshwarmaMcpServer {
-    pub fn new(state: Arc<McpServerState>) -> Self {
-        Self {
+    pub fn new(state: Arc<McpServerState>) -> Result<Self> {
+        // Create a per-connection session
+        let session = McpSession::new(&state.db, state.shared_state.clone())
+            .context("Failed to create MCP session")?;
+
+        Ok(Self {
             state,
-        }
+            session: Arc::new(RwLock::new(session)),
+        })
     }
 
     async fn list_rooms(&self, _params: ListRoomsParams) -> String {
@@ -1480,6 +1574,85 @@ impl SshwarmaMcpServer {
             Err(e) => format!("Error destroying: {}", e),
         }
     }
+
+    // =========================================================================
+    // Session identity tools
+    // =========================================================================
+
+    async fn identify(&self, params: IdentifyParams) -> String {
+        // Validate the name
+        if params.name.is_empty() {
+            return "Name cannot be empty.".to_string();
+        }
+        if !params.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return "Name can only contain letters, numbers, dashes, and underscores.".to_string();
+        }
+
+        let mut session = self.session.write().await;
+        let old_name = match session.update_identity(&self.state.db, &params.name) {
+            Ok(old) => old,
+            Err(e) => return format!("Error updating identity: {}", e),
+        };
+
+        // Try to auto-join a room matching the new name
+        let auto_joined = if let Ok(Some(_room)) = self.state.db.get_room_by_name(&params.name) {
+            session.current_room = Some(params.name.clone());
+            true
+        } else {
+            false
+        };
+
+        // Build response
+        let mut response = format!(
+            "Identity updated: {} -> {}\nSession ID: {}",
+            old_name, params.name, &session.id[..8]
+        );
+
+        if auto_joined {
+            response.push_str(&format!("\nAuto-joined room: {}", params.name));
+        }
+
+        if let Some(ref context) = params.context {
+            response.push_str(&format!("\nContext: {}", context));
+        }
+
+        response
+    }
+
+    async fn whoami(&self, _params: WhoamiParams) -> String {
+        let session = self.session.read().await;
+
+        let uptime = Utc::now().signed_duration_since(session.created_at);
+        let uptime_str = if uptime.num_hours() > 0 {
+            format!("{}h {}m", uptime.num_hours(), uptime.num_minutes() % 60)
+        } else if uptime.num_minutes() > 0 {
+            format!("{}m {}s", uptime.num_minutes(), uptime.num_seconds() % 60)
+        } else {
+            format!("{}s", uptime.num_seconds())
+        };
+
+        let mut output = format!(
+            "Session Identity:\n\
+             - Display Name: {}\n\
+             - Session ID: {}\n\
+             - Agent ID: {}\n\
+             - Uptime: {}\n\
+             - Created: {}",
+            session.display_name,
+            &session.id[..8],
+            &session.agent_id[..8],
+            uptime_str,
+            session.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+
+        if let Some(ref room) = session.current_room {
+            output.push_str(&format!("\n- Current Room: {}", room));
+        } else {
+            output.push_str("\n- Current Room: (none)");
+        }
+
+        output
+    }
 }
 
 impl ServerHandler for SshwarmaMcpServer {
@@ -1649,6 +1822,16 @@ impl ServerHandler for SshwarmaMcpServer {
                     .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
                 self.thing_destroy(p).await
             }
+            "identify" => {
+                let p: IdentifyParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.identify(p).await
+            }
+            "whoami" => {
+                let p: WhoamiParams = serde_json::from_value(params_value)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                self.whoami(p).await
+            }
             _ => return Err(McpError::invalid_params(format!("Unknown tool: {}", name), None)),
         };
 
@@ -1665,7 +1848,10 @@ pub async fn start_mcp_server(
     info!(port, "MCP server listening");
 
     let service = StreamableHttpService::new(
-        move || Ok(SshwarmaMcpServer::new(state.clone())),
+        move || {
+            Ok(SshwarmaMcpServer::new(state.clone())
+                .expect("Failed to create MCP session - this is a fatal error"))
+        },
         LocalSessionManager::default().into(),
         Default::default(),
     );
