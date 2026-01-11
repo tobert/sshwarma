@@ -488,9 +488,12 @@ function M.build_display_lines(messages, width, my_name)
     local prefix_width = 0
     local C = M.colors
 
+    -- Calculate max author width (for regular messages only)
     for _, msg in ipairs(messages) do
-        local author = msg.author or "???"
-        prefix_width = math.max(prefix_width, M.display_width(author) + 3)
+        if not msg.is_tool_call and not msg.is_tool_result then
+            local author = msg.author or "???"
+            prefix_width = math.max(prefix_width, M.display_width(author) + 3)
+        end
     end
 
     local content_width = width - prefix_width
@@ -504,28 +507,79 @@ function M.build_display_lines(messages, width, my_name)
         local content = msg.content or ""
         local is_model = msg.is_model
         local is_streaming = msg.is_streaming
+        local is_tool_call = msg.is_tool_call
+        local is_tool_result = msg.is_tool_result
 
-        local nick_color = C.nick
-        if author == my_name then
-            nick_color = C.self
-        elseif is_model then
-            nick_color = C.model
-        elseif author == "system" then
-            nick_color = C.system
-        end
-
-        local wrapped = M.wrap_text(content, content_width)
-
-        for i, line_text in ipairs(wrapped) do
+        -- Handle tool calls and results specially
+        if is_tool_call then
+            local tool_name = msg.tool_name or content
+            local display_text = "🔧 " .. tool_name
             table.insert(display_lines, {
-                text = line_text,
-                nick_color = nick_color,
-                is_first_line = (i == 1),
-                is_last_line = (i == #wrapped),
-                is_streaming = is_streaming,
-                prefix_width = prefix_width,
-                author = (i == 1) and author or nil,
+                text = display_text,
+                nick_color = C.tools,
+                is_first_line = true,
+                is_last_line = true,
+                is_streaming = false,
+                is_tool_call = true,
+                prefix_width = 0,  -- No author prefix for tools
+                author = nil,
+                row_id = msg.row_id,
+                collapsed = msg.collapsed,
+                italic = true,
             })
+        elseif is_tool_result then
+            local tool_name = msg.tool_name or "tool"
+            local success = msg.tool_success
+            local icon = (success == false) and "✗" or "✓"
+            local result_color = (success == false) and C.error or C.success
+
+            -- Format: ✓ tool_name: result (truncated)
+            local result_preview = content
+            if #result_preview > 60 then
+                result_preview = result_preview:sub(1, 57) .. "..."
+            end
+            -- Clean up newlines for preview
+            result_preview = result_preview:gsub("\n", " "):gsub("%s+", " ")
+
+            local display_text = icon .. " " .. tool_name .. ": " .. result_preview
+            table.insert(display_lines, {
+                text = display_text,
+                nick_color = result_color,
+                is_first_line = true,
+                is_last_line = true,
+                is_streaming = false,
+                is_tool_result = true,
+                prefix_width = 0,  -- No author prefix for tools
+                author = nil,
+                row_id = msg.row_id,
+                collapsed = msg.collapsed,
+                italic = true,
+            })
+        else
+            -- Regular message handling
+            local nick_color = C.nick
+            if author == my_name then
+                nick_color = C.self
+            elseif is_model then
+                nick_color = C.model
+            elseif author == "system" then
+                nick_color = C.system
+            end
+
+            local wrapped = M.wrap_text(content, content_width)
+
+            for i, line_text in ipairs(wrapped) do
+                table.insert(display_lines, {
+                    text = line_text,
+                    nick_color = nick_color,
+                    is_first_line = (i == 1),
+                    is_last_line = (i == #wrapped),
+                    is_streaming = is_streaming,
+                    prefix_width = prefix_width,
+                    author = (i == 1) and author or nil,
+                    row_id = msg.row_id,
+                })
+            end
         end
     end
 
@@ -552,22 +606,29 @@ function M.render_chat(ctx, display_lines, page_name, height)
             local y = i - start_line
             local x = 0
 
-            if line.is_first_line and line.author then
-                ctx:print(x, y, "<", {fg = C.dim})
-                x = x + 1
-                ctx:print(x, y, line.author, {fg = line.nick_color})
-                x = x + M.display_width(line.author)
-                ctx:print(x, y, "> ", {fg = C.dim})
-                x = x + 2
+            -- Tool rows have no author prefix, render with their own styling
+            if line.is_tool_call or line.is_tool_result then
+                local style = {fg = line.nick_color, italic = true}
+                ctx:print(x, y, line.text, style)
             else
-                x = line.prefix_width or 0
-            end
+                -- Regular message with author prefix
+                if line.is_first_line and line.author then
+                    ctx:print(x, y, "<", {fg = C.dim})
+                    x = x + 1
+                    ctx:print(x, y, line.author, {fg = line.nick_color})
+                    x = x + M.display_width(line.author)
+                    ctx:print(x, y, "> ", {fg = C.dim})
+                    x = x + 2
+                else
+                    x = line.prefix_width or 0
+                end
 
-            local text = line.text
-            if line.is_streaming and line.is_last_line then
-                text = text .. " ◌"
+                local text = line.text
+                if line.is_streaming and line.is_last_line then
+                    text = text .. " ◌"
+                end
+                ctx:print(x, y, text)
             end
-            ctx:print(x, y, text)
         end
     end
 

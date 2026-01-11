@@ -173,6 +173,19 @@ impl Row {
         row
     }
 
+    /// Create a tool result row that links to a parent row (the model message context)
+    pub fn tool_result_with_parent(
+        buffer_id: impl Into<String>,
+        parent_row_id: impl Into<String>,
+        qualified_name: impl Into<String>,
+        result: impl Into<String>,
+        success: bool,
+    ) -> Self {
+        let mut row = Self::tool_result(buffer_id, qualified_name, result, success);
+        row.parent_row_id = Some(parent_row_id.into());
+        row
+    }
+
     /// Finalize this row (marks it as complete)
     pub fn finalize(&mut self) {
         self.finalized_at = Some(now_ms());
@@ -360,10 +373,13 @@ impl Database {
         Ok(rows)
     }
 
-    /// List recent top-level rows in a buffer, ordered by position (most recent last)
+    /// List recent rows in a buffer for display, ordered by position (most recent last)
+    ///
+    /// Includes top-level rows (messages) and tool rows (which may have parent_row_id set).
     pub fn list_recent_buffer_rows(&self, buffer_id: &str, limit: usize) -> Result<Vec<Row>> {
         let conn = self.conn()?;
         // Get the last N rows by position (subquery to reverse order)
+        // Include top-level rows AND tool rows (which have parent_row_id for context linking)
         let mut stmt = conn
             .prepare(
                 r#"
@@ -375,7 +391,7 @@ impl Database {
                    created_at, updated_at, finalized_at
             FROM (
                 SELECT * FROM rows
-                WHERE buffer_id = ?1 AND parent_row_id IS NULL
+                WHERE buffer_id = ?1 AND (parent_row_id IS NULL OR content_method LIKE 'tool.%')
                 ORDER BY position DESC
                 LIMIT ?2
             )

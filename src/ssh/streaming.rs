@@ -85,16 +85,6 @@ pub async fn push_updates_task(
                     tracing::error!("failed to create tool call row: {}", e);
                 }
 
-                // Also append a note to the model's response row
-                if let Ok(Some(mut row)) = db.get_row(&row_id) {
-                    row.content = Some(format!(
-                        "{}[calling {}...]",
-                        row.content.unwrap_or_default(),
-                        tool_name
-                    ));
-                    let _ = db.update_row(&row);
-                }
-
                 // Signal chat region needs refresh
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;
@@ -109,17 +99,18 @@ pub async fn push_updates_task(
                 success,
                 buffer_id,
             } => {
-                // Create a proper tool.result row
-                let mut result_row =
-                    crate::db::rows::Row::tool_result(&buffer_id, &tool_name, &summary, success);
+                // Create a proper tool.result row linked to the model message
+                let mut result_row = crate::db::rows::Row::tool_result_with_parent(
+                    &buffer_id,
+                    &row_id,
+                    &tool_name,
+                    &summary,
+                    success,
+                );
                 if let Err(e) = db.append_row(&mut result_row) {
                     tracing::error!("failed to create tool result row: {}", e);
                 }
 
-                // Also append result to the model's response row for inline display
-                if let Err(e) = db.append_to_row(&row_id, &format!("\n{}", summary)) {
-                    tracing::error!("failed to append tool result: {}", e);
-                }
                 // Signal chat region needs refresh
                 if let Some(ref lua_runtime) = lua_runtime {
                     let lua = lua_runtime.lock().await;

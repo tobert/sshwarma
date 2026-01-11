@@ -669,10 +669,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                                 break;
                             }
 
-                            // Only include finalized message rows
-                            // Skip thinking.stream (internal streaming chunks) and other non-message types
+                            // Include messages and tool rows
                             let is_message = db_row.content_method.starts_with("message.");
-                            if !is_message {
+                            let is_tool_call = db_row.content_method == "tool.call";
+                            let is_tool_result = db_row.content_method == "tool.result";
+
+                            if !is_message && !is_tool_call && !is_tool_result {
                                 continue;
                             }
 
@@ -689,27 +691,65 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                                 } else {
                                     "unknown".to_string()
                                 }
+                            } else if is_tool_call || is_tool_result {
+                                "tool".to_string()
                             } else {
                                 "system".to_string()
                             };
 
-                            // Apply agent filter if specified
-                            if let Some(ref agents) = agent_filter {
-                                if !agents.iter().any(|a| a == &author) {
-                                    continue;
+                            // Apply agent filter if specified (skip for tool rows)
+                            if !is_tool_call && !is_tool_result {
+                                if let Some(ref agents) = agent_filter {
+                                    if !agents.iter().any(|a| a == &author) {
+                                        continue;
+                                    }
                                 }
                             }
 
                             let row = lua.create_table()?;
                             row.set("author", author)?;
-                            row.set("content", text)?;
                             row.set("timestamp", db_row.created_at)?;
+                            row.set("row_id", db_row.id.clone())?;
+                            row.set("parent_row_id", db_row.parent_row_id.clone())?;
+                            row.set("collapsed", db_row.collapsed)?;
                             row.set(
                                 "is_model",
                                 db_row.content_method == "message.model",
                             )?;
                             row.set("is_thinking", false)?;
                             row.set("is_streaming", db_row.content_method == "message.model.chunk")?;
+                            row.set("is_tool_call", is_tool_call)?;
+                            row.set("is_tool_result", is_tool_result)?;
+
+                            if is_tool_call {
+                                // For tool calls, content is the tool name
+                                row.set("tool_name", text.clone())?;
+                                row.set("content", format!("calling {}...", text))?;
+                                // Extract args from content_meta
+                                if let Some(ref meta) = db_row.content_meta {
+                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(meta) {
+                                        if let Some(args) = parsed.get("input") {
+                                            row.set("tool_args", args.to_string())?;
+                                        }
+                                    }
+                                }
+                            } else if is_tool_result {
+                                // For tool results, extract tool name and success from meta
+                                row.set("content", text)?;
+                                if let Some(ref meta) = db_row.content_meta {
+                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(meta) {
+                                        if let Some(tool) = parsed.get("tool") {
+                                            row.set("tool_name", tool.as_str().unwrap_or(""))?;
+                                        }
+                                        if let Some(success) = parsed.get("success") {
+                                            row.set("tool_success", success.as_bool().unwrap_or(true))?;
+                                        }
+                                    }
+                                }
+                            } else {
+                                row.set("content", text)?;
+                            }
+
                             list.set(idx, row)?;
                             idx += 1;
                             count += 1;

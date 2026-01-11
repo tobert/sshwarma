@@ -6,6 +6,7 @@ use opentelemetry::KeyValue;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::{CompletionClient, Nothing, ProviderClient};
 use rig::completion::{Chat, Message, Prompt};
+use rig::message::ToolResultContent;
 use rig::providers::{anthropic, ollama, openai};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::server::ToolServerHandle;
@@ -647,7 +648,16 @@ impl LlmClient {
                         Ok(MultiTurnStreamItem::StreamUserItem(
                             StreamedUserContent::ToolResult(result),
                         )) => {
-                            let summary = format!("{}: done", result.id);
+                            // Extract text content from tool result
+                            let summary = result
+                                .content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    ToolResultContent::Text(t) => Some(t.text.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             let _ = $tx.send(StreamChunk::ToolResult(summary)).await;
                         }
                         Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
