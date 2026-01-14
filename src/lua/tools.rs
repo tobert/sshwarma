@@ -4058,6 +4058,18 @@ pub fn register_mcp_tool_registration(
             _ => JsonObject::new(),
         };
 
+        // Validate schema: "required" must be an array if present (Lua's {} becomes JSON object, not array)
+        if let Some(required) = schema.get("required") {
+            if !required.is_array() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "register_mcp_tool '{}': schema.required must be an array, got {}. \
+                     Hint: omit 'required' entirely if no fields are required (Lua's {{}} serializes as object, not array)",
+                    name,
+                    if required.is_object() { "object {}" } else { "non-array" }
+                )));
+            }
+        }
+
         // Extract optional handler_name (for multi-tool modules)
         let handler_name: Option<String> = params.get("handler_name").ok();
 
