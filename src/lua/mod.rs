@@ -170,6 +170,24 @@ const COMMANDS_RELOAD_MODULE: &str = include_str!("../embedded/commands/reload.l
 /// Embedded conjure commands
 const COMMANDS_CONJURE_MODULE: &str = include_str!("../embedded/commands/conjure.lua");
 
+// MCP tool modules (for Claude Code integration)
+const MCP_INIT_MODULE: &str = include_str!("../embedded/mcp/init.lua");
+const MCP_ROOMS_MODULE: &str = include_str!("../embedded/mcp/rooms.lua");
+const MCP_MODELS_MODULE: &str = include_str!("../embedded/mcp/models.lua");
+const MCP_HELP_MODULE: &str = include_str!("../embedded/mcp/help.lua");
+const MCP_ROWS_MODULE: &str = include_str!("../embedded/mcp/rows.lua");
+const MCP_ROW_MODULE: &str = include_str!("../embedded/mcp/row.lua");
+const MCP_SAY_MODULE: &str = include_str!("../embedded/mcp/say.lua");
+const MCP_CREATE_ROOM_MODULE: &str = include_str!("../embedded/mcp/create_room.lua");
+const MCP_SET_VIBE_MODULE: &str = include_str!("../embedded/mcp/set_vibe.lua");
+const MCP_ADD_EXIT_MODULE: &str = include_str!("../embedded/mcp/add_exit.lua");
+const MCP_FORK_ROOM_MODULE: &str = include_str!("../embedded/mcp/fork_room.lua");
+const MCP_ROOM_CONTEXT_MODULE: &str = include_str!("../embedded/mcp/room_context.lua");
+const MCP_INVENTORY_MODULE: &str = include_str!("../embedded/mcp/inventory.lua");
+const MCP_THINGS_MODULE: &str = include_str!("../embedded/mcp/things.lua");
+const MCP_SCRIPTS_MODULE: &str = include_str!("../embedded/mcp/scripts.lua");
+const MCP_ECHO_TEST_MODULE: &str = include_str!("../embedded/mcp/echo_test.lua");
+
 /// Registry of embedded Lua modules
 ///
 /// Provides module lookup for the custom require system.
@@ -221,6 +239,25 @@ impl EmbeddedModules {
         modules.insert("commands.debug".to_string(), COMMANDS_DEBUG_MODULE);
         modules.insert("commands.reload".to_string(), COMMANDS_RELOAD_MODULE);
         modules.insert("commands.conjure".to_string(), COMMANDS_CONJURE_MODULE);
+
+        // MCP tool modules (for Claude Code integration)
+        // Override by placing files in ~/.config/sshwarma/lua/mcp/
+        modules.insert("mcp".to_string(), MCP_INIT_MODULE);
+        modules.insert("mcp.rooms".to_string(), MCP_ROOMS_MODULE);
+        modules.insert("mcp.models".to_string(), MCP_MODELS_MODULE);
+        modules.insert("mcp.help".to_string(), MCP_HELP_MODULE);
+        modules.insert("mcp.rows".to_string(), MCP_ROWS_MODULE);
+        modules.insert("mcp.row".to_string(), MCP_ROW_MODULE);
+        modules.insert("mcp.say".to_string(), MCP_SAY_MODULE);
+        modules.insert("mcp.create_room".to_string(), MCP_CREATE_ROOM_MODULE);
+        modules.insert("mcp.set_vibe".to_string(), MCP_SET_VIBE_MODULE);
+        modules.insert("mcp.add_exit".to_string(), MCP_ADD_EXIT_MODULE);
+        modules.insert("mcp.fork_room".to_string(), MCP_FORK_ROOM_MODULE);
+        modules.insert("mcp.room_context".to_string(), MCP_ROOM_CONTEXT_MODULE);
+        modules.insert("mcp.inventory".to_string(), MCP_INVENTORY_MODULE);
+        modules.insert("mcp.things".to_string(), MCP_THINGS_MODULE);
+        modules.insert("mcp.scripts".to_string(), MCP_SCRIPTS_MODULE);
+        modules.insert("mcp.echo_test".to_string(), MCP_ECHO_TEST_MODULE);
 
         Self { modules }
     }
@@ -678,25 +715,32 @@ impl LuaRuntime {
     /// Run the MCP init script if it exists
     ///
     /// This script can register Lua MCP tools via `tools.register_mcp_tool()`.
-    /// Located at ~/.config/sshwarma/lua/mcp/init.lua
+    /// Checks filesystem first (~/.config/sshwarma/lua/mcp/init.lua), then
+    /// falls back to embedded module.
     ///
     /// Returns true if script was found and executed.
     pub fn run_mcp_init_script(&self) -> Result<bool> {
         let script_path = paths::config_dir().join("lua").join("mcp").join("init.lua");
 
-        if !script_path.exists() {
-            debug!("No MCP init script at {:?}", script_path);
-            return Ok(false);
-        }
+        // Try filesystem first (allows user override)
+        let (script, source) = if script_path.exists() {
+            let content = fs::read_to_string(&script_path)
+                .with_context(|| format!("failed to read MCP init script {:?}", script_path))?;
+            (content, script_path.to_string_lossy().to_string())
+        } else {
+            // Fall back to embedded
+            (MCP_INIT_MODULE.to_string(), "embedded:mcp/init.lua".to_string())
+        };
 
-        let script = fs::read_to_string(&script_path)
-            .with_context(|| format!("failed to read MCP init script {:?}", script_path))?;
+        info!("Running MCP init script from {:?}", source);
 
-        info!("Running MCP init script from {:?}", script_path);
+        // Preload embedded MCP modules so require() can find them
+        self.preload_mcp_modules()
+            .map_err(|e| anyhow::anyhow!("failed to preload MCP modules: {}", e))?;
 
         self.lua
             .load(&script)
-            .set_name(script_path.to_string_lossy())
+            .set_name(&source)
             .exec()
             .map_err(|e| anyhow::anyhow!("MCP init script failed: {}", e))?;
 
@@ -721,6 +765,46 @@ impl LuaRuntime {
         }
 
         Ok(true)
+    }
+
+    /// Preload embedded MCP modules into package.loaded
+    ///
+    /// This ensures require('mcp.X') works even in Luau where the custom
+    /// searcher might not be fully functional.
+    fn preload_mcp_modules(&self) -> Result<()> {
+        let package: Table = self.lua.globals().get("package")?;
+        let loaded: Table = package.get("loaded")?;
+
+        // Helper to load and register a module
+        let load_module = |name: &str, source: &str, chunk_name: &str| -> Result<()> {
+            let chunk = self.lua
+                .load(source)
+                .set_name(chunk_name)
+                .eval::<Table>()
+                .with_context(|| format!("failed to load MCP module {}", name))?;
+            loaded.set(name, chunk)?;
+            Ok(())
+        };
+
+        // Load all MCP tool modules
+        load_module("mcp.rooms", MCP_ROOMS_MODULE, "embedded:mcp/rooms.lua")?;
+        load_module("mcp.models", MCP_MODELS_MODULE, "embedded:mcp/models.lua")?;
+        load_module("mcp.help", MCP_HELP_MODULE, "embedded:mcp/help.lua")?;
+        load_module("mcp.rows", MCP_ROWS_MODULE, "embedded:mcp/rows.lua")?;
+        load_module("mcp.row", MCP_ROW_MODULE, "embedded:mcp/row.lua")?;
+        load_module("mcp.say", MCP_SAY_MODULE, "embedded:mcp/say.lua")?;
+        load_module("mcp.create_room", MCP_CREATE_ROOM_MODULE, "embedded:mcp/create_room.lua")?;
+        load_module("mcp.set_vibe", MCP_SET_VIBE_MODULE, "embedded:mcp/set_vibe.lua")?;
+        load_module("mcp.add_exit", MCP_ADD_EXIT_MODULE, "embedded:mcp/add_exit.lua")?;
+        load_module("mcp.fork_room", MCP_FORK_ROOM_MODULE, "embedded:mcp/fork_room.lua")?;
+        load_module("mcp.room_context", MCP_ROOM_CONTEXT_MODULE, "embedded:mcp/room_context.lua")?;
+        load_module("mcp.inventory", MCP_INVENTORY_MODULE, "embedded:mcp/inventory.lua")?;
+        load_module("mcp.things", MCP_THINGS_MODULE, "embedded:mcp/things.lua")?;
+        load_module("mcp.scripts", MCP_SCRIPTS_MODULE, "embedded:mcp/scripts.lua")?;
+        load_module("mcp.echo_test", MCP_ECHO_TEST_MODULE, "embedded:mcp/echo_test.lua")?;
+
+        debug!("Preloaded {} embedded MCP modules", 15);
+        Ok(())
     }
 
     /// Load a Lua script from file
