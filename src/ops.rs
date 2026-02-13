@@ -380,6 +380,7 @@ pub async fn spawn_model_response(
 
         // Process streaming chunks
         let mut _full_response = String::new();
+        let mut stream_error: Option<String> = None;
         tracing::info!("spawn_model_response: waiting for chunks");
 
         while let Some(chunk) = chunk_rx.recv().await {
@@ -439,6 +440,7 @@ pub async fn spawn_model_response(
                 }
                 StreamChunk::Error(e) => {
                     tracing::error!("stream error: {}", e);
+                    stream_error = Some(e);
                     break;
                 }
             }
@@ -447,15 +449,25 @@ pub async fn spawn_model_response(
         // Wait for stream task to complete
         let _ = stream_handle.await;
 
-        // Send completion to finalize the row
+        // Send error or completion to finalize the row
         if let Some(row_id) = row_id {
             if let Some(ref tx) = update_tx {
-                let _ = tx
-                    .send(RowUpdate::Complete {
-                        row_id,
-                        model_name: model_short,
-                    })
-                    .await;
+                if let Some(error_msg) = stream_error {
+                    let _ = tx
+                        .send(RowUpdate::Error {
+                            row_id,
+                            model_name: model_short,
+                            message: error_msg,
+                        })
+                        .await;
+                } else {
+                    let _ = tx
+                        .send(RowUpdate::Complete {
+                            row_id,
+                            model_name: model_short,
+                        })
+                        .await;
+                }
             }
         }
     });

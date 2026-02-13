@@ -33,6 +33,12 @@ pub enum RowUpdate {
     },
     /// Stream completed
     Complete { row_id: String, model_name: String },
+    /// Stream error — model request failed
+    Error {
+        row_id: String,
+        model_name: String,
+        message: String,
+    },
 }
 
 /// Background task that processes streaming updates
@@ -139,6 +145,29 @@ pub async fn push_updates_task(
                 // Finalize the thinking row
                 if let Err(e) = db.finalize_row(&row_id) {
                     tracing::error!("failed to finalize row: {}", e);
+                }
+
+                // Update status to idle for Lua HUD
+                if let Some(ref lua_runtime) = lua_runtime {
+                    let lua = lua_runtime.lock().await;
+                    lua.tool_state().set_status(&model_name, Status::Idle);
+                    lua.tool_state().mark_dirty("chat");
+                }
+            }
+
+            RowUpdate::Error {
+                row_id,
+                model_name,
+                message,
+            } => {
+                // Write error into the thinking row so the user sees what happened
+                if let Err(e) = db.append_to_row(&row_id, &format!("\n\nError: {}", message)) {
+                    tracing::error!("failed to append error to row: {}", e);
+                }
+
+                // Finalize the thinking row (keeps it visible, not ephemeral)
+                if let Err(e) = db.finalize_row(&row_id) {
+                    tracing::error!("failed to finalize error row: {}", e);
                 }
 
                 // Update status to idle for Lua HUD
