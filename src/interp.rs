@@ -1,7 +1,5 @@
 //! Command interpreter: parsing and dispatch
 
-pub mod commands;
-
 /// Parsed input from user
 #[derive(Debug)]
 pub enum Input {
@@ -40,24 +38,6 @@ pub fn parse(input: &str) -> Input {
     }
 }
 
-/// Parse key=value arguments
-pub fn parse_args(args: &str) -> Vec<(String, String)> {
-    let mut result = Vec::new();
-
-    for part in args.split_whitespace() {
-        if let Some(eq_pos) = part.find('=') {
-            let key = part[..eq_pos].to_string();
-            let value = part[eq_pos + 1..].to_string();
-            result.push((key, value));
-        } else {
-            // Positional arg, use index as key
-            result.push((result.len().to_string(), part.to_string()));
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,13 +70,5 @@ mod tests {
             Input::Chat(msg) => assert_eq!(msg, "hello world"),
             _ => panic!("expected chat"),
         }
-    }
-
-    #[test]
-    fn test_parse_args() {
-        let args = parse_args("temperature=1.0 bars=4");
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], ("temperature".to_string(), "1.0".to_string()));
-        assert_eq!(args[1], ("bars".to_string(), "4".to_string()));
     }
 }
