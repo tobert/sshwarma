@@ -634,8 +634,10 @@ pub async fn start_mcp_server(
 
     let service = StreamableHttpService::new(
         move || {
-            Ok(SshwarmaMcpServer::new(state.clone())
-                .expect("Failed to create MCP session - this is a fatal error"))
+            SshwarmaMcpServer::new(state.clone()).map_err(|e| {
+                tracing::error!("Failed to create MCP session: {}", e);
+                std::io::Error::other(e.to_string())
+            })
         },
         LocalSessionManager::default().into(),
         Default::default(),

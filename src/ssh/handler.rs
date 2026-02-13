@@ -121,7 +121,7 @@ impl SshHandler {
     // =========================================================================
 
     /// Initialize session after authentication
-    pub async fn init_session(&mut self, username: &str) {
+    pub async fn init_session(&mut self, username: &str) -> Result<()> {
         // Create player session
         self.player = Some(PlayerSession::new(username.to_string()));
 
@@ -131,8 +131,7 @@ impl SshHandler {
         }
 
         // Create Lua runtime (automatically loads user-specific script)
-        let runtime =
-            LuaRuntime::new_for_user(Some(username)).expect("failed to create lua runtime");
+        let runtime = LuaRuntime::new_for_user(Some(username))?;
 
         // Set shared state so sshwarma.call() has access to DB/MCP
         runtime
@@ -152,6 +151,7 @@ impl SshHandler {
         let (bridge, request_rx) = McpBridge::with_defaults();
         self.mcp_bridge = Some(Arc::new(bridge));
         self.mcp_request_rx = Some(request_rx);
+        Ok(())
     }
 
     /// Join a room
@@ -348,7 +348,13 @@ impl server::Handler for SshHandler {
         // Check existing user
         if let Ok(Some(handle)) = self.state.db.lookup_handle_by_pubkey(&key_str) {
             info!(handle = %handle, "authenticated");
-            self.init_session(&handle).await;
+            if let Err(e) = self.init_session(&handle).await {
+                tracing::error!("Failed to create session for '{}': {}", handle, e);
+                return Ok(server::Auth::Reject {
+                    proceed_with_methods: None,
+                    partial_success: false,
+                });
+            }
             return Ok(server::Auth::Accept);
         }
 
@@ -363,7 +369,13 @@ impl server::Handler for SshHandler {
                 });
             }
             info!(handle = %handle, "registered new user");
-            self.init_session(&handle).await;
+            if let Err(e) = self.init_session(&handle).await {
+                tracing::error!("Failed to create session for '{}': {}", handle, e);
+                return Ok(server::Auth::Reject {
+                    proceed_with_methods: None,
+                    partial_success: false,
+                });
+            }
             return Ok(server::Auth::Accept);
         }
 
@@ -442,12 +454,21 @@ impl server::Handler for SshHandler {
         }
 
         // Spawn screen refresh - Lua owns full terminal
+        let Some(lua_rt) = self.lua_runtime.clone() else {
+            tracing::error!("shell_request called without initialized lua runtime");
+            return Ok(());
+        };
+        let Some(mcp_br) = self.mcp_bridge.clone() else {
+            tracing::error!("shell_request called without initialized mcp bridge");
+            return Ok(());
+        };
+
         // Subscribe to hot reload events for this session
         let lua_reload_rx = self.state.lua_reload.subscribe();
         spawn_screen_refresh(
             session.handle(),
             channel,
-            self.lua_runtime.clone().expect("lua_runtime"),
+            lua_rt,
             self.state.clone(),
             lua_reload_rx,
             width,
@@ -456,7 +477,7 @@ impl server::Handler for SshHandler {
 
         // Spawn MCP request handler
         if let Some(request_rx) = self.mcp_request_rx.take() {
-            let mcp_bridge = self.mcp_bridge.clone().expect("mcp_bridge");
+            let mcp_bridge = mcp_br;
             let mcp = self.state.mcp.clone();
             let requests = mcp_bridge.requests();
             let timeout = mcp_bridge.timeout();
