@@ -12,7 +12,7 @@ use crate::model::ModelHandle;
 use crate::state::SharedState;
 use crate::status::{Status, StatusTracker};
 use crate::ui::{LuaDrawContext, RenderBuffer};
-use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
+use mlua::{Lua, Result as LuaResult, Table, Value};
 use std::sync::Arc;
 // unicode-display-width handles PUA and grapheme clusters correctly
 
@@ -262,9 +262,6 @@ impl Default for LuaToolState {
 /// For HUD state, use `sshwarma.call("status")` instead.
 pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let tools = lua.create_table()?;
-
-    // Store state in Lua registry for access from callbacks
-    lua.set_named_registry_value("tool_state", LuaToolStateWrapper(state.clone()))?;
 
     // tools.clear_notifications() -> array of notifications
     let clear_notifications_fn = {
@@ -3998,16 +3995,6 @@ pub fn register_mcp_tools(lua: &Lua, bridge: Arc<McpBridge>) -> LuaResult<()> {
     tools.set("mcp_result", mcp_result_fn)?;
 
     Ok(())
-}
-
-/// Wrapper to make LuaToolState work with Lua registry
-#[allow(dead_code)]
-struct LuaToolStateWrapper(LuaToolState);
-
-impl UserData for LuaToolStateWrapper {
-    fn add_methods<M: UserDataMethods<Self>>(_methods: &mut M) {
-        // We don't expose methods directly; access via registry
-    }
 }
 
 /// Register the MCP tool registration function
