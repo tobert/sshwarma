@@ -104,7 +104,10 @@ impl Database {
             .context("failed to prepare script query")?;
 
         let script = stmt
-            .query_row(params![scope.as_str(), scope_id, module_path], Self::script_from_row)
+            .query_row(
+                params![scope.as_str(), scope_id, module_path],
+                Self::script_from_row,
+            )
             .optional()
             .context("failed to query script")?;
 
@@ -304,7 +307,10 @@ impl Database {
             .context("failed to prepare script versions query")?;
 
         let scripts = stmt
-            .query_map(params![scope.as_str(), scope_id, module_path], Self::script_from_row)?
+            .query_map(
+                params![scope.as_str(), scope_id, module_path],
+                Self::script_from_row,
+            )?
             .collect::<Result<Vec<_>, _>>()
             .context("failed to list script versions")?;
 
@@ -417,13 +423,7 @@ mod tests {
     fn test_get_current_script() -> Result<()> {
         let db = Database::in_memory()?;
 
-        db.create_script(
-            ScriptScope::User,
-            Some("alice"),
-            "screen",
-            "-- v1",
-            "alice",
-        )?;
+        db.create_script(ScriptScope::User, Some("alice"), "screen", "-- v1", "alice")?;
 
         let current = db
             .get_current_script(ScriptScope::User, Some("alice"), "screen")?
@@ -473,7 +473,13 @@ mod tests {
         let db = Database::in_memory()?;
 
         db.create_script(ScriptScope::User, Some("alice"), "screen", "-- a", "alice")?;
-        db.create_script(ScriptScope::User, Some("alice"), "ui.status", "-- b", "alice")?;
+        db.create_script(
+            ScriptScope::User,
+            Some("alice"),
+            "ui.status",
+            "-- b",
+            "alice",
+        )?;
         db.create_script(ScriptScope::User, Some("bob"), "screen", "-- c", "bob")?;
 
         let alice_scripts = db.list_scripts(ScriptScope::User, Some("alice"))?;
@@ -489,21 +495,10 @@ mod tests {
     fn test_list_script_versions() -> Result<()> {
         let db = Database::in_memory()?;
 
-        let id1 = db.create_script(
-            ScriptScope::User,
-            Some("alice"),
-            "screen",
-            "-- v1",
-            "alice",
-        )?;
+        let id1 = db.create_script(ScriptScope::User, Some("alice"), "screen", "-- v1", "alice")?;
         let _id2 = db.update_script(&id1, "-- v2", "alice")?;
-        let _id3 = db.update_script_by_path(
-            ScriptScope::User,
-            Some("alice"),
-            "screen",
-            "-- v3",
-            "alice",
-        )?;
+        let _id3 =
+            db.update_script_by_path(ScriptScope::User, Some("alice"), "screen", "-- v3", "alice")?;
 
         let versions = db.list_script_versions(ScriptScope::User, Some("alice"), "screen")?;
         assert_eq!(versions.len(), 3);

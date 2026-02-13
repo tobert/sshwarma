@@ -68,9 +68,9 @@ pub struct Thing {
     pub uri: Option<String>,
     pub metadata: Option<String>,
     // Lua code fields (for executable things)
-    pub code: Option<String>,        // Lua source code
+    pub code: Option<String>,         // Lua source code
     pub default_slot: Option<String>, // Default slot: 'command:look', NULL, etc.
-    pub params: Option<String>,      // JSON parameter schema
+    pub params: Option<String>,       // JSON parameter schema
     // Status
     pub available: bool,
     // Lifecycle
@@ -792,9 +792,10 @@ impl Database {
             synced_names.insert(qualified_name.clone());
 
             // Check if tool already exists
-            if let Some(existing_tool) = existing.iter().find(|t| {
-                t.qualified_name.as_ref() == Some(&qualified_name)
-            }) {
+            if let Some(existing_tool) = existing
+                .iter()
+                .find(|t| t.qualified_name.as_ref() == Some(&qualified_name))
+            {
                 // Update if description changed or if it was unavailable
                 if existing_tool.description.as_ref() != Some(description)
                     || !existing_tool.available
@@ -807,8 +808,7 @@ impl Database {
                 }
             } else {
                 // Create new tool thing
-                let mut tool = Thing::tool(tool_name, &qualified_name)
-                    .with_parent(&mcp_thing_id);
+                let mut tool = Thing::tool(tool_name, &qualified_name).with_parent(&mcp_thing_id);
                 tool.description = Some(description.clone());
                 tool.available = true;
                 self.insert_thing(&tool)?;

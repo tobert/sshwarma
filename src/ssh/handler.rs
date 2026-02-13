@@ -3,7 +3,7 @@
 use crate::db::rows::Row;
 use crate::lua::{mcp_request_handler, LuaRuntime, McpBridge};
 use crate::model::ModelHandle;
-use crate::ops::{ModelResponseConfig, spawn_model_response};
+use crate::ops::{spawn_model_response, ModelResponseConfig};
 use crate::player::PlayerSession;
 use crate::ssh::screen::spawn_screen_refresh;
 use crate::ssh::session::SessionState;
@@ -160,11 +160,7 @@ impl SshHandler {
         let buffer = self.state.db.get_or_create_room_buffer(room_name)?;
 
         // Get room ID from database
-        let room_id = self
-            .state
-            .db
-            .get_room_by_name(room_name)?
-            .map(|r| r.id);
+        let room_id = self.state.db.get_room_by_name(room_name)?.map(|r| r.id);
 
         // Update session state
         {

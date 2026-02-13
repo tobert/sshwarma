@@ -99,8 +99,8 @@ async fn main() -> Result<()> {
 
     // Create Lua hot reload broadcaster and start filesystem watcher
     let lua_reload = LuaReloadSender::new();
-    let _lua_watcher = start_watcher(lua_reload.clone())
-        .context("failed to start Lua filesystem watcher")?;
+    let _lua_watcher =
+        start_watcher(lua_reload.clone()).context("failed to start Lua filesystem watcher")?;
 
     let state = Arc::new(SharedState {
         world: world.clone(),
@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
 
     // Start MCP server for Claude Code
     if config.mcp_server_port > 0 {
-        use sshwarma::lua::{LuaRuntime, register_mcp_tool_registration};
+        use sshwarma::lua::{register_mcp_tool_registration, LuaRuntime};
         use sshwarma::mcp_server::McpToolRegistry;
 
         // Create the shared Lua tool registry
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
                             info!(mcp = %name, "marked MCP tools unavailable");
                         }
                     }
-                    Some(_) => {} // Ignore other events
+                    Some(_) => {}  // Ignore other events
                     None => break, // Channel closed
                 }
             }

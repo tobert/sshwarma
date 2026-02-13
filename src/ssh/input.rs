@@ -112,7 +112,12 @@ impl SshHandler {
 
         let room_name = self.current_room().await;
         let room_id = if let Some(ref name) = room_name {
-            self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+            self.state
+                .db
+                .get_room_by_name(name)
+                .ok()
+                .flatten()
+                .map(|r| r.id)
         } else {
             None
         };
@@ -192,7 +197,12 @@ impl SshHandler {
         let username = self.player.as_ref().map(|p| p.username.clone());
         let room_name = self.current_room().await;
         let room_id = if let Some(ref name) = room_name {
-            self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+            self.state
+                .db
+                .get_room_by_name(name)
+                .ok()
+                .flatten()
+                .map(|r| r.id)
         } else {
             None
         };

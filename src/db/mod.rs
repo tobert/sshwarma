@@ -394,7 +394,13 @@ impl Database {
         use scripts::ScriptScope;
 
         let module_path = format!("prompt.{}", name);
-        self.create_script(ScriptScope::Room, Some(room), &module_path, prompt, "system")?;
+        self.create_script(
+            ScriptScope::Room,
+            Some(room),
+            &module_path,
+            prompt,
+            "system",
+        )?;
         Ok(())
     }
 
@@ -403,7 +409,9 @@ impl Database {
         use scripts::ScriptScope;
 
         let module_path = format!("prompt.{}", name);
-        if let Some(script) = self.get_current_script(ScriptScope::Room, Some(room), &module_path)? {
+        if let Some(script) =
+            self.get_current_script(ScriptScope::Room, Some(room), &module_path)?
+        {
             Ok(Some(RoomPrompt {
                 id: 0,
                 room: room.to_string(),
@@ -440,12 +448,20 @@ impl Database {
         let module_path = format!("prompt.{}", name);
 
         // Check if script exists
-        if let Some(existing) = self.get_current_script(ScriptScope::Room, Some(room), &module_path)? {
+        if let Some(existing) =
+            self.get_current_script(ScriptScope::Room, Some(room), &module_path)?
+        {
             // Update existing script (CoW)
             self.update_script(&existing.id, content, created_by)?;
         } else {
             // Create new script
-            self.create_script(ScriptScope::Room, Some(room), &module_path, content, created_by)?;
+            self.create_script(
+                ScriptScope::Room,
+                Some(room),
+                &module_path,
+                content,
+                created_by,
+            )?;
         }
         Ok(())
     }
@@ -725,7 +741,6 @@ impl Database {
             Ok(None)
         }
     }
-
 }
 
 #[cfg(test)]

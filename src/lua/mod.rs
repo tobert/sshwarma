@@ -24,7 +24,10 @@ pub use registry::ToolRegistry;
 pub use reload::{LuaReloadEvent, LuaReloadReceiver, LuaReloadSender};
 pub use render::parse_lua_rows;
 pub use tool_middleware::{ToolContext, ToolMiddleware};
-pub use tools::{register_mcp_tools, register_mcp_tool_registration, InputState, LuaToolState, SessionContext, json_to_lua, lua_to_json};
+pub use tools::{
+    json_to_lua, lua_to_json, register_mcp_tool_registration, register_mcp_tools, InputState,
+    LuaToolState, SessionContext,
+};
 pub use watcher::{start_watcher, WatcherHandle};
 pub use wrap::{WrapResult, WrapState};
 
@@ -162,7 +165,6 @@ const COMMANDS_HISTORY_MODULE: &str = include_str!("../embedded/commands/history
 
 /// Embedded debug commands
 const COMMANDS_DEBUG_MODULE: &str = include_str!("../embedded/commands/debug.lua");
-
 
 /// Embedded reload commands
 const COMMANDS_RELOAD_MODULE: &str = include_str!("../embedded/commands/reload.lua");
@@ -729,7 +731,10 @@ impl LuaRuntime {
             (content, script_path.to_string_lossy().to_string())
         } else {
             // Fall back to embedded
-            (MCP_INIT_MODULE.to_string(), "embedded:mcp/init.lua".to_string())
+            (
+                MCP_INIT_MODULE.to_string(),
+                "embedded:mcp/init.lua".to_string(),
+            )
         };
 
         info!("Running MCP init script from {:?}", source);
@@ -777,7 +782,8 @@ impl LuaRuntime {
 
         // Helper to load and register a module
         let load_module = |name: &str, source: &str, chunk_name: &str| -> Result<()> {
-            let chunk = self.lua
+            let chunk = self
+                .lua
                 .load(source)
                 .set_name(chunk_name)
                 .eval::<Table>()
@@ -793,15 +799,47 @@ impl LuaRuntime {
         load_module("mcp.rows", MCP_ROWS_MODULE, "embedded:mcp/rows.lua")?;
         load_module("mcp.row", MCP_ROW_MODULE, "embedded:mcp/row.lua")?;
         load_module("mcp.say", MCP_SAY_MODULE, "embedded:mcp/say.lua")?;
-        load_module("mcp.create_room", MCP_CREATE_ROOM_MODULE, "embedded:mcp/create_room.lua")?;
-        load_module("mcp.set_vibe", MCP_SET_VIBE_MODULE, "embedded:mcp/set_vibe.lua")?;
-        load_module("mcp.add_exit", MCP_ADD_EXIT_MODULE, "embedded:mcp/add_exit.lua")?;
-        load_module("mcp.fork_room", MCP_FORK_ROOM_MODULE, "embedded:mcp/fork_room.lua")?;
-        load_module("mcp.room_context", MCP_ROOM_CONTEXT_MODULE, "embedded:mcp/room_context.lua")?;
-        load_module("mcp.inventory", MCP_INVENTORY_MODULE, "embedded:mcp/inventory.lua")?;
+        load_module(
+            "mcp.create_room",
+            MCP_CREATE_ROOM_MODULE,
+            "embedded:mcp/create_room.lua",
+        )?;
+        load_module(
+            "mcp.set_vibe",
+            MCP_SET_VIBE_MODULE,
+            "embedded:mcp/set_vibe.lua",
+        )?;
+        load_module(
+            "mcp.add_exit",
+            MCP_ADD_EXIT_MODULE,
+            "embedded:mcp/add_exit.lua",
+        )?;
+        load_module(
+            "mcp.fork_room",
+            MCP_FORK_ROOM_MODULE,
+            "embedded:mcp/fork_room.lua",
+        )?;
+        load_module(
+            "mcp.room_context",
+            MCP_ROOM_CONTEXT_MODULE,
+            "embedded:mcp/room_context.lua",
+        )?;
+        load_module(
+            "mcp.inventory",
+            MCP_INVENTORY_MODULE,
+            "embedded:mcp/inventory.lua",
+        )?;
         load_module("mcp.things", MCP_THINGS_MODULE, "embedded:mcp/things.lua")?;
-        load_module("mcp.scripts", MCP_SCRIPTS_MODULE, "embedded:mcp/scripts.lua")?;
-        load_module("mcp.echo_test", MCP_ECHO_TEST_MODULE, "embedded:mcp/echo_test.lua")?;
+        load_module(
+            "mcp.scripts",
+            MCP_SCRIPTS_MODULE,
+            "embedded:mcp/scripts.lua",
+        )?;
+        load_module(
+            "mcp.echo_test",
+            MCP_ECHO_TEST_MODULE,
+            "embedded:mcp/echo_test.lua",
+        )?;
 
         debug!("Preloaded {} embedded MCP modules", 15);
         Ok(())
@@ -902,11 +940,7 @@ impl LuaRuntime {
     /// and sets its on_tick as the global on_tick function.
     ///
     /// Returns Ok(true) if entrypoint was loaded, Ok(false) if no entrypoint configured.
-    pub fn try_load_db_entrypoint(
-        &self,
-        db: &crate::db::Database,
-        username: &str,
-    ) -> Result<bool> {
+    pub fn try_load_db_entrypoint(&self, db: &crate::db::Database, username: &str) -> Result<bool> {
         // Check if user has an entrypoint configured
         let entrypoint = match db.get_user_entrypoint(username)? {
             Some(ep) => ep,
@@ -1119,7 +1153,13 @@ impl LuaRuntime {
 
         // Look up room_id from room_name
         let room_id = wrap_state.room_name.as_ref().and_then(|name| {
-            wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+            wrap_state
+                .shared_state
+                .db
+                .get_room_by_name(name)
+                .ok()
+                .flatten()
+                .map(|r| r.id)
         });
 
         // Look up agent_id from username
@@ -1162,7 +1202,13 @@ impl LuaRuntime {
 
         // Look up room_id from room_name
         let room_id = wrap_state.room_name.as_ref().and_then(|name| {
-            wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+            wrap_state
+                .shared_state
+                .db
+                .get_room_by_name(name)
+                .ok()
+                .flatten()
+                .map(|r| r.id)
         });
 
         // Look up agent_id from username
@@ -1215,7 +1261,13 @@ impl LuaRuntime {
 
         // Look up room_id from room_name
         let room_id = wrap_state.room_name.as_ref().and_then(|name| {
-            wrap_state.shared_state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+            wrap_state
+                .shared_state
+                .db
+                .get_room_by_name(name)
+                .ok()
+                .flatten()
+                .map(|r| r.id)
         });
 
         // Look up agent_id from username
@@ -1523,9 +1575,9 @@ impl LuaRuntime {
                     "none" => InputAction::None,
                     "redraw" => InputAction::Redraw,
                     "execute" | "send" => {
-                        let text: String = t
-                            .get("text")
-                            .map_err(|e| anyhow::anyhow!("execute/send action missing 'text': {}", e))?;
+                        let text: String = t.get("text").map_err(|e| {
+                            anyhow::anyhow!("execute/send action missing 'text': {}", e)
+                        })?;
                         InputAction::Execute(text)
                     }
                     "tab" => InputAction::Tab,
@@ -2590,8 +2642,10 @@ mod tests {
     fn test_wrap_budget_overflow() {
         let runtime = LuaRuntime::new().expect("should create runtime");
 
-        let result = runtime.lua().load(
-            r#"
+        let result = runtime
+            .lua()
+            .load(
+                r#"
             -- Create a builder with tiny budget (100 tokens = 400 chars)
             -- System gets 25% = 25 tokens = 100 chars
             local big_content = string.rep("x", 500)  -- 500 chars = 125 tokens
@@ -2601,7 +2655,8 @@ mod tests {
             -- This should error because 125 tokens > 25 token budget
             w:system_prompt()
         "#,
-        ).exec();
+            )
+            .exec();
 
         assert!(result.is_err(), "should error on budget overflow");
         let err_msg = result.unwrap_err().to_string();
@@ -2623,11 +2678,7 @@ mod tests {
             .expect("look_markdown should work");
 
         // Without room context, should return lobby message
-        assert!(
-            result.contains("Lobby"),
-            "should mention lobby: {}",
-            result
-        );
+        assert!(result.contains("Lobby"), "should mention lobby: {}", result);
     }
 
     // =========================================================================
@@ -3137,7 +3188,10 @@ mod debug_tests {
         // Status should be at y=22 (now starts with @username, not [room])
         let status = get_line(&buf, 22);
         assert!(
-            status.contains("@") || status.contains("│") || status.contains("NOR") || status.contains("INS"),
+            status.contains("@")
+                || status.contains("│")
+                || status.contains("NOR")
+                || status.contains("INS"),
             "status line (y=22) should have status content, got: '{}'",
             status.trim()
         );
@@ -3290,6 +3344,9 @@ mod debug_tests {
             .eval()
             .expect("bar priority test should run");
 
-        assert!(result, "bars should stack by priority (higher = closer to edge)");
+        assert!(
+            result,
+            "bars should stack by priority (higher = closer to edge)"
+        );
     }
 }

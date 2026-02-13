@@ -72,9 +72,8 @@ pub async fn register_tools(
     let mut count = 0;
 
     // Helper to check if a tool should be registered (must be equipped)
-    let should_register = |name: &str| -> bool {
-        equipped_tools.contains(&format!("sshwarma:{}", name))
-    };
+    let should_register =
+        |name: &str| -> bool { equipped_tools.contains(&format!("sshwarma:{}", name)) };
 
     // Read-only tools (available if equipped)
     if should_register("look") {
@@ -726,9 +725,7 @@ impl ToolDyn for SshwarmaFork {
         Box::pin(async move {
             ToolDefinition {
                 name: "sshwarma_fork".to_string(),
-                description:
-                    "Fork the current room (copies vibe, assets) and join it"
-                        .to_string(),
+                description: "Fork the current room (copies vibe, assets) and join it".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

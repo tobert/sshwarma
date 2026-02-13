@@ -237,7 +237,7 @@ impl RenderBuffer {
     /// Marker for "wide char continuation" - this cell is covered by the previous wide char
     /// Uses Unicode REPLACEMENT CHARACTER which is never legitimately rendered
     /// Marker for "wide char continuation" - this cell is covered by the previous wide char
-    pub const WIDE_CHAR_SPACER: char = '\u{FFFF}';  // Noncharacter, safe to use as marker
+    pub const WIDE_CHAR_SPACER: char = '\u{FFFF}'; // Noncharacter, safe to use as marker
 
     /// Check if a character is zero-width (combining marks, joiners, etc.)
     fn is_zero_width(c: char) -> bool {
@@ -459,7 +459,12 @@ impl RenderBuffer {
 
         // Position cursor for this row (convert 0-indexed to terminal's 1-indexed)
         let ansi_row = screen_row + 1;
-        tracing::info!("row_to_ansi: buf_y={} screen_row={} ansi_row={}", y, screen_row, ansi_row);
+        tracing::info!(
+            "row_to_ansi: buf_y={} screen_row={} ansi_row={}",
+            y,
+            screen_row,
+            ansi_row
+        );
         output.push_str(&format!("\x1b[{};1H", ansi_row));
 
         let mut last_fg: Option<Color> = None;

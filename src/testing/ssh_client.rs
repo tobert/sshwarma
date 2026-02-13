@@ -160,8 +160,11 @@ impl SshTestClient {
                     // Give a tiny bit more time for any trailing output
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     // Drain any remaining data
-                    while let Ok(msg) =
-                        tokio::time::timeout(std::time::Duration::from_millis(10), self.channel.wait()).await
+                    while let Ok(msg) = tokio::time::timeout(
+                        std::time::Duration::from_millis(10),
+                        self.channel.wait(),
+                    )
+                    .await
                     {
                         if let Some(russh::ChannelMsg::Data { data }) = msg {
                             output.extend_from_slice(&data);
@@ -232,7 +235,7 @@ fn strip_ansi(bytes: &[u8]) -> String {
             // Skip escape sequence
             if chars.peek() == Some(&'[') {
                 chars.next(); // consume '['
-                // Skip until we hit a letter (the terminator)
+                              // Skip until we hit a letter (the terminator)
                 while let Some(&next) = chars.peek() {
                     chars.next();
                     if next.is_ascii_alphabetic() {

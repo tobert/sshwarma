@@ -186,7 +186,10 @@ pub async fn spawn_model_response(
     let mcp_context = state.mcp.rig_tools().await;
 
     // Get equipped tools for this room to filter available tools
-    let room_for_tools = config.room_name.clone().unwrap_or_else(|| "lobby".to_string());
+    let room_for_tools = config
+        .room_name
+        .clone()
+        .unwrap_or_else(|| "lobby".to_string());
     let equipped_tools = get_equipped_tool_names(&state, &room_for_tools);
 
     // Build ToolServer with MCP + internal tools (filtered by equipped)
@@ -357,16 +360,20 @@ pub async fn spawn_model_response(
             let full_message = full_message.clone();
             async move {
                 tracing::info!("spawn_model_response: calling stream_with_tool_server");
-                let result = llm.stream_with_tool_server(
-                    &model,
-                    &system_prompt,
-                    &full_message,
-                    tool_server_handle,
-                    chunk_tx,
-                    100, // max tool turns
-                )
-                .await;
-                tracing::info!("spawn_model_response: stream_with_tool_server returned: {:?}", result.is_ok());
+                let result = llm
+                    .stream_with_tool_server(
+                        &model,
+                        &system_prompt,
+                        &full_message,
+                        tool_server_handle,
+                        chunk_tx,
+                        100, // max tool turns
+                    )
+                    .await;
+                tracing::info!(
+                    "spawn_model_response: stream_with_tool_server returned: {:?}",
+                    result.is_ok()
+                );
                 result
             }
         });
@@ -376,7 +383,10 @@ pub async fn spawn_model_response(
         tracing::info!("spawn_model_response: waiting for chunks");
 
         while let Some(chunk) = chunk_rx.recv().await {
-            tracing::info!("spawn_model_response: received chunk: {:?}", std::mem::discriminant(&chunk));
+            tracing::info!(
+                "spawn_model_response: received chunk: {:?}",
+                std::mem::discriminant(&chunk)
+            );
             match chunk {
                 StreamChunk::Text(text) => {
                     tracing::info!("spawn_model_response: text chunk len={}", text.len());

@@ -134,12 +134,7 @@ fn process_events(
                             _ => continue,
                         };
 
-                        debug!(
-                            "🔄 lua {:?}: {} ({})",
-                            kind,
-                            module_name,
-                            path.display()
-                        );
+                        debug!("🔄 lua {:?}: {} ({})", kind, module_name, path.display());
                         sender.send(reload_event);
                     }
                 }

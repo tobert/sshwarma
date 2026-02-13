@@ -20,10 +20,10 @@ use tokio::sync::{Mutex, RwLock};
 use sshwarma::config::Config;
 use sshwarma::db::Database;
 use sshwarma::llm::LlmClient;
+use sshwarma::lua::register_mcp_tool_registration;
 use sshwarma::lua::{LuaReloadSender, LuaRuntime};
 use sshwarma::mcp::McpManager;
 use sshwarma::mcp_server::{self, McpServerState, McpToolRegistry};
-use sshwarma::lua::register_mcp_tool_registration;
 use sshwarma::model::{ModelBackend, ModelHandle, ModelRegistry};
 use sshwarma::state::SharedState;
 use sshwarma::world::World;
@@ -580,12 +580,21 @@ async fn test_sshwarma_mcp_tool_listing() -> Result<()> {
     // Check for key tools (now Lua-defined + session tools)
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(tool_names.contains(&"list_rooms"), "Missing list_rooms");
-    assert!(tool_names.contains(&"rows"), "Missing rows (replaces get_history)");
+    assert!(
+        tool_names.contains(&"rows"),
+        "Missing rows (replaces get_history)"
+    );
     assert!(tool_names.contains(&"say"), "Missing say");
     assert!(tool_names.contains(&"list_models"), "Missing list_models");
     assert!(tool_names.contains(&"create_room"), "Missing create_room");
-    assert!(tool_names.contains(&"identify"), "Missing identify (session tool)");
-    assert!(tool_names.contains(&"whoami"), "Missing whoami (session tool)");
+    assert!(
+        tool_names.contains(&"identify"),
+        "Missing identify (session tool)"
+    );
+    assert!(
+        tool_names.contains(&"whoami"),
+        "Missing whoami (session tool)"
+    );
 
     manager.remove("sshwarma");
     Ok(())
@@ -612,9 +621,11 @@ async fn test_sshwarma_mcp_error_cases() -> Result<()> {
             }),
         )
         .await?;
-    assert!(result.content.to_lowercase().contains("error") ||
-            result.content.to_lowercase().contains("not found") ||
-            result.content.to_lowercase().contains("does not exist"));
+    assert!(
+        result.content.to_lowercase().contains("error")
+            || result.content.to_lowercase().contains("not found")
+            || result.content.to_lowercase().contains("does not exist")
+    );
 
     // Create room with invalid name
     let result = manager
@@ -626,9 +637,11 @@ async fn test_sshwarma_mcp_error_cases() -> Result<()> {
         )
         .await?;
     // Lua tool returns error about valid characters
-    assert!(result.content.to_lowercase().contains("error") ||
-            result.content.to_lowercase().contains("invalid") ||
-            result.content.to_lowercase().contains("alphanumeric"));
+    assert!(
+        result.content.to_lowercase().contains("error")
+            || result.content.to_lowercase().contains("invalid")
+            || result.content.to_lowercase().contains("alphanumeric")
+    );
 
     manager.remove("sshwarma");
     Ok(())
@@ -867,10 +880,7 @@ async fn test_sshwarma_mcp_fork_copies_equipment() -> Result<()> {
 
     // Verify original has the tools
     let result = manager
-        .call_tool(
-            "inventory_list",
-            serde_json::json!({"room": "original"}),
-        )
+        .call_tool("inventory_list", serde_json::json!({"room": "original"}))
         .await?;
     assert!(result.content.contains("sshwarma:look"));
     assert!(result.content.contains("sshwarma:say"));
@@ -890,10 +900,7 @@ async fn test_sshwarma_mcp_fork_copies_equipment() -> Result<()> {
 
     // Verify forked room has the equipment copied
     let result = manager
-        .call_tool(
-            "inventory_list",
-            serde_json::json!({"room": "forked"}),
-        )
+        .call_tool("inventory_list", serde_json::json!({"room": "forked"}))
         .await?;
     assert!(
         result.content.contains("sshwarma:look") || result.content.contains("Inventory"),
@@ -940,10 +947,7 @@ async fn test_sshwarma_mcp_equip_wildcards() -> Result<()> {
 
     // Verify multiple tools are equipped
     let result = manager
-        .call_tool(
-            "inventory_list",
-            serde_json::json!({"room": "wildcards"}),
-        )
+        .call_tool("inventory_list", serde_json::json!({"room": "wildcards"}))
         .await?;
     // Should have multiple sshwarma tools
     assert!(result.content.contains("sshwarma:look"));

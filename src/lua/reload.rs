@@ -10,20 +10,11 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone)]
 pub enum LuaReloadEvent {
     /// A module file was created
-    ModuleCreated {
-        module_name: String,
-        path: PathBuf,
-    },
+    ModuleCreated { module_name: String, path: PathBuf },
     /// A module file was modified
-    ModuleChanged {
-        module_name: String,
-        path: PathBuf,
-    },
+    ModuleChanged { module_name: String, path: PathBuf },
     /// A module file was deleted
-    ModuleDeleted {
-        module_name: String,
-        path: PathBuf,
-    },
+    ModuleDeleted { module_name: String, path: PathBuf },
 }
 
 impl LuaReloadEvent {

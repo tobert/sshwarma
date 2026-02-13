@@ -226,7 +226,12 @@ impl LuaToolState {
     pub fn current_agent_name(&self) -> Option<String> {
         let agent_id = self.session_context()?.agent_id.clone();
         let shared = self.shared_state()?;
-        shared.db.get_agent(&agent_id).ok().flatten().map(|a| a.name)
+        shared
+            .db
+            .get_agent(&agent_id)
+            .ok()
+            .flatten()
+            .map(|a| a.name)
     }
 
     /// Get a clone of the session context if set
@@ -709,12 +714,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             row.set("row_id", db_row.id.clone())?;
                             row.set("parent_row_id", db_row.parent_row_id.clone())?;
                             row.set("collapsed", db_row.collapsed)?;
-                            row.set(
-                                "is_model",
-                                db_row.content_method == "message.model",
-                            )?;
+                            row.set("is_model", db_row.content_method == "message.model")?;
                             row.set("is_thinking", false)?;
-                            row.set("is_streaming", db_row.content_method == "message.model.chunk")?;
+                            row.set(
+                                "is_streaming",
+                                db_row.content_method == "message.model.chunk",
+                            )?;
                             row.set("is_tool_call", is_tool_call)?;
                             row.set("is_tool_result", is_tool_result)?;
 
@@ -724,7 +729,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                                 row.set("content", format!("calling {}...", text))?;
                                 // Extract args from content_meta
                                 if let Some(ref meta) = db_row.content_meta {
-                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(meta) {
+                                    if let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(meta)
+                                    {
                                         if let Some(args) = parsed.get("input") {
                                             row.set("tool_args", args.to_string())?;
                                         }
@@ -734,12 +741,17 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                                 // For tool results, extract tool name and success from meta
                                 row.set("content", text)?;
                                 if let Some(ref meta) = db_row.content_meta {
-                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(meta) {
+                                    if let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(meta)
+                                    {
                                         if let Some(tool) = parsed.get("tool") {
                                             row.set("tool_name", tool.as_str().unwrap_or(""))?;
                                         }
                                         if let Some(success) = parsed.get("success") {
-                                            row.set("tool_success", success.as_bool().unwrap_or(true))?;
+                                            row.set(
+                                                "tool_success",
+                                                success.as_bool().unwrap_or(true),
+                                            )?;
                                         }
                                     }
                                 }
@@ -1011,9 +1023,8 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // - Private Use Area (powerline glyphs) -> 1
     // - Grapheme clusters (emoji with skin tones, ZWJ sequences)
     // - East Asian wide characters -> 2
-    let display_width_fn = lua.create_function(|_, text: String| {
-        Ok(unicode_display_width::width(&text))
-    })?;
+    let display_width_fn =
+        lua.create_function(|_, text: String| Ok(unicode_display_width::width(&text)))?;
     tools.set("display_width", display_width_fn)?;
 
     // tools.estimate_tokens(text) -> int
@@ -1431,8 +1442,8 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // execute_thing(thing_id, args) -> result table
     // Loads and executes the thing's Lua code with the given args
     // Note: For now, this returns an error; use execute_code instead
-    let execute_thing_fn =
-        lua.create_function(move |lua, (_thing_id, _args): (String, Value)| -> mlua::Result<Value> {
+    let execute_thing_fn = lua.create_function(
+        move |lua, (_thing_id, _args): (String, Value)| -> mlua::Result<Value> {
             let result = lua.create_table()?;
             result.set("success", false)?;
             result.set(
@@ -1440,7 +1451,8 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 "execute_thing requires code passed as argument; use execute_code instead",
             )?;
             Ok(Value::Table(result))
-        })?;
+        },
+    )?;
     tools.set("execute_thing", execute_thing_fn)?;
 
     // execute_code(code, args) -> result
@@ -1972,36 +1984,38 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // slot_filter: nil=all, ""=NULL slot only, "hook:wrap"=specific slot
     let get_room_equipment_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, (room_id, slot_filter): (String, Option<String>)| {
-            let shared = match state.shared_state() {
-                Some(s) => s,
-                None => return lua.create_table(),
-            };
+        lua.create_function(
+            move |lua, (room_id, slot_filter): (String, Option<String>)| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return lua.create_table(),
+                };
 
-            let equipment = shared
-                .db
-                .get_room_equipment(&room_id, slot_filter.as_deref())
-                .unwrap_or_default();
+                let equipment = shared
+                    .db
+                    .get_room_equipment(&room_id, slot_filter.as_deref())
+                    .unwrap_or_default();
 
-            let result = lua.create_table()?;
-            for (i, item) in equipment.iter().enumerate() {
-                let t = lua.create_table()?;
-                t.set("equip_id", item.equip_id.clone())?;
-                t.set("room_id", item.room_id.clone())?;
-                t.set("thing_id", item.thing.id.clone())?;
-                t.set("slot", item.slot.clone())?;
-                t.set("config", item.config.clone())?;
-                t.set("priority", item.priority)?;
-                t.set("name", item.thing.name.clone())?;
-                t.set("qualified_name", item.thing.qualified_name.clone())?;
-                t.set("description", item.thing.description.clone())?;
-                t.set("code", item.thing.code.clone())?;
-                t.set("default_slot", item.thing.default_slot.clone())?;
-                t.set("available", item.thing.available)?;
-                result.set(i + 1, t)?;
-            }
-            Ok(result)
-        })?
+                let result = lua.create_table()?;
+                for (i, item) in equipment.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("equip_id", item.equip_id.clone())?;
+                    t.set("room_id", item.room_id.clone())?;
+                    t.set("thing_id", item.thing.id.clone())?;
+                    t.set("slot", item.slot.clone())?;
+                    t.set("config", item.config.clone())?;
+                    t.set("priority", item.priority)?;
+                    t.set("name", item.thing.name.clone())?;
+                    t.set("qualified_name", item.thing.qualified_name.clone())?;
+                    t.set("description", item.thing.description.clone())?;
+                    t.set("code", item.thing.code.clone())?;
+                    t.set("default_slot", item.thing.default_slot.clone())?;
+                    t.set("available", item.thing.available)?;
+                    result.set(i + 1, t)?;
+                }
+                Ok(result)
+            },
+        )?
     };
     tools.set("get_room_equipment", get_room_equipment_fn)?;
 
@@ -2009,36 +2023,38 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // slot_filter: nil=all, ""=NULL slot only, "command:fish"=specific slot
     let get_agent_equipment_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, (agent_id, slot_filter): (String, Option<String>)| {
-            let shared = match state.shared_state() {
-                Some(s) => s,
-                None => return lua.create_table(),
-            };
+        lua.create_function(
+            move |lua, (agent_id, slot_filter): (String, Option<String>)| {
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => return lua.create_table(),
+                };
 
-            let equipment = shared
-                .db
-                .get_agent_equipment(&agent_id, slot_filter.as_deref())
-                .unwrap_or_default();
+                let equipment = shared
+                    .db
+                    .get_agent_equipment(&agent_id, slot_filter.as_deref())
+                    .unwrap_or_default();
 
-            let result = lua.create_table()?;
-            for (i, item) in equipment.iter().enumerate() {
-                let t = lua.create_table()?;
-                t.set("equip_id", item.equip_id.clone())?;
-                t.set("agent_id", item.agent_id.clone())?;
-                t.set("thing_id", item.thing.id.clone())?;
-                t.set("slot", item.slot.clone())?;
-                t.set("config", item.config.clone())?;
-                t.set("priority", item.priority)?;
-                t.set("name", item.thing.name.clone())?;
-                t.set("qualified_name", item.thing.qualified_name.clone())?;
-                t.set("description", item.thing.description.clone())?;
-                t.set("code", item.thing.code.clone())?;
-                t.set("default_slot", item.thing.default_slot.clone())?;
-                t.set("available", item.thing.available)?;
-                result.set(i + 1, t)?;
-            }
-            Ok(result)
-        })?
+                let result = lua.create_table()?;
+                for (i, item) in equipment.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("equip_id", item.equip_id.clone())?;
+                    t.set("agent_id", item.agent_id.clone())?;
+                    t.set("thing_id", item.thing.id.clone())?;
+                    t.set("slot", item.slot.clone())?;
+                    t.set("config", item.config.clone())?;
+                    t.set("priority", item.priority)?;
+                    t.set("name", item.thing.name.clone())?;
+                    t.set("qualified_name", item.thing.qualified_name.clone())?;
+                    t.set("description", item.thing.description.clone())?;
+                    t.set("code", item.thing.code.clone())?;
+                    t.set("default_slot", item.thing.default_slot.clone())?;
+                    t.set("available", item.thing.available)?;
+                    result.set(i + 1, t)?;
+                }
+                Ok(result)
+            },
+        )?
     };
     tools.set("get_agent_equipment", get_agent_equipment_fn)?;
 
@@ -2104,7 +2120,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up current room name from room_id
-            let current_room_name = session.room_id.as_ref()
+            let current_room_name = session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name);
 
@@ -2119,8 +2137,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             }) {
                 Ok(room_summary) => {
                     // Look up room_id from room_name
-                    let room_id = shared.db.get_room_by_name(&room_name)
-                        .ok().flatten().map(|r| r.id);
+                    let room_id = shared
+                        .db
+                        .get_room_by_name(&room_name)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.id);
 
                     // Update session context with new room
                     state.set_session_context(Some(crate::lua::SessionContext {
@@ -2197,7 +2219,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 };
 
                 // Look up current room name from room_id
-                let current_room_name = session.room_id.as_ref()
+                let current_room_name = session
+                    .room_id
+                    .as_ref()
                     .and_then(|id| shared.db.get_room(id).ok().flatten())
                     .map(|r| r.name);
 
@@ -2212,8 +2236,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 }) {
                     Ok(room_summary) => {
                         // Look up room_id from room_name
-                        let room_id = shared.db.get_room_by_name(&room_name)
-                            .ok().flatten().map(|r| r.id);
+                        let room_id = shared
+                            .db
+                            .get_room_by_name(&room_name)
+                            .ok()
+                            .flatten()
+                            .map(|r| r.id);
 
                         // Update session context with new room (create auto-joins)
                         state.set_session_context(Some(crate::lua::SessionContext {
@@ -2274,7 +2302,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -2350,7 +2380,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -2373,8 +2405,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             }) {
                 Ok(room_summary) => {
                     // Look up room_id from room_name
-                    let room_id = shared.db.get_room_by_name(&room_summary.name)
-                        .ok().flatten().map(|r| r.id);
+                    let room_id = shared
+                        .db
+                        .get_room_by_name(&room_summary.name)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.id);
 
                     // Update session context with new room
                     state.set_session_context(Some(crate::lua::SessionContext {
@@ -2406,9 +2442,10 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     tools.set("go", go_fn)?;
 
     // tools.dig(direction, target_room, bidirectional?) -> {success, reverse, error}
-    let dig_fn = {
-        let state = state.clone();
-        lua.create_function(
+    let dig_fn =
+        {
+            let state = state.clone();
+            lua.create_function(
             move |lua, (direction, target_room, _bidirectional): (String, String, Option<bool>)| {
                 let result = lua.create_table()?;
 
@@ -2465,7 +2502,7 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 Ok(result)
             },
         )?
-    };
+        };
     tools.set("dig", dig_fn)?;
 
     // tools.fork(new_name) -> {success, room, error}
@@ -2503,7 +2540,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -2526,8 +2565,12 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             }) {
                 Ok(room_summary) => {
                     // Look up room_id from new room name
-                    let room_id = shared.db.get_room_by_name(&new_name)
-                        .ok().flatten().map(|r| r.id);
+                    let room_id = shared
+                        .db
+                        .get_room_by_name(&new_name)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.id);
 
                     // Update session context with new room (fork auto-joins)
                     state.set_session_context(Some(crate::lua::SessionContext {
@@ -2577,8 +2620,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Get room_id - use session room_id or look up lobby's ID
             let context_id = session.room_id.clone().unwrap_or_else(|| {
-                shared.db.get_room_by_name("lobby")
-                    .ok().flatten()
+                shared
+                    .db
+                    .get_room_by_name("lobby")
+                    .ok()
+                    .flatten()
                     .map(|r| r.id)
                     .unwrap_or_else(|| "lobby".to_string())
             });
@@ -2648,8 +2694,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Get room_id - use session room_id or look up lobby's ID
             let context_id = session.room_id.clone().unwrap_or_else(|| {
-                shared.db.get_room_by_name("lobby")
-                    .ok().flatten()
+                shared
+                    .db
+                    .get_room_by_name("lobby")
+                    .ok()
+                    .flatten()
                     .map(|r| r.id)
                     .unwrap_or_else(|| "lobby".to_string())
             });
@@ -2674,11 +2723,18 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 .db
                 .get_room_equipment(&context_id, None)
                 .ok()
-                .and_then(|eq| eq.iter().map(|e| e.priority).max_by(|a, b| a.partial_cmp(b).unwrap()))
+                .and_then(|eq| {
+                    eq.iter()
+                        .map(|e| e.priority)
+                        .max_by(|a, b| a.partial_cmp(b).unwrap())
+                })
                 .unwrap_or(0.0);
             let priority = max_priority + 1.0;
 
-            match shared.db.room_equip(&context_id, &thing.id, None, None, priority) {
+            match shared
+                .db
+                .room_equip(&context_id, &thing.id, None, None, priority)
+            {
                 Ok(_) => {
                     result.set("success", true)?;
                     let added_table = lua.create_table()?;
@@ -2732,8 +2788,11 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             // Get room_id - use session room_id or look up lobby's ID
             let context_id = session.room_id.clone().unwrap_or_else(|| {
-                shared.db.get_room_by_name("lobby")
-                    .ok().flatten()
+                shared
+                    .db
+                    .get_room_by_name("lobby")
+                    .ok()
+                    .flatten()
                     .map(|r| r.id)
                     .unwrap_or_else(|| "lobby".to_string())
             });
@@ -2805,7 +2864,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -2871,7 +2932,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -2909,85 +2972,89 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // Triggers an @mention flow: creates message rows and spawns model response task
     let trigger_mention_fn = {
         let state = state.clone();
-        lua.create_function(move |lua, (model_name, message, room): (String, String, String)| {
-            let result = lua.create_table()?;
+        lua.create_function(
+            move |lua, (model_name, message, room): (String, String, String)| {
+                let result = lua.create_table()?;
 
-            let shared = match state.shared_state() {
-                Some(s) => s,
-                None => {
-                    result.set("error", "No shared state available")?;
-                    return Ok(result);
+                let shared = match state.shared_state() {
+                    Some(s) => s,
+                    None => {
+                        result.set("error", "No shared state available")?;
+                        return Ok(result);
+                    }
+                };
+
+                // Create a simple session adapter for MentionSession trait
+                struct LuaMentionSession {
+                    agent_id: String,
+                    username: String,
+                    room: String,
                 }
-            };
-
-            // Create a simple session adapter for MentionSession trait
-            struct LuaMentionSession {
-                agent_id: String,
-                username: String,
-                room: String,
-            }
-            impl crate::ops::MentionSession for LuaMentionSession {
-                fn agent_id(&self) -> &str {
-                    &self.agent_id
+                impl crate::ops::MentionSession for LuaMentionSession {
+                    fn agent_id(&self) -> &str {
+                        &self.agent_id
+                    }
+                    fn username(&self) -> &str {
+                        &self.username
+                    }
+                    fn current_room(&self) -> Option<String> {
+                        Some(self.room.clone())
+                    }
                 }
-                fn username(&self) -> &str {
-                    &self.username
+
+                // Get agent info from session context or default to "claude"
+                let username = state
+                    .current_agent_name()
+                    .unwrap_or_else(|| "claude".to_string());
+                let agent = match shared.db.get_or_create_human_agent(&username) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        result.set("error", format!("Failed to get agent: {}", e))?;
+                        return Ok(result);
+                    }
+                };
+
+                let session = LuaMentionSession {
+                    agent_id: agent.id,
+                    username: username.clone(),
+                    room: room.clone(),
+                };
+
+                // Call ops::handle_mention_create_rows synchronously
+                let rt = tokio::runtime::Handle::current();
+                let mention_result = rt.block_on(async {
+                    crate::ops::handle_mention_create_rows(&shared, &session, &model_name, &message)
+                        .await
+                });
+
+                match mention_result {
+                    Ok((mention, model)) => {
+                        // Spawn the model response (fire and forget - no update channel)
+                        let config = crate::ops::ModelResponseConfig {
+                            model,
+                            message: message.clone(),
+                            username,
+                            room_name: Some(room),
+                            placeholder_row_id: Some(mention.response_row_id.clone()),
+                        };
+
+                        // Spawn without Lua runtime or update channel (MCP fire-and-forget)
+                        let shared_clone = shared.clone();
+                        let _ = rt.block_on(async {
+                            crate::ops::spawn_model_response(shared_clone, config, None, None).await
+                        });
+
+                        result.set("message_row_id", mention.message_row_id)?;
+                        result.set("response_row_id", mention.response_row_id)?;
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        result.set("error", e.to_string())?;
+                        Ok(result)
+                    }
                 }
-                fn current_room(&self) -> Option<String> {
-                    Some(self.room.clone())
-                }
-            }
-
-            // Get agent info from session context or default to "claude"
-            let username = state.current_agent_name().unwrap_or_else(|| "claude".to_string());
-            let agent = match shared.db.get_or_create_human_agent(&username) {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("error", format!("Failed to get agent: {}", e))?;
-                    return Ok(result);
-                }
-            };
-
-            let session = LuaMentionSession {
-                agent_id: agent.id,
-                username: username.clone(),
-                room: room.clone(),
-            };
-
-            // Call ops::handle_mention_create_rows synchronously
-            let rt = tokio::runtime::Handle::current();
-            let mention_result = rt.block_on(async {
-                crate::ops::handle_mention_create_rows(&shared, &session, &model_name, &message)
-                    .await
-            });
-
-            match mention_result {
-                Ok((mention, model)) => {
-                    // Spawn the model response (fire and forget - no update channel)
-                    let config = crate::ops::ModelResponseConfig {
-                        model,
-                        message: message.clone(),
-                        username,
-                        room_name: Some(room),
-                        placeholder_row_id: Some(mention.response_row_id.clone()),
-                    };
-
-                    // Spawn without Lua runtime or update channel (MCP fire-and-forget)
-                    let shared_clone = shared.clone();
-                    let _ = rt.block_on(async {
-                        crate::ops::spawn_model_response(shared_clone, config, None, None).await
-                    });
-
-                    result.set("message_row_id", mention.message_row_id)?;
-                    result.set("response_row_id", mention.response_row_id)?;
-                    Ok(result)
-                }
-                Err(e) => {
-                    result.set("error", e.to_string())?;
-                    Ok(result)
-                }
-            }
-        })?
+            },
+        )?
     };
     tools.set("trigger_mention", trigger_mention_fn)?;
 
@@ -3090,7 +3157,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -3151,7 +3220,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -3205,7 +3276,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -3250,7 +3323,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -3282,7 +3357,9 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
 
             if let (Some(shared), Some(session)) = (state.shared_state(), state.session_context()) {
                 // Look up room name from room_id
-                let room_name = session.room_id.as_ref()
+                let room_name = session
+                    .room_id
+                    .as_ref()
                     .and_then(|id| shared.db.get_room(id).ok().flatten())
                     .map(|r| r.name);
                 if let Some(ref rn) = room_name {
@@ -3585,7 +3662,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let db_append_row_fn = {
         let state = state.clone();
         lua.create_function(
-            move |_lua, (buffer_id, agent_id, content, is_tool): (String, String, String, Option<bool>)| {
+            move |_lua,
+                  (buffer_id, agent_id, content, is_tool): (
+                String,
+                String,
+                String,
+                Option<bool>,
+            )| {
                 let shared = match state.shared_state() {
                     Some(s) => s,
                     None => return Ok(Value::Nil),
@@ -3627,73 +3710,71 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     // tools.db_create_room(name, description?) -> {success, error}
     let db_create_room_fn = {
         let state = state.clone();
-        lua.create_function(
-            move |lua, (name, description): (String, Option<String>)| {
-                let result = lua.create_table()?;
+        lua.create_function(move |lua, (name, description): (String, Option<String>)| {
+            let result = lua.create_table()?;
 
-                let shared = match state.shared_state() {
-                    Some(s) => s,
-                    None => {
-                        result.set("success", false)?;
-                        result.set("error", "no shared state")?;
-                        return Ok(result);
-                    }
-                };
-
-                // Validate name
-                if !name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
+            let shared = match state.shared_state() {
+                Some(s) => s,
+                None => {
                     result.set("success", false)?;
-                    result.set(
-                        "error",
-                        "Room name can only contain letters, numbers, dashes, and underscores",
-                    )?;
+                    result.set("error", "no shared state")?;
                     return Ok(result);
                 }
+            };
 
-                // Check if room already exists
-                match shared.db.get_room_by_name(&name) {
-                    Ok(Some(_)) => {
-                        result.set("success", false)?;
-                        result.set("error", format!("Room '{}' already exists", name))?;
-                        return Ok(result);
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        result.set("success", false)?;
-                        result.set("error", e.to_string())?;
-                        return Ok(result);
-                    }
+            // Validate name
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                result.set("success", false)?;
+                result.set(
+                    "error",
+                    "Room name can only contain letters, numbers, dashes, and underscores",
+                )?;
+                return Ok(result);
+            }
+
+            // Check if room already exists
+            match shared.db.get_room_by_name(&name) {
+                Ok(Some(_)) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Room '{}' already exists", name))?;
+                    return Ok(result);
                 }
+                Ok(None) => {}
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+            }
 
-                // Create room in DB
-                match shared.db.create_room(&name, description.as_deref()) {
-                    Ok(()) => {
-                        // Also create in memory
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                let mut world = shared.world.write().await;
-                                world.create_room(name.clone());
-                                if let Some(room) = world.get_room_mut(&name) {
-                                    room.description = description.clone();
-                                }
-                            });
+            // Create room in DB
+            match shared.db.create_room(&name, description.as_deref()) {
+                Ok(()) => {
+                    // Also create in memory
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            let mut world = shared.world.write().await;
+                            world.create_room(name.clone());
+                            if let Some(room) = world.get_room_mut(&name) {
+                                room.description = description.clone();
+                            }
                         });
+                    });
 
-                        result.set("success", true)?;
-                        result.set("room", name)?;
-                    }
-                    Err(e) => {
-                        result.set("success", false)?;
-                        result.set("error", e.to_string())?;
-                    }
+                    result.set("success", true)?;
+                    result.set("room", name)?;
                 }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                }
+            }
 
-                Ok(result)
-            },
-        )?
+            Ok(result)
+        })?
     };
     tools.set("db_create_room", db_create_room_fn)?;
 
@@ -3757,7 +3838,13 @@ pub fn register_tools(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
     let db_add_exit_fn = {
         let state = state.clone();
         lua.create_function(
-            move |lua, (room, direction, target, bidirectional): (String, String, String, Option<bool>)| {
+            move |lua,
+                  (room, direction, target, bidirectional): (
+                String,
+                String,
+                String,
+                Option<bool>,
+            )| {
                 let result = lua.create_table()?;
                 let bidirectional = bidirectional.unwrap_or(true);
 
@@ -4200,7 +4287,9 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             ctx = ctx.with_user(agent.name);
                         }
                         // Look up room name from room_id
-                        if let Some(room) = sess.room_id.as_ref()
+                        if let Some(room) = sess
+                            .room_id
+                            .as_ref()
                             .and_then(|id| shared.db.get_room(id).ok().flatten())
                         {
                             ctx = ctx.with_room(room.name);
@@ -4214,10 +4303,12 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                             .map_err(|e| mlua::Error::external(format!("db error: {}", e)))?,
                     );
                     // Look up username and room from session if we have db
-                    let username = session.as_ref()
+                    let username = session
+                        .as_ref()
                         .and_then(|s| db.get_agent(&s.agent_id).ok().flatten())
                         .map(|a| a.name);
-                    let room = session.as_ref()
+                    let room = session
+                        .as_ref()
                         .and_then(|s| s.room_id.as_ref())
                         .and_then(|id| db.get_room(id).ok().flatten())
                         .map(|r| r.name);
@@ -4292,7 +4383,10 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 None => return Ok((None::<String>, Some("agent not found".to_string()))),
             };
 
-            match shared.db.get_current_script(ScriptScope::User, Some(&agent_name), &module_path) {
+            match shared
+                .db
+                .get_current_script(ScriptScope::User, Some(&agent_name), &module_path)
+            {
                 Ok(Some(script)) => Ok((Some(script.code), None::<String>)),
                 Ok(None) => Ok((None::<String>, None::<String>)),
                 Err(e) => Ok((None::<String>, Some(e.to_string()))),
@@ -4314,7 +4408,9 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
             };
 
             // Look up room name from room_id
-            let room_name = match session.room_id.as_ref()
+            let room_name = match session
+                .room_id
+                .as_ref()
                 .and_then(|id| shared.db.get_room(id).ok().flatten())
                 .map(|r| r.name)
             {
@@ -4322,7 +4418,10 @@ pub fn register_sshwarma_call(lua: &Lua, state: LuaToolState) -> LuaResult<()> {
                 None => return Ok((None::<String>, None::<String>)), // Not in a room, graceful nil
             };
 
-            match shared.db.get_current_script(ScriptScope::Room, Some(&room_name), &module_path) {
+            match shared
+                .db
+                .get_current_script(ScriptScope::Room, Some(&room_name), &module_path)
+            {
                 Ok(Some(script)) => Ok((Some(script.code), None::<String>)),
                 Ok(None) => Ok((None::<String>, None::<String>)),
                 Err(e) => Ok((None::<String>, Some(e.to_string()))),
@@ -4441,7 +4540,9 @@ mod tests {
             let model = self.models.get("test").cloned();
             let room_id = self.db.get_room_by_name(room).ok().flatten().map(|r| r.id);
             // Get or create agent for test user
-            let agent_id = self.db.get_or_create_human_agent("testuser")
+            let agent_id = self
+                .db
+                .get_or_create_human_agent("testuser")
                 .map(|a| a.id)
                 .unwrap_or_else(|_| "testuser".to_string());
             SessionContext {
@@ -4925,7 +5026,7 @@ mod tests {
 
         // Create Lua runtime with tools
         let lua = Lua::new();
-        let state = instance.lua_tool_state("testroom");  // Use the room we created
+        let state = instance.lua_tool_state("testroom"); // Use the room we created
         register_tools(&lua, state.clone()).expect("should register tools");
 
         // Register sshwarma.call which includes load_room_script

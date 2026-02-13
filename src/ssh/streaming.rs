@@ -101,11 +101,7 @@ pub async fn push_updates_task(
             } => {
                 // Create a proper tool.result row linked to the model message
                 let mut result_row = crate::db::rows::Row::tool_result_with_parent(
-                    &buffer_id,
-                    &row_id,
-                    &tool_name,
-                    &summary,
-                    success,
+                    &buffer_id, &row_id, &tool_name, &summary, success,
                 );
                 if let Err(e) = db.append_row(&mut result_row) {
                     tracing::error!("failed to create tool result row: {}", e);
@@ -123,10 +119,8 @@ pub async fn push_updates_task(
                 if let Ok(Some(thinking_row)) = db.get_row(&row_id) {
                     if let Some(content) = thinking_row.content {
                         // Create a new message.model row with the final content
-                        let mut message_row = crate::db::rows::Row::new(
-                            &thinking_row.buffer_id,
-                            "message.model",
-                        );
+                        let mut message_row =
+                            crate::db::rows::Row::new(&thinking_row.buffer_id, "message.model");
                         message_row.source_agent_id = thinking_row.source_agent_id.clone();
                         message_row.content = Some(content);
                         message_row.mutable = false;

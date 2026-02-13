@@ -137,8 +137,8 @@ pub struct AgentEquippedThing {
 /// Convert slot filter to SQL condition
 fn slot_filter_sql(filter: Option<&str>) -> (&'static str, Option<&str>) {
     match filter {
-        None => ("1=1", None), // No filter, match all
-        Some("") => ("e.slot IS NULL", None), // Match NULL slots only
+        None => ("1=1", None),                    // No filter, match all
+        Some("") => ("e.slot IS NULL", None),     // Match NULL slots only
         Some(slot) => ("e.slot = ?", Some(slot)), // Match specific slot
     }
 }
@@ -687,7 +687,13 @@ mod tests {
         // Equip with different slots
         db.room_equip(&room.id, &look.id, None, None, 0.0)?; // General availability (NULL slot)
         db.room_equip(&room.id, &fish.id, Some("command:fish"), None, 0.0)?;
-        db.room_equip(&room.id, &ticker.id, Some("hook:background:ui"), Some(r#"{"interval_ms":1000}"#), 0.0)?;
+        db.room_equip(
+            &room.id,
+            &ticker.id,
+            Some("hook:background:ui"),
+            Some(r#"{"interval_ms":1000}"#),
+            0.0,
+        )?;
         db.room_equip(&room.id, &wrapper.id, Some("hook:wrap"), None, 0.0)?;
 
         // None filter: get all

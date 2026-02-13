@@ -6,7 +6,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rmcp::{
-    ErrorData as McpError,
     model::{
         CallToolRequestParam, CallToolResult, Content, ListToolsResult, PaginatedRequestParam,
         ServerCapabilities, ServerInfo, Tool,
@@ -16,7 +15,7 @@ use rmcp::{
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService,
     },
-    ServerHandler,
+    ErrorData as McpError, ServerHandler,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -110,12 +109,7 @@ impl McpToolRegistry {
     ///
     /// This loads the handler from the per-session Lua runtime:
     /// `require(module_path).handler(params)` or `require(module_path).handler_name(params)`
-    pub fn dispatch(
-        &self,
-        name: &str,
-        params: Value,
-        lua_runtime: &LuaRuntime,
-    ) -> Result<String> {
+    pub fn dispatch(&self, name: &str, params: Value, lua_runtime: &LuaRuntime) -> Result<String> {
         use crate::lua::tools::{json_to_lua, lua_to_json};
 
         let tool = self
@@ -136,13 +130,15 @@ impl McpToolRegistry {
 
         // Get the handler function - use handler_name if specified, otherwise "handler"
         let handler_name = tool.handler_name.as_deref().unwrap_or("handler");
-        let handler: mlua::Function = module
-            .get(handler_name)
-            .with_context(|| format!("Module '{}' does not have a '{}' function", tool.module_path, handler_name))?;
+        let handler: mlua::Function = module.get(handler_name).with_context(|| {
+            format!(
+                "Module '{}' does not have a '{}' function",
+                tool.module_path, handler_name
+            )
+        })?;
 
         // Convert params to Lua
-        let lua_params = json_to_lua(lua, &params)
-            .context("Failed to convert params to Lua")?;
+        let lua_params = json_to_lua(lua, &params).context("Failed to convert params to Lua")?;
 
         // Call the handler
         let result: mlua::Value = handler
@@ -150,8 +146,7 @@ impl McpToolRegistry {
             .with_context(|| format!("Handler '{}' for '{}' failed", handler_name, name))?;
 
         // Convert result back to JSON
-        let json_result = lua_to_json(&result)
-            .context("Failed to convert Lua result to JSON")?;
+        let json_result = lua_to_json(&result).context("Failed to convert Lua result to JSON")?;
 
         // Return as JSON string
         Ok(serde_json::to_string_pretty(&json_result)?)
@@ -175,7 +170,6 @@ pub fn generate_schema<T: schemars::JsonSchema>() -> Arc<JsonObject> {
         Arc::new(JsonObject::new())
     }
 }
-
 
 /// Shared state for the MCP server
 pub struct McpServerState {
@@ -217,11 +211,13 @@ impl McpSession {
             .context("Failed to get or create agent for MCP session")?;
 
         // Create a per-session Lua runtime
-        let lua_runtime = LuaRuntime::new()
-            .context("Failed to create Lua runtime for MCP session")?;
+        let lua_runtime =
+            LuaRuntime::new().context("Failed to create Lua runtime for MCP session")?;
 
         // Set up the shared state in the Lua tool state
-        lua_runtime.tool_state().set_shared_state(Some(shared_state));
+        lua_runtime
+            .tool_state()
+            .set_shared_state(Some(shared_state));
 
         Ok(Self {
             id: session_id,
@@ -280,7 +276,6 @@ pub struct SshwarmaMcpServer {
     session: Arc<RwLock<McpSession>>,
 }
 
-
 /// Parameters for preview_wrap
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PreviewWrapParams {
@@ -294,11 +289,12 @@ pub struct PreviewWrapParams {
     pub username: Option<String>,
 }
 
-
 /// Parameters for identify - set the session's display name
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct IdentifyParams {
-    #[schemars(description = "Display name for this session (e.g., 'claude-code', 'research-agent')")]
+    #[schemars(
+        description = "Display name for this session (e.g., 'claude-code', 'research-agent')"
+    )]
     pub name: String,
     #[schemars(description = "Optional context about this agent's purpose or capabilities")]
     pub context: Option<String>,
@@ -370,7 +366,12 @@ impl SshwarmaMcpServer {
 
         // Look up room_id from room_name
         let room_id = params.room.as_ref().and_then(|name| {
-            self.state.db.get_room_by_name(name).ok().flatten().map(|r| r.id)
+            self.state
+                .db
+                .get_room_by_name(name)
+                .ok()
+                .flatten()
+                .map(|r| r.id)
         });
 
         // Look up agent_id from username
@@ -423,7 +424,11 @@ impl SshwarmaMcpServer {
         if params.name.is_empty() {
             return "Name cannot be empty.".to_string();
         }
-        if !params.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        if !params
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
             return "Name can only contain letters, numbers, dashes, and underscores.".to_string();
         }
 
@@ -444,7 +449,9 @@ impl SshwarmaMcpServer {
         // Build response
         let mut response = format!(
             "Identity updated: {} -> {}\nSession ID: {}",
-            old_name, params.name, &session.id[..8]
+            old_name,
+            params.name,
+            &session.id[..8]
         );
 
         if auto_joined {
@@ -514,15 +521,30 @@ impl ServerHandler for SshwarmaMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         // Start with Lua-registered tools (these replace most Rust tools)
-        let mut tools: Vec<Tool> = self.state.tool_registry.list()
+        let mut tools: Vec<Tool> = self
+            .state
+            .tool_registry
+            .list()
             .into_iter()
             .map(|lua_tool| Tool::new(lua_tool.name, lua_tool.description, lua_tool.schema))
             .collect();
 
         // Add session-specific tools that remain in Rust
-        tools.push(Tool::new("identify", "Set your display name for this session. Auto-joins matching room if it exists.", generate_schema::<IdentifyParams>()));
-        tools.push(Tool::new("whoami", "Get current session identity and status", generate_schema::<WhoamiParams>()));
-        tools.push(Tool::new("preview_wrap", "Preview what context would be composed for an LLM interaction", generate_schema::<PreviewWrapParams>()));
+        tools.push(Tool::new(
+            "identify",
+            "Set your display name for this session. Auto-joins matching room if it exists.",
+            generate_schema::<IdentifyParams>(),
+        ));
+        tools.push(Tool::new(
+            "whoami",
+            "Get current session identity and status",
+            generate_schema::<WhoamiParams>(),
+        ));
+        tools.push(Tool::new(
+            "preview_wrap",
+            "Preview what context would be composed for an LLM interaction",
+            generate_schema::<PreviewWrapParams>(),
+        ));
 
         Ok(ListToolsResult {
             tools,
@@ -537,7 +559,8 @@ impl ServerHandler for SshwarmaMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let name = request.name.as_ref();
-        let params_value = request.arguments
+        let params_value = request
+            .arguments
             .map(Value::Object)
             .unwrap_or(Value::Object(serde_json::Map::new()));
 
@@ -563,7 +586,10 @@ impl ServerHandler for SshwarmaMcpServer {
                 Ok(output) => Ok(CallToolResult::success(vec![Content::text(output)])),
                 Err(e) => {
                     warn!(tool = %name, error = %e, "Lua tool dispatch failed");
-                    Ok(CallToolResult::error(vec![Content::text(format!("Error: {}", e))]))
+                    Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Error: {}",
+                        e
+                    ))]))
                 }
             };
         }
@@ -586,7 +612,12 @@ impl ServerHandler for SshwarmaMcpServer {
                     .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
                 self.preview_wrap(p).await
             }
-            _ => return Err(McpError::invalid_params(format!("Unknown tool: {}", name), None)),
+            _ => {
+                return Err(McpError::invalid_params(
+                    format!("Unknown tool: {}", name),
+                    None,
+                ))
+            }
         };
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
