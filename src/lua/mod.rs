@@ -573,7 +573,16 @@ impl LuaRuntime {
             .exec()
             .map_err(|e| anyhow::anyhow!("failed to load embedded screen script: {}", e))?;
 
-        info!("Lua runtime initialized with embedded scripts");
+        // 128MB memory limit per Lua VM — prevents OOM from runaway scripts
+        lua.set_memory_limit(128 * 1024 * 1024)
+            .map_err(|e| anyhow::anyhow!("failed to set Lua memory limit: {}", e))?;
+
+        // NOTE: sandbox(true) was considered here but breaks hot reload and
+        // reload_embedded() because it freezes package.loaded and global tables.
+        // Luau already strips unsafe libs (io, os, debug, loadfile, dofile),
+        // and memory limit provides the higher-priority OOM protection.
+
+        info!("Lua runtime initialized with embedded scripts (128MB memory limit)");
 
         Ok(Self {
             lua,
