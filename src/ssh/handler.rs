@@ -495,6 +495,13 @@ impl server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // Reject oversized input (4KB max per SSH data frame).
+        // Normal typing and reasonable pastes are well under this limit.
+        if data.len() > 4096 {
+            tracing::warn!("Rejecting oversized input: {} bytes", data.len());
+            return Ok(());
+        }
+
         // Forward raw bytes to Lua for parsing - no fallback, fail visibly
         let Some(ref lua_runtime) = self.lua_runtime else {
             tracing::error!("No Lua runtime available for input handling");
