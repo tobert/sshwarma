@@ -68,8 +68,6 @@ axum = "0.8"
 
 # Rich terminal input
 tui-input = { version = "0.11", default-features = false }
-nucleo-matcher = "0.3"
-
 # Terminal output formatting
 crossterm = "0.28"
 unicode-display-width = "0.3"
