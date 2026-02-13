@@ -71,9 +71,11 @@ pub async fn register_tools(
 ) -> anyhow::Result<usize> {
     let mut count = 0;
 
-    // Helper to check if a tool should be registered (must be equipped)
-    let should_register =
-        |name: &str| -> bool { equipped_tools.contains(&format!("sshwarma:{}", name)) };
+    // Helper to check if a tool should be registered.
+    // If equipped_tools is empty, all tools are registered (backward compatibility).
+    let should_register = |name: &str| -> bool {
+        equipped_tools.is_empty() || equipped_tools.contains(&format!("sshwarma:{}", name))
+    };
 
     // Read-only tools (available if equipped)
     if should_register("look") {
