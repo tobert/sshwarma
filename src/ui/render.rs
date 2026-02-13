@@ -1440,7 +1440,7 @@ mod tests {
         buf.sparkline(0, 0, &[5.0, 5.0, 5.0, 5.0, 5.0], &style);
         // When range is 0, all should be middle bar (index 4 = '▄')
         let c = buf.get(0, 0).unwrap().char;
-        assert!(c >= '▁' && c <= '█', "should be a bar character");
+        assert!(('▁'..='█').contains(&c), "should be a bar character");
 
         // Increasing values
         buf.clear();
@@ -1822,7 +1822,7 @@ mod tests {
         for y in 0..10 {
             for x in 0..100 {
                 let color = colors[((x + y) % colors.len() as u16) as usize];
-                let c = ('A' as u8 + (x % 26) as u8) as char;
+                let c = (b'A' + (x % 26) as u8) as char;
                 buf.set(x, y, c, &Style::new().fg(color));
             }
         }
@@ -1895,7 +1895,7 @@ mod tests {
                 i * 2,
                 20,
                 10,
-                ('0' as u8 + i as u8) as char,
+                (b'0' + i as u8) as char,
                 &Style::new(),
             );
         }
@@ -2302,23 +2302,21 @@ mod tests {
         let mut iter = ansi.chars().peekable();
 
         while let Some(c) = iter.next() {
-            if c == '\x1b' {
-                if iter.next() == Some('[') {
-                    let mut nums = String::new();
-                    while let Some(&c) = iter.peek() {
-                        if c.is_ascii_digit() || c == ';' {
-                            nums.push(iter.next().unwrap());
-                        } else {
-                            break;
-                        }
+            if c == '\x1b' && iter.next() == Some('[') {
+                let mut nums = String::new();
+                while let Some(&c) = iter.peek() {
+                    if c.is_ascii_digit() || c == ';' {
+                        nums.push(iter.next().unwrap());
+                    } else {
+                        break;
                     }
-                    if iter.next() == Some('H') {
-                        // Parse row;col
-                        let parts: Vec<&str> = nums.split(';').collect();
-                        if parts.len() == 2 {
-                            if let (Ok(row), Ok(col)) = (parts[0].parse(), parts[1].parse()) {
-                                positions.push((row, col));
-                            }
+                }
+                if iter.next() == Some('H') {
+                    // Parse row;col
+                    let parts: Vec<&str> = nums.split(';').collect();
+                    if parts.len() == 2 {
+                        if let (Ok(row), Ok(col)) = (parts[0].parse(), parts[1].parse()) {
+                            positions.push((row, col));
                         }
                     }
                 }
@@ -2829,12 +2827,12 @@ mod tests {
     fn test_single_column_buffer() {
         let mut buf = RenderBuffer::new(1, 10);
         for y in 0..10 {
-            buf.set(0, y, ('0' as u8 + y as u8) as char, &Style::new());
+            buf.set(0, y, (b'0' + y as u8) as char, &Style::new());
         }
 
         // Verify each row
         for y in 0..10 {
-            assert_eq!(buf.get(0, y).unwrap().char, ('0' as u8 + y as u8) as char);
+            assert_eq!(buf.get(0, y).unwrap().char, (b'0' + y as u8) as char);
         }
 
         let ansi_at = buf.to_ansi_at(0);
@@ -2859,7 +2857,7 @@ mod tests {
         {
             let mut buf = buffer.lock().unwrap();
             // Simulate what ctx.print(0, 0, "Hello") does via translate
-            let (bx, by) = (ctx.x + 0, ctx.y + 0); // translate(0, 0) -> (0, 5)
+            let (bx, by) = (ctx.x, ctx.y); // translate(0, 0) -> (0, 5)
             buf.print(bx, by, "Hello", &Style::new());
         }
 
@@ -2882,7 +2880,7 @@ mod tests {
         // Draw within bounds (y=0 to y=4) - should work
         {
             let mut buf = buffer.lock().unwrap();
-            buf.print(ctx.x, ctx.y + 0, "Line0", &Style::new()); // y=10 in buffer
+            buf.print(ctx.x, ctx.y, "Line0", &Style::new()); // y=10 in buffer
             buf.print(ctx.x, ctx.y + 4, "Line4", &Style::new()); // y=14 in buffer
         }
 
@@ -2919,14 +2917,14 @@ mod tests {
 
         // Create child context relative to parent at y=2
         // Child should be at absolute y = 5 + 2 = 7
-        let child_x = parent.x + 0;
+        let child_x = parent.x;
         let child_y = parent.y + 2;
         let child = LuaDrawContext::new(buffer.clone(), child_x, child_y, 80, 10);
 
         // Draw at child (0, 0) should appear at buffer y=7
         {
             let mut buf = buffer.lock().unwrap();
-            let (bx, by) = (child.x + 0, child.y + 0);
+            let (bx, by) = (child.x, child.y);
             buf.print(bx, by, "Nested", &Style::new());
         }
 
