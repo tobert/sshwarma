@@ -4,7 +4,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use opentelemetry::KeyValue;
 use rig::agent::{MultiTurnStreamItem, Text};
-use rig::client::{CompletionClient, Nothing, ProviderClient};
+use rig::client::{CompletionClient, Nothing};
 use rig::completion::{Chat, Message, Prompt};
 use rig::message::ToolResultContent;
 use rig::providers::{anthropic, ollama, openai};
@@ -14,7 +14,39 @@ use rmcp::service::ServerSink;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
+use std::time::Duration;
+
 use crate::model::{ModelBackend, ModelHandle};
+
+/// Build a reqwest HTTP client with LLM-appropriate timeouts.
+///
+/// - connect_timeout: 30s — fail fast if the backend is unreachable
+/// - timeout: 300s — per-request ceiling including streaming; generous enough
+///   for long generations but catches truly hung connections
+fn llm_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("failed to build reqwest client")
+}
+
+/// Build an OpenAI client with the shared HTTP client (timeouts).
+/// Extracted to avoid type inference issues with rig's generic builder.
+fn build_openai_client(
+    http: &reqwest::Client,
+    api_key: &str,
+    base_url: Option<&str>,
+) -> Option<openai::Client<reqwest::Client>> {
+    let builder = <openai::Client<reqwest::Client>>::builder()
+        .http_client(http.clone())
+        .api_key(api_key);
+    if let Some(base) = base_url {
+        builder.base_url(base).build().ok()
+    } else {
+        builder.build().ok()
+    }
+}
 
 /// Get or create the LLM request counter
 fn llm_request_counter() -> opentelemetry::metrics::Counter<u64> {
@@ -162,22 +194,31 @@ impl LlmClient {
     /// - ANTHROPIC_API_KEY for Claude models
     /// - OLLAMA_API_BASE_URL for Ollama endpoint (default: http://localhost:11434)
     pub fn new() -> Result<Self> {
+        let http = llm_http_client();
+
         // OpenAI client (optional - only if API key present)
-        let openai = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(|_| openai::Client::from_env());
+        let openai = if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            build_openai_client(&http, &key, std::env::var("OPENAI_BASE_URL").ok().as_deref())
+        } else {
+            None
+        };
 
         // Anthropic client (optional)
-        let anthropic = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|_| anthropic::Client::from_env());
+        let anthropic = std::env::var("ANTHROPIC_API_KEY").ok().and_then(|key| {
+            <anthropic::Client<reqwest::Client>>::builder()
+                .http_client(http.clone())
+                .api_key(key)
+                .build()
+                .ok()
+        });
 
         // Ollama client - default to localhost
         let ollama_endpoint = std::env::var("OLLAMA_API_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
 
         let ollama = Some(
-            ollama::Client::builder()
+            <ollama::Client<reqwest::Client>>::builder()
+                .http_client(http)
                 .api_key(Nothing)
                 .base_url(&ollama_endpoint)
                 .build()
@@ -194,16 +235,25 @@ impl LlmClient {
 
     /// Create a client with a custom Ollama endpoint
     pub fn with_ollama_endpoint(endpoint: &str) -> Result<Self> {
-        let openai = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(|_| openai::Client::from_env());
+        let http = llm_http_client();
 
-        let anthropic = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|_| anthropic::Client::from_env());
+        let openai = if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            build_openai_client(&http, &key, std::env::var("OPENAI_BASE_URL").ok().as_deref())
+        } else {
+            None
+        };
+
+        let anthropic = std::env::var("ANTHROPIC_API_KEY").ok().and_then(|key| {
+            <anthropic::Client<reqwest::Client>>::builder()
+                .http_client(http.clone())
+                .api_key(key)
+                .build()
+                .ok()
+        });
 
         let ollama = Some(
-            ollama::Client::builder()
+            <ollama::Client<reqwest::Client>>::builder()
+                .http_client(http)
                 .api_key(Nothing)
                 .base_url(endpoint)
                 .build()
@@ -276,7 +326,8 @@ impl LlmClient {
                 model: model_id,
             } => {
                 // llama.cpp uses OpenAI-compatible API
-                let client: openai::Client = openai::Client::builder()
+                let client = <openai::Client<reqwest::Client>>::builder()
+                    .http_client(llm_http_client())
                     .api_key("not-needed")
                     .base_url(endpoint)
                     .build()
@@ -855,7 +906,8 @@ impl LlmClient {
                 model: model_id,
             } => {
                 // llama.cpp uses OpenAI-compatible API
-                let client: openai::Client = openai::Client::builder()
+                let client = <openai::Client<reqwest::Client>>::builder()
+                    .http_client(llm_http_client())
                     .api_key("not-needed")
                     .base_url(endpoint)
                     .build()

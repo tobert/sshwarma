@@ -3658,6 +3658,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "rand 0.8.5",
+ "reqwest",
  "rig-core",
  "rmcp",
  "rusqlite",

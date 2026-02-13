@@ -65,6 +65,8 @@ notify = "6"
 
 # HTTP server for MCP
 axum = "0.8"
+# HTTP client (for LLM timeouts — rig uses reqwest internally)
+reqwest = { version = "0.12", default-features = false }
 
 # Rich terminal input
 tui-input = { version = "0.11", default-features = false }
