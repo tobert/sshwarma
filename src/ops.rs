@@ -709,9 +709,14 @@ pub async fn create_room(
         ));
     }
 
-    // Check if exists
+    // DB write first — if we crash after this, there's a room in DB with no
+    // in-memory state, which is fine (it'll be loaded on next startup).
+    // The reverse (in-memory ghost room with no DB row) is worse.
+    state.db.create_room(room_name, None)?;
+
+    // Single write lock: check doesn't exist, leave old room, create, join.
     {
-        let world = state.world.read().await;
+        let mut world = state.world.write().await;
         if world.get_room(room_name).is_some() {
             return Err(anyhow!(
                 "Room '{}' already exists. Use /join {} to enter.",
@@ -719,26 +724,18 @@ pub async fn create_room(
                 room_name
             ));
         }
-    }
 
-    // Leave current room
-    if let Some(current) = current_room {
-        let mut world = state.world.write().await;
-        if let Some(room) = world.get_room_mut(current) {
-            room.remove_user(username);
+        if let Some(current) = current_room {
+            if let Some(room) = world.get_room_mut(current) {
+                room.remove_user(username);
+            }
         }
-    }
 
-    // Create room
-    {
-        let mut world = state.world.write().await;
         world.create_room(room_name.to_string());
         if let Some(room) = world.get_room_mut(room_name) {
             room.add_user(username.to_string());
         }
     }
-
-    state.db.create_room(room_name, None)?;
 
     look(state, room_name).await
 }
