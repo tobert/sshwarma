@@ -651,54 +651,35 @@ pub async fn join(
     current_room: Option<&str>,
     target_room: &str,
 ) -> Result<RoomSummary> {
-    tracing::info!("ops::join: entering, target={}", target_room);
+    // Ensure room buffer exists in database (outside lock)
+    let buffer = state.db.get_or_create_room_buffer(target_room)?;
 
-    // Leave current room if in one
-    if let Some(current) = current_room {
-        tracing::info!("ops::join: leaving current room {}", current);
-        let mut world = state.world.write().await;
-        tracing::info!("ops::join: got write lock for leave");
-        if let Some(room) = world.get_room_mut(current) {
-            room.remove_user(username);
-        }
-    }
-
-    // Check target exists
-    tracing::info!("ops::join: checking target exists");
+    // Single write lock: leave old room, check target exists, join target.
+    // This avoids a TOCTOU race between read-check and write-modify.
     {
-        tracing::info!("ops::join: acquiring read lock");
-        let world = state.world.read().await;
-        tracing::info!("ops::join: got read lock");
-        if world.get_room(target_room).is_none() {
-            return Err(anyhow!(
+        let mut world = state.world.write().await;
+
+        // Leave current room if in one
+        if let Some(current) = current_room {
+            if let Some(room) = world.get_room_mut(current) {
+                room.remove_user(username);
+            }
+        }
+
+        // Check target exists AND join atomically
+        let room = world.get_room_mut(target_room).ok_or_else(|| {
+            anyhow!(
                 "No room named '{}'. Use /create {} to make one.",
                 target_room,
                 target_room
-            ));
-        }
-    }
-    tracing::info!("ops::join: target exists");
-
-    // Ensure room buffer exists in database
-    tracing::info!("ops::join: getting room buffer");
-    let buffer = state.db.get_or_create_room_buffer(target_room)?;
-    tracing::info!("ops::join: got room buffer");
-
-    // Join target room
-    tracing::info!("ops::join: acquiring write lock for join");
-    {
-        let mut world = state.world.write().await;
-        tracing::info!("ops::join: got write lock for join");
-        if let Some(room) = world.get_room_mut(target_room) {
-            room.add_user(username.to_string());
-            // Set buffer ID if not already set
-            if room.buffer_id.is_none() {
-                room.set_buffer_id(buffer.id.clone());
-            }
+            )
+        })?;
+        room.add_user(username.to_string());
+        if room.buffer_id.is_none() {
+            room.set_buffer_id(buffer.id.clone());
         }
     }
 
-    // Return room info
     look(state, target_room).await
 }
 
